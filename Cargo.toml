@@ -1,0 +1,24 @@
+[package]
+name = "marcel"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, preview-first graphical file explorer"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-channel = "2.5"
+gpui = "0.2.2"
+gpui-component = "0.5.1"
+infer = "0.22"
+smol = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
