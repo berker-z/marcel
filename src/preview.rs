@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::fs::{FileEntry, format_size};
+use crate::pdf_preview::inspect_pdf;
 
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
 const MAX_RICH_TEXT_BYTES: usize = 32 * 1024;
@@ -16,6 +17,10 @@ pub enum Preview {
     Image {
         path: PathBuf,
         mime: String,
+    },
+    Pdf {
+        source: PathBuf,
+        pages: usize,
     },
     Text {
         contents: String,
@@ -39,7 +44,10 @@ pub enum PreviewState {
     Error(String),
 }
 
-pub fn load_preview(entry: &FileEntry) -> io::Result<Preview> {
+pub fn load_preview(
+    entry: &FileEntry,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) -> io::Result<Preview> {
     if entry.navigable {
         return Ok(Preview::Metadata {
             summary: format!("{}\n{}", entry.display_kind(), entry.path.display()),
@@ -59,6 +67,14 @@ pub fn load_preview(entry: &FileEntry) -> io::Result<Preview> {
         return Ok(Preview::Image {
             path: entry.path.clone(),
             mime: inferred.unwrap_or_else(|| "image".to_string()),
+        });
+    }
+
+    if inferred.as_deref() == Some("application/pdf") || has_extension(&entry.path, &["pdf"]) {
+        let document = inspect_pdf(&entry.path, cancelled)?;
+        return Ok(Preview::Pdf {
+            source: document.source,
+            pages: document.pages,
         });
     }
 
@@ -209,6 +225,11 @@ mod tests {
         assert!(clipped);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].ends_with(" … [line truncated]"));
+    }
+
+    #[test]
+    fn detects_pdf_extension_case_insensitively() {
+        assert!(has_extension(Path::new("report.PDF"), &["pdf"]));
     }
 
     #[test]

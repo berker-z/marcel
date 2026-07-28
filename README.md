@@ -7,24 +7,30 @@ Rust, GPUI, and gpui-component.
 
 Marcel is a working Linux-first alpha. It currently provides:
 
-- Conventional single-click selection and double-click activation.
+- Conventional plain, Control, Shift, and drag selection with double-click
+  activation.
 - Asynchronous, incremental directory enumeration with virtualized rows.
 - Back, forward, parent, refresh, and Places navigation.
+- Draggable Places/browser/preview splitters with a 2:6:4 default ratio.
 - Places discovered from XDG user directories, with existing conventional
   directories used when no XDG configuration exists.
-- A persistent, flat preview pane for images and animated GIFs, rendered
-  Markdown, source code, plain text, and generic file metadata.
+- A persistent, flat preview pane for images and animated GIFs, continuously
+  scrollable PDFs, rendered Markdown, source code, plain text, and generic file
+  metadata.
 - Bounded text previews: 256 KiB maximum reads, rich rendering below 32 KiB,
-  and a line-virtualized fallback for larger files.
+  and a Unicode-aware, soft-wrapped, line-virtualized fallback for larger
+  files.
 - MIME-default file opening on Linux through `gio`, with the desktop portal as
   a fallback.
+- Native folder and MIME icons resolved from the active freedesktop icon theme.
+- Responsive list and icon views with selection preserved between them.
+- Progressive image thumbnails backed by the standard freedesktop disk cache.
 - A shared palette system for Marcel and gpui-component, with Nord as the
   default.
 
-Sprint 1 remains active. PDF previews, audio/video metadata and play actions,
-multi-selection, interactive breadcrumbs, and the full stress/fixture
-acceptance pass are not implemented yet. General file operations are outside
-the first sprint.
+Sprint 1 remains active. Audio/video metadata and play actions, interactive
+breadcrumbs, and the full stress/fixture acceptance pass are not implemented
+yet. General file operations are outside the first sprint.
 
 ## Development
 
@@ -35,9 +41,17 @@ nix develop
 cargo run
 ```
 
+The first development build compiles third-party dependencies with
+optimizations so image decoding and rendering behave much closer to a release
+build. That one-time build is larger; subsequent Marcel-only rebuilds remain
+incremental.
+
 Marcel opens the directory it was launched from. Click an entry to select and
 preview it; double-click a folder to navigate or a file to open it with the
 configured system application.
+
+PDF pages are rendered by Poppler in cancellable background processes. The Nix
+development shell includes the required `pdfinfo` and `pdftoppm` utilities.
 
 Nord is the default palette. Marcel's own surfaces and gpui-component widgets
 share the same theme, so additional palettes do not require repainting the UI
@@ -51,6 +65,13 @@ MARCEL_THEME=light cargo run
 
 This environment variable is a development-facing switch; an in-app theme
 selector can be added on top of the same theme API later.
+
+On Linux, filesystem icons follow the configured GTK/freedesktop icon theme.
+Override it for development or comparison with:
+
+```sh
+MARCEL_ICON_THEME=breeze cargo run
+```
 
 The shell tracks the latest stable Rust toolchain supplied by the locked
 `nixpkgs` and `rust-overlay` inputs. Update the complete environment
@@ -78,6 +99,9 @@ pane directly rather than being nested in a decorative card.
 
 See [Sprint 1](docs/sprints/001-foundation-and-previews.md) for completed
 deliverables, remaining work, architecture decisions, and acceptance status.
+The proposed [Sprint 2](docs/sprints/002-selection-and-visual-browsing.md)
+defines conventional multi-selection, drag selection, icon view, native icon
+themes, and a progressive thumbnail pipeline.
 
 ## Acknowledgements and provenance
 

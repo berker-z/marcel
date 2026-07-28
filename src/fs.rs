@@ -8,6 +8,8 @@ use std::{
 
 use async_channel::Sender;
 
+use crate::icons::IconProvider;
+
 const DIRECTORY_BATCH_SIZE: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,10 +27,11 @@ pub struct FileEntry {
     pub kind: EntryKind,
     pub navigable: bool,
     pub size: Option<u64>,
+    pub icon_path: Option<PathBuf>,
 }
 
 impl FileEntry {
-    fn from_dir_entry(entry: DirEntry) -> io::Result<Self> {
+    fn from_dir_entry(entry: DirEntry, icons: &mut IconProvider) -> io::Result<Self> {
         let path = entry.path();
         let file_type = entry.file_type()?;
         let kind = if file_type.is_dir() {
@@ -47,14 +50,16 @@ impl FileEntry {
             entry.metadata().ok()
         };
 
+        let navigable =
+            file_type.is_dir() || followed_metadata.as_ref().is_some_and(|meta| meta.is_dir());
         Ok(Self {
             name: entry.file_name().to_string_lossy().into_owned(),
-            navigable: file_type.is_dir()
-                || followed_metadata.as_ref().is_some_and(|meta| meta.is_dir()),
+            navigable,
             size: followed_metadata
                 .as_ref()
                 .filter(|meta| meta.is_file())
                 .map(|meta| meta.len()),
+            icon_path: icons.icon_for(&path, navigable),
             path,
             kind,
         })
@@ -95,12 +100,13 @@ pub fn stream_directory(path: &Path, sender: Sender<DirectoryUpdate>) {
         }
     };
 
+    let mut icons = IconProvider::discover();
     let mut batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
     for entry in reader {
         let Ok(entry) = entry else {
             continue;
         };
-        let Ok(entry) = FileEntry::from_dir_entry(entry) else {
+        let Ok(entry) = FileEntry::from_dir_entry(entry, &mut icons) else {
             continue;
         };
 
@@ -190,6 +196,7 @@ mod tests {
             },
             navigable,
             size: None,
+            icon_path: None,
         }
     }
 

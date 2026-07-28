@@ -1,5 +1,5 @@
 use gpui::{App, Hsla, rgb};
-use gpui_component::{Colorize, Theme, ThemeColor, ThemeMode};
+use gpui_component::{Colorize, Theme, ThemeColor, ThemeMode, scroll::ScrollbarShow};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Palette {
@@ -38,6 +38,7 @@ pub fn apply(palette: Palette, cx: &mut App) {
         Palette::Light => ThemeMode::Light,
     };
     Theme::change(mode, None, cx);
+    Theme::global_mut(cx).scrollbar_show = ScrollbarShow::Always;
 
     if palette == Palette::Nord {
         Theme::global_mut(cx).colors = nord();

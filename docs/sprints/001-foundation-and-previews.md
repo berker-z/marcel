@@ -12,9 +12,11 @@ types.
 ## Deliverables
 
 - [x] A three-pane application shell: places, directory contents, and preview.
+- [x] Draggable pane splitters with a 2:6:4 default ratio and bounded minimum
+  widths.
 - [x] Asynchronous, incremental directory enumeration.
 - [x] Single selection and conventional pointer interaction.
-- [ ] Multi-selection.
+- [x] Multi-selection.
 - [x] Back, forward, parent, and path display navigation.
 - [ ] Interactive breadcrumb segments.
 - [x] Preview request cancellation and stale-result rejection when selection
@@ -22,7 +24,8 @@ types.
 - [x] Image previews, including animated GIFs through GPUI's image pipeline.
 - [x] Plain-text and source-file previews with a 256 KiB limit.
 - [x] Rendered Markdown previews using gpui-component.
-- [ ] PDF previews.
+- [x] Continuously scrollable PDF previews with virtualized pages, bounded
+  rasterization, viewport-first scheduling, and caching.
 - [ ] Media metadata and an explicit play action for audio and video.
 - [x] A generic metadata fallback for unsupported file types.
 - [x] Loading, unsupported, empty, and error states.
@@ -36,9 +39,11 @@ types.
 
 ## Remaining work
 
-- PDF preview provider and fixtures.
+- PDF fixture and rapid-page-change acceptance runs.
+- Ask Berker for the PDF preview resize bug reproduction and expected behavior;
+  a resize problem is known but intentionally left undescribed until they can
+  demonstrate it.
 - Audio/video metadata plus an explicit contextual play action.
-- Multi-selection.
 - Interactive breadcrumb segments.
 - Large-directory, rapid-selection, corrupt-file, and complete preview-fixture
   acceptance runs.
@@ -59,8 +64,15 @@ types.
   the component library's selection and hover treatment.
 - [x] Start with GPUI's built-in image pipeline. Its first-party GIF viewer
   demonstrates animated GIF support without a separate decoder.
-- [ ] Choose between native Rust rendering and Poppler-backed rasterization for
-  the initial PDF provider.
+- [x] Use Poppler-backed rasterization for the initial PDF provider. This
+  follows Yazi's proven `pdftoppm` bridge while avoiding a large native binding
+  in Marcel's process. Marcel renders only the requested page, constrains the
+  raster to an 1800-pixel box, caches by file identity, and kills superseded or
+  timed-out subprocesses.
+- [x] Use GPUI's `uniform_list` for the continuous PDF viewport. There is no PDF
+  viewer in gpui-component, and fixed page canvases let the list report its
+  visible range directly without constructing off-screen page elements. Actual
+  PDF aspect ratios are preserved by fitting each raster within its canvas.
 - [x] Use gpui-component `TextView` for bounded rich previews. A measured freeze
   on a roughly 180 KiB `Cargo.lock` showed that its synchronous initial
   Markdown parse and syntax highlighting are unsuitable for larger payloads,
@@ -84,6 +96,13 @@ types.
   do not move the selection to another file.
 - Preview tasks are replaceable and ticketed. A late preview result cannot
   overwrite the current selection's preview.
+- PDF page count and rasterization run through isolated Poppler subprocesses on
+  the background executor. Outputs are bounded, render work has a 20-second
+  timeout, a replaced request kills its child process, and the cache retains at
+  most 512 page/count files.
+- PDF documents use a virtualized continuous-scroll list. Only visible pages
+  and one page of lookahead are queued through two workers, so document length
+  does not determine startup work or decoded-image pressure.
 - Places discovery runs off the foreground executor, honors `XDG_CONFIG_HOME`,
   omits missing and disabled directories, and never evaluates user-dir values
   as shell code. If no configuration exists, only conventional user
@@ -91,6 +110,9 @@ types.
 - Text reads are capped at 256 KiB. Rich Markdown and syntax rendering is
   limited to 32 KiB; larger payloads use a line-virtualized source view so
   parsing and layout cannot stall the GPUI thread.
+- Large-text soft wrapping is computed on the background executor from the
+  current preview width. Wrapped visual rows retain source-line numbering and
+  remain virtualized.
 - Individual preview lines are bounded before layout, preventing minified or
   generated one-line files from monopolizing a frame.
 - File paths remain `PathBuf`; lossy UTF-8 conversion is limited to display
@@ -120,9 +142,20 @@ types.
 - Added image/GIF, bounded text/source, rendered Markdown, and metadata preview
   paths.
 - Fixed large-text UI stalls with line virtualization and per-line bounds.
+- Added always-visible gpui-component scrollbars to browser and preview lists,
+  plus Unicode-width-aware soft wrapping for the large-text fallback.
+- Added continuously scrollable PDF previews through a cancellable,
+  timeout-bounded Poppler provider, a virtualized page list, visible-first
+  two-worker scheduling, fixed-size JPEG rasterization, and an identity-aware
+  disk cache.
+- Replaced fixed pane widths with draggable gpui-component splitters using a
+  2:6:4 Places/browser/preview default and protective minimum widths.
 - Unified component and application colors under a palette-driven theme.
 - Replaced hard-coded Home/Documents/Downloads entries with asynchronous XDG
   Places discovery.
 - Flattened the preview presentation and removed redundant Preview/Open chrome.
 - Corrected Linux activation for Hyprland and other desktops where `xdg-open`
   can fall through to a browser.
+- Replaced single selection with a path-keyed multi-selection model and added
+  conventional Control, Shift, and empty-space drag selection as the first
+  Sprint 2 slice.
