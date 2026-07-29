@@ -1,12 +1,18 @@
 use std::{
     collections::VecDeque,
     fs,
+    io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context as _, Result, bail};
 
 pub const OPERATION_HISTORY_LIMIT: usize = 100;
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileIdentity {
@@ -22,12 +28,72 @@ pub enum OperationRecord {
         path: PathBuf,
         identity: FileIdentity,
     },
+    Copy {
+        sources: Vec<PathSnapshot>,
+        destination: PathBuf,
+        created: Vec<PathSnapshot>,
+    },
+    Move {
+        transfers: Vec<MoveRecord>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathSnapshot {
+    path: PathBuf,
+    identity: FileIdentity,
+    kind: SnapshotKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotKind {
+    Directory,
+    File,
+    Symlink,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveRecord {
+    source: PathBuf,
+    destination: PathBuf,
+    expected_state: Vec<PathSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferMode {
+    Copy,
+    Move,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferFailure {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug)]
+pub struct TransferOutcome {
+    pub operation: Option<OperationRecord>,
+    pub completed: Vec<PathBuf>,
+    pub failures: Vec<TransferFailure>,
 }
 
 impl OperationRecord {
     pub fn path(&self) -> &Path {
         match self {
             Self::CreateDirectory { path, .. } => path,
+            Self::Copy {
+                destination,
+                created,
+                ..
+            } => created
+                .first()
+                .map(|snapshot| snapshot.path.as_path())
+                .unwrap_or(destination),
+            Self::Move { transfers } => transfers
+                .first()
+                .map(|transfer| transfer.destination.as_path())
+                .unwrap_or_else(|| Path::new("")),
         }
     }
 }
@@ -120,7 +186,7 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<OperationRecord> {
     create_directory_at(parent.join(name))
 }
 
-pub fn undo_operation(operation: &OperationRecord) -> Result<()> {
+pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
     match operation {
         OperationRecord::CreateDirectory { path, identity } => {
             let metadata = fs::symlink_metadata(path)
@@ -140,7 +206,41 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<()> {
             }
             fs::remove_dir(path)
                 .with_context(|| format!("Could not remove “{}”", path.display()))?;
-            Ok(())
+            Ok(operation.clone())
+        }
+        OperationRecord::Copy { created, .. } => {
+            remove_snapshotted_tree(created)?;
+            Ok(operation.clone())
+        }
+        OperationRecord::Move { transfers } => {
+            for transfer in transfers {
+                validate_snapshot_tree(&transfer.expected_state)?;
+                ensure_unoccupied(&transfer.source)?;
+            }
+            let mut undone = Vec::with_capacity(transfers.len());
+            for transfer in transfers.iter().rev() {
+                if let Err(error) = rename_no_replace(&transfer.destination, &transfer.source) {
+                    let rollback_error = rollback_undone_moves(&undone).err();
+                    let message = format!(
+                        "Could not move “{}” back to “{}”: {error}",
+                        transfer.destination.display(),
+                        transfer.source.display()
+                    );
+                    return match rollback_error {
+                        Some(rollback_error) => Err(anyhow::anyhow!(
+                            "{message}; rollback also failed: {rollback_error}"
+                        )),
+                        None => Err(anyhow::anyhow!("{message}; earlier moves were rolled back")),
+                    };
+                }
+                undone.push(MoveRecord {
+                    source: transfer.source.clone(),
+                    destination: transfer.destination.clone(),
+                    expected_state: snapshot_tree(&transfer.source)?,
+                });
+            }
+            undone.reverse();
+            Ok(OperationRecord::Move { transfers: undone })
         }
     }
 }
@@ -148,7 +248,417 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<()> {
 pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
     match operation {
         OperationRecord::CreateDirectory { path, .. } => create_directory_at(path.clone()),
+        OperationRecord::Copy {
+            sources,
+            destination,
+            ..
+        } => {
+            validate_snapshot_tree(sources)?;
+            let source_paths = top_level_paths(sources);
+            let outcome = transfer_paths(
+                &source_paths,
+                destination,
+                TransferMode::Copy,
+                Arc::new(AtomicBool::new(false)),
+            );
+            if !outcome.failures.is_empty() {
+                return rollback_failed_redo(outcome);
+            }
+            outcome
+                .operation
+                .context("Redo did not produce a copy operation")
+        }
+        OperationRecord::Move { transfers } => {
+            for transfer in transfers {
+                validate_snapshot_tree(&transfer.expected_state)?;
+            }
+            let source_paths = transfers
+                .iter()
+                .map(|transfer| transfer.source.clone())
+                .collect::<Vec<_>>();
+            let destination = transfers
+                .first()
+                .and_then(|transfer| transfer.destination.parent())
+                .context("Move record has no destination directory")?;
+            let outcome = transfer_paths(
+                &source_paths,
+                destination,
+                TransferMode::Move,
+                Arc::new(AtomicBool::new(false)),
+            );
+            if !outcome.failures.is_empty() {
+                return rollback_failed_redo(outcome);
+            }
+            outcome
+                .operation
+                .context("Redo did not produce a move operation")
+        }
     }
+}
+
+fn rollback_failed_redo(outcome: TransferOutcome) -> Result<OperationRecord> {
+    let failure = summarize_failures(&outcome.failures);
+    if let Some(partial) = outcome.operation {
+        match undo_operation(&partial) {
+            Ok(_) => bail!("{failure}; completed items were rolled back"),
+            Err(rollback_error) => {
+                bail!("{failure}; rollback also failed: {rollback_error}");
+            }
+        }
+    }
+    bail!("{failure}");
+}
+
+fn rollback_undone_moves(undone: &[MoveRecord]) -> Result<()> {
+    for transfer in undone.iter().rev() {
+        rename_no_replace(&transfer.source, &transfer.destination).with_context(|| {
+            format!(
+                "Could not restore “{}” to “{}”",
+                transfer.source.display(),
+                transfer.destination.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn transfer_paths(
+    sources: &[PathBuf],
+    destination: &Path,
+    mode: TransferMode,
+    cancelled: Arc<AtomicBool>,
+) -> TransferOutcome {
+    // Conceptually follows Yazi's per-item scheduled transfer outcomes,
+    // cooperative cancellation, partial-success accounting, and rename-first
+    // move path. No Yazi code is copied:
+    // https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-scheduler/src/worker.rs
+    // https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-scheduler/src/file/file.rs
+    let mut completed = Vec::new();
+    let mut failures = Vec::new();
+    let mut copied_sources = Vec::new();
+    let mut copied_created = Vec::new();
+    let mut moved = Vec::new();
+
+    for source in sources {
+        if cancelled.load(Ordering::Acquire) {
+            failures.push(TransferFailure {
+                path: source.clone(),
+                message: "Operation cancelled".to_string(),
+            });
+            break;
+        }
+
+        let Some(name) = source.file_name() else {
+            failures.push(TransferFailure {
+                path: source.clone(),
+                message: "Source has no file name".to_string(),
+            });
+            continue;
+        };
+        let target = destination.join(name);
+        let result = match mode {
+            TransferMode::Copy => copy_one(source, &target, &cancelled).map(|(source, created)| {
+                copied_sources.extend(source);
+                copied_created.extend(created);
+            }),
+            TransferMode::Move => move_one(source, &target).map(|record| moved.push(record)),
+        };
+
+        match result {
+            Ok(()) => completed.push(target),
+            Err(error) => failures.push(TransferFailure {
+                path: source.clone(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    let operation = match mode {
+        TransferMode::Copy if !copied_created.is_empty() => Some(OperationRecord::Copy {
+            sources: copied_sources,
+            destination: destination.to_path_buf(),
+            created: copied_created,
+        }),
+        TransferMode::Move if !moved.is_empty() => Some(OperationRecord::Move { transfers: moved }),
+        _ => None,
+    };
+
+    TransferOutcome {
+        operation,
+        completed,
+        failures,
+    }
+}
+
+pub fn summarize_failures(failures: &[TransferFailure]) -> String {
+    match failures {
+        [] => String::new(),
+        [failure] => failure.message.clone(),
+        failures => format!(
+            "{} items failed; first error: {}",
+            failures.len(),
+            failures[0].message
+        ),
+    }
+}
+
+fn copy_one(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(Vec<PathSnapshot>, Vec<PathSnapshot>)> {
+    ensure_unoccupied(destination)?;
+    if source.is_dir() && destination.starts_with(source) {
+        bail!(
+            "Cannot copy “{}” into itself",
+            source.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    let source_state = snapshot_tree(source)?;
+    let staging = staging_path(destination)?;
+    if let Err(error) = copy_entry(source, &staging, cancelled) {
+        cleanup_staging(&staging);
+        return Err(error);
+    }
+    if let Err(error) = rename_no_replace(&staging, destination) {
+        cleanup_staging(&staging);
+        return Err(error).with_context(|| {
+            format!(
+                "Could not publish copy at “{}”; nothing was overwritten",
+                destination.display()
+            )
+        });
+    }
+    let created_state = snapshot_tree(destination)?;
+    Ok((source_state, created_state))
+}
+
+fn copy_entry(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::Acquire) {
+        bail!("Operation cancelled");
+    }
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("Could not inspect “{}”", source.display()))?;
+    let kind = metadata.file_type();
+
+    if kind.is_dir() {
+        fs::create_dir(destination)
+            .with_context(|| format!("Could not create “{}”", destination.display()))?;
+        for entry in fs::read_dir(source)
+            .with_context(|| format!("Could not read “{}”", source.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("Could not read an entry in “{}”", source.display()))?;
+            copy_entry(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                cancelled,
+            )?;
+        }
+        fs::set_permissions(destination, metadata.permissions()).with_context(|| {
+            format!(
+                "Could not preserve permissions on “{}”",
+                destination.display()
+            )
+        })?;
+    } else if kind.is_file() {
+        copy_file_cancellable(source, destination, cancelled)?;
+        fs::set_permissions(destination, metadata.permissions()).with_context(|| {
+            format!(
+                "Could not preserve permissions on “{}”",
+                destination.display()
+            )
+        })?;
+    } else if kind.is_symlink() {
+        let target = fs::read_link(source)
+            .with_context(|| format!("Could not read link “{}”", source.display()))?;
+        std::os::unix::fs::symlink(target, destination)
+            .with_context(|| format!("Could not copy link “{}”", source.display()))?;
+    } else {
+        bail!(
+            "Special files are not supported yet: “{}”",
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+fn copy_file_cancellable(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<()> {
+    let mut input =
+        fs::File::open(source).with_context(|| format!("Could not open “{}”", source.display()))?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .with_context(|| format!("Could not create “{}”", destination.display()))?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            bail!("Operation cancelled");
+        }
+        let read = input
+            .read(&mut buffer)
+            .with_context(|| format!("Could not read “{}”", source.display()))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .with_context(|| format!("Could not write “{}”", destination.display()))?;
+    }
+    output
+        .sync_all()
+        .with_context(|| format!("Could not finish “{}”", destination.display()))
+}
+
+fn move_one(source: &Path, destination: &Path) -> Result<MoveRecord> {
+    ensure_unoccupied(destination)?;
+    if source.is_dir() && destination.starts_with(source) {
+        bail!(
+            "Cannot move “{}” into itself",
+            source.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    rename_no_replace(source, destination).with_context(|| {
+        format!(
+            "Could not move “{}” to “{}”; cross-filesystem moves are not supported yet",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(MoveRecord {
+        source: source.to_path_buf(),
+        destination: destination.to_path_buf(),
+        expected_state: snapshot_tree(destination)?,
+    })
+}
+
+fn staging_path(destination: &Path) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .context("Copy destination has no parent directory")?;
+    for _ in 0..100 {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".marcel-copy-{}-{sequence}", std::process::id()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    bail!("Could not reserve a temporary copy path")
+}
+
+fn cleanup_staging(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        destination,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(Into::into)
+}
+
+fn snapshot_tree(root: &Path) -> Result<Vec<PathSnapshot>> {
+    let mut snapshots = Vec::new();
+    snapshot_entry(root, &mut snapshots)?;
+    Ok(snapshots)
+}
+
+fn snapshot_entry(path: &Path, snapshots: &mut Vec<PathSnapshot>) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Could not inspect “{}”", path.display()))?;
+    let kind = if metadata.file_type().is_dir() {
+        SnapshotKind::Directory
+    } else if metadata.file_type().is_file() {
+        SnapshotKind::File
+    } else if metadata.file_type().is_symlink() {
+        SnapshotKind::Symlink
+    } else {
+        bail!("Special files are not supported yet: “{}”", path.display());
+    };
+    snapshots.push(PathSnapshot {
+        path: path.to_path_buf(),
+        identity: file_identity(&metadata),
+        kind,
+    });
+    if kind == SnapshotKind::Directory {
+        let mut children = fs::read_dir(path)
+            .with_context(|| format!("Could not read “{}”", path.display()))?
+            .collect::<io::Result<Vec<_>>>()
+            .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            snapshot_entry(&child.path(), snapshots)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_tree(snapshots: &[PathSnapshot]) -> Result<()> {
+    for snapshot in snapshots {
+        let metadata = fs::symlink_metadata(&snapshot.path).with_context(|| {
+            format!(
+                "Cannot continue: “{}” no longer exists",
+                snapshot.path.display()
+            )
+        })?;
+        if file_identity(&metadata) != snapshot.identity {
+            bail!(
+                "Cannot continue: “{}” changed or was replaced",
+                snapshot.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn remove_snapshotted_tree(snapshots: &[PathSnapshot]) -> Result<()> {
+    validate_snapshot_tree(snapshots)?;
+    for snapshot in snapshots.iter().rev() {
+        match snapshot.kind {
+            SnapshotKind::Directory => fs::remove_dir(&snapshot.path),
+            SnapshotKind::File | SnapshotKind::Symlink => fs::remove_file(&snapshot.path),
+        }
+        .with_context(|| format!("Could not remove “{}”", snapshot.path.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_unoccupied(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => bail!(
+            "“{}” already exists; nothing was overwritten",
+            path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("Could not inspect destination “{}”", path.display())),
+    }
+}
+
+fn top_level_paths(snapshots: &[PathSnapshot]) -> Vec<PathBuf> {
+    snapshots
+        .iter()
+        .filter(|candidate| {
+            !snapshots.iter().any(|other| {
+                other.kind == SnapshotKind::Directory
+                    && other.path != candidate.path
+                    && candidate.path.starts_with(&other.path)
+            })
+        })
+        .map(|snapshot| snapshot.path.clone())
+        .collect()
 }
 
 fn create_directory_at(path: PathBuf) -> Result<OperationRecord> {
@@ -261,5 +771,143 @@ mod tests {
         journal.cancel_undo(third);
         journal.record(second);
         assert!(!journal.can_redo());
+    }
+
+    #[test]
+    fn recursive_copy_preserves_sources_and_supports_undo_redo() {
+        let root = tempfile::tempdir().unwrap();
+        let source_parent = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_parent).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let album = source_parent.join("album");
+        fs::create_dir(&album).unwrap();
+        fs::write(album.join("notes.txt"), b"hello").unwrap();
+        std::os::unix::fs::symlink("notes.txt", album.join("notes-link")).unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&album),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(
+            fs::read(destination.join("album/notes.txt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            fs::read_link(destination.join("album/notes-link")).unwrap(),
+            PathBuf::from("notes.txt")
+        );
+        assert_eq!(fs::read(album.join("notes.txt")).unwrap(), b"hello");
+
+        let operation = outcome.operation.unwrap();
+        let redo_record = undo_operation(&operation).unwrap();
+        assert!(!destination.join("album").exists());
+        let redone = redo_operation(&redo_record).unwrap();
+        assert_eq!(fs::read(redone.path().join("notes.txt")).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn copy_never_overwrites_an_occupied_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let destination = root.path().join("destination");
+        fs::write(&source, b"new").unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("source.txt"), b"keep").unwrap();
+
+        let outcome = transfer_paths(
+            &[source],
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(outcome.operation.is_none());
+        assert_eq!(fs::read(destination.join("source.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn copy_undo_refuses_a_modified_output() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let destination = root.path().join("destination");
+        fs::write(&source, b"original").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let outcome = transfer_paths(
+            &[source],
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let operation = outcome.operation.unwrap();
+        fs::write(destination.join("source.txt"), b"changed").unwrap();
+
+        assert!(undo_operation(&operation).is_err());
+        assert_eq!(
+            fs::read(destination.join("source.txt")).unwrap(),
+            b"changed"
+        );
+    }
+
+    #[test]
+    fn move_supports_identity_checked_undo_and_redo() {
+        let root = tempfile::tempdir().unwrap();
+        let source_parent = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_parent).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let source = source_parent.join("move-me.txt");
+        fs::write(&source, b"contents").unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        let operation = outcome.operation.unwrap();
+        assert!(!source.exists());
+
+        let redo_record = undo_operation(&operation).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"contents");
+        let redone = redo_operation(&redo_record).unwrap();
+        assert_eq!(fs::read(redone.path()).unwrap(), b"contents");
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn move_refuses_to_put_a_directory_inside_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let descendant = source.join("descendant");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&descendant).unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&source),
+            &descendant,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(source.is_dir());
+    }
+
+    #[test]
+    fn cancelled_transfer_does_not_publish_an_output() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let destination = root.path().join("destination");
+        fs::write(&source, b"contents").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        let outcome = transfer_paths(&[source], &destination, TransferMode::Copy, cancelled);
+        assert!(outcome.operation.is_none());
+        assert!(!destination.join("source.txt").exists());
     }
 }

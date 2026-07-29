@@ -29,12 +29,86 @@ bounded undo/redo history when it is genuinely reversible.
 
 - gpui-component 0.5.1's `Root` stores dialog and notification state but does
   not attach its public dialog/notification layers in `Root::render`. Marcel
-  mounts `Root::render_dialog_layer` and `Root::render_notification_layer` in
-  its top-level render tree as a compatibility bridge. The dialog,
+  mounts `Root::render_dialog_layer` in its top-level render tree and mounts
+  the public notification entities in a bottom-right stack as a compatibility
+  bridge. The custom notification mount is necessary because 0.5.1 hardcodes
+  `NotificationList` to top-right and exposes no placement option. The dialog,
   notification, input, and buttons remain gpui-component implementations.
 - Window-wide type-to-filter yields whenever a non-search input owns focus.
   This applies to the New Folder dialog and establishes the routing contract
   for future rename and New File editors.
+
+## Second slice: internal copy, cut, and paste
+
+- [x] `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` use the shared command dispatcher.
+- [x] Cut and Copy are active for the complete visible selection in the item
+  context menu; Paste is active in both item and current-directory menus when
+  Marcel's file clipboard has content.
+- [x] Transfers run on the background executor and remain serialized with
+  every other write and undo/redo operation.
+- [x] Copy supports regular files, directories, and symbolic links without
+  following links. Unsupported special files fail visibly.
+- [x] A copy is assembled at a hidden staging path and published with Linux
+  `RENAME_NOREPLACE`; an occupied destination is never overwritten and an
+  interrupted copy is never exposed under its requested name.
+- [x] Copy checks cancellation between directory entries and one-MiB file
+  chunks. Escape requests cancellation while a transfer is active.
+- [x] Cut/paste uses a no-replace rename fast path and currently reports a
+  clear error for cross-filesystem moves.
+- [x] Multi-item forward transfers record the exact successful subset and
+  retain failed cut items in the clipboard.
+- [x] Copy and move records store recursive filesystem identities. Undo and
+  redo refuse changed, replaced, missing, or occupied paths.
+- [x] Unit tests cover recursive file/directory/link copies, occupied
+  destinations, cancellation, modified-output conflicts, and move/copy
+  undo/redo.
+
+### Deliberate limits of this slice
+
+- The file clipboard is session-local. Desktop `text/uri-list` and
+  `x-special/gnome-copied-files` interoperability remains required.
+- Cross-filesystem cut/paste needs a verified copy-then-remove path; Marcel
+  does not silently fall back to a riskier implementation.
+- The engine has a cancellation token and partial-success outcomes, but the
+  persistent progress surface, byte/item progress reporting, queued work, and
+  explicit Cancel control remain follow-up work.
+- Successful transfers currently refresh the displayed directory. Filesystem
+  watching and Yazi-style incremental list events remain follow-up work.
+
+## Third slice: internal drag moves and bookmarks
+
+- [x] List and icon entries expose one shared internal file-drag payload. A
+  selected item carries the complete visible selection; dragging an unselected
+  item carries only that item.
+- [x] Navigable browser folders, XDG Places, and Bookmarks are move drop
+  targets backed by the existing serialized, no-overwrite transfer engine and
+  operation journal.
+- [x] No-op drops and attempts to move a directory into itself are rejected
+  before dispatch and again in the filesystem layer.
+- [x] Bookmarks appear directly below Places with a separator.
+- [x] Dropping browser folders anywhere in the unoccupied Bookmarks section
+  adds bookmarks without moving or modifying those folders. The link cursor
+  and section highlight distinguish this from a filesystem move; bookmark rows
+  remain filesystem move targets for their destination folders.
+- [x] Bookmark rows navigate on click, accept filesystem moves into their
+  target folder, and can be dragged to any ordering position using row bounds
+  and a fixed-height insertion indicator.
+- [x] Right-clicking a bookmark offers the compact Remove Bookmark action.
+  Removal changes only Marcel's bookmark list and never touches the target
+  folder.
+- [x] Bookmark order is persisted asynchronously as escaped `file:` URLs at
+  `$XDG_CONFIG_HOME/marcel/bookmarks` (falling back to
+  `~/.config/marcel/bookmarks`). Writes are serialized and atomically replace
+  the settings file.
+
+### Deliberate drag limits
+
+- Internal filesystem drags currently mean Move. Modifier-selected Copy and
+  Link actions need explicit cursor/action negotiation before being enabled.
+- Cross-filesystem moves retain the existing safe failure behavior.
+- Hover-open folders, edge scrolling during file drags, dropping on empty
+  browser space, and native incoming/outgoing desktop drag-and-drop remain
+  follow-up work.
 
 ## Yazi study notes
 
@@ -50,12 +124,17 @@ expanding Marcel's file-operation layer:
 - Yazi's source currently provides undo/redo snapshots for its text input
   widget, not a general filesystem-operation undo journal.
 
-Marcel's current New Folder path is therefore not a direct Yazi adaptation. It
-shares the non-blocking principle but deliberately adds serialized,
-identity-validating filesystem undo and forbids overwrite. Before copy, move,
-trash, or recursive operations land, Marcel should adapt Yazi's scheduler,
-incremental-update, progress, and cancellation patterns behind Marcel-owned
-interfaces and record the exact adaptation in `THIRD_PARTY_NOTICES.md`.
+Marcel's New Folder path is therefore not a direct Yazi adaptation. It shares
+the non-blocking principle but deliberately adds serialized,
+identity-validating filesystem undo and forbids overwrite.
+
+The second slice conceptually adapts Yazi's per-item worker outcomes,
+cooperative cancellation, partial-success accounting, and rename-first move
+path behind Marcel's `file_ops` interface. Marcel adds hidden staging plus
+`RENAME_NOREPLACE`, recursive identity snapshots, and general filesystem
+undo/redo. No Yazi code was copied. Progress reporting, worker queues,
+cross-filesystem copy-then-remove, and incremental list updates have not yet
+been adapted.
 
 ## Safety contract
 
@@ -78,8 +157,8 @@ filesystem effects enter history.
 1. New File using the same create contract.
 2. Rename with source and destination identity checks.
 3. Move to Trash with freedesktop Trash metadata and restore.
-4. Copy/cut/paste with desktop clipboard interop, conflict decisions,
-   cancellation, progress, and partial-success records.
+4. Finish copy/cut/paste with desktop clipboard interop, cross-filesystem
+   moves, conflict decisions, progress UI, and an explicit cancel control.
 5. Permanent deletion only after an explicit confirmation design and
    accessibility review.
 

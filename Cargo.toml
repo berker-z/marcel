@@ -16,6 +16,7 @@ infer = "0.22"
 md-5 = "0.10"
 mime_guess = "2"
 png = "0.18"
+rustix = { version = "1", features = ["fs"] }
 smol = "2"
 tempfile = "3"
 unicode-width = "0.2"

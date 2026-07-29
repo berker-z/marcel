@@ -3353,6 +3353,7 @@ dependencies = [
  "md-5",
  "mime_guess",
  "png 0.18.1",
+ "rustix 1.1.4",
  "smol",
  "tempfile",
  "unicode-width",

@@ -79,10 +79,44 @@ recursive filename/content search is a separate future feature.
 | `Delete` | Move the selection to Trash |
 | `Shift+Delete` | Permanently delete after explicit confirmation |
 
-Copy and cut should integrate with the desktop clipboard so transfers can
-eventually interoperate with other file managers. Marcel may begin with an
-internal clipboard, but the command interface must not depend on that
-implementation detail.
+Copy and cut currently use a session-local Marcel file clipboard. The shared
+commands and menus do not depend on that implementation detail. Desktop
+`text/uri-list` and `x-special/gnome-copied-files` support remains required so
+transfers can interoperate with other file managers.
+
+Paste rejects occupied destinations instead of overwriting or silently
+inventing another name. Copy supports regular files, directories, and symbolic
+links. Cut/paste currently supports same-filesystem moves; a cross-filesystem
+move reports an error until verified copy-then-remove is implemented. Escape
+requests cancellation of an active transfer.
+
+## Internal drag and bookmarks
+
+Dragging a browser item starts an internal filesystem payload. If the item is
+selected, the payload is the complete visible selection; otherwise only the
+dragged item participates. Dropping on a browser folder, Place, or Bookmark
+moves the payload into that directory through the same conflict checks,
+background executor, cancellation token, and undo journal as cut/paste.
+
+Internal drag moves reject the current parent as a no-op, reject the source
+itself, and reject descendants of a dragged source directory. Existing
+destinations are never overwritten. Cross-filesystem moves are not yet
+available.
+
+Bookmarks are persistent user shortcuts below Places:
+
+- dropping one or more folders on unoccupied space anywhere in the Bookmarks
+  section adds shortcuts and does not move the folders;
+- dragging a Bookmark row reorders it using the displayed insertion line;
+- clicking navigates to its target;
+- dropping files on the row moves them into its target;
+- right-click Remove Bookmark removes only the shortcut.
+
+The invalid-drop cursor appears only where the payload cannot be accepted.
+Valid move targets use the move cursor, while the Bookmarks section uses the
+link cursor when it would create shortcuts. Copy/link modifiers, hover-open,
+drag edge scrolling, and native desktop drag-and-drop are future extensions of
+the same payload/drop negotiation model.
 
 ## Context-menu selection
 
@@ -103,14 +137,14 @@ Single-item commands such as Rename are disabled for multi-selection.
 Properties shows one item's details for a single selection and an aggregate
 summary for multiple items.
 
-The first context-menu shell exposes the intended item command set while item
-operations remain read-only. `Open` uses the configured MIME default without
-prompting, while `Open With…` explicitly requests the desktop application
-chooser. Planned commands are disabled and prefixed with `–`: Cut, Copy, Paste,
-Duplicate, Rename, Move To, Move to Trash, Delete Permanently, Create Link,
-Compress, Copy Path, and Properties. A planned command loses the prefix only
-when its implementation, enabled-state rules, error handling, and any required
-undo record are ready.
+The context-menu shell exposes the intended item command set. `Open` uses the
+configured MIME default without prompting, while `Open With…` explicitly
+requests the desktop application chooser. Cut, Copy, and Paste are active
+through the shared transfer commands. Remaining planned commands are disabled
+and prefixed with `–`: Duplicate, Rename, Move To, Move to Trash, Delete
+Permanently, Create Link, Compress, Copy Path, and Properties. A planned
+command loses the prefix only when its implementation, enabled-state rules,
+error handling, and any required undo record are ready.
 
 ## Current-directory context menu
 

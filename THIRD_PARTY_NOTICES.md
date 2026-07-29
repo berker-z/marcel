@@ -47,6 +47,14 @@ adapted into Marcel itself.
     commit. Marcel adds a file-identity cache, fixed raster bounds, timeouts,
     subprocess cancellation, and a GPUI virtualized continuous-scroll page
     scheduler.
+  - `src/file_ops.rs` conceptually adapts per-item operation outcomes,
+    cooperative cancellation, partial-success accounting, and the rename-first
+    move path from `yazi-scheduler/src/worker.rs` and
+    `yazi-scheduler/src/file/file.rs` at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286`. Marcel's implementation is
+    session-serialized and adds hidden staging, Linux `RENAME_NOREPLACE`,
+    recursive identity validation, and general filesystem undo/redo. No Yazi
+    code was copied.
 
 Yazi is a primary architectural influence for asynchronous filesystem work,
 task scheduling, cancellation, previews, and responsiveness. Future direct or

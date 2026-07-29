@@ -10,11 +10,11 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Bounds, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable, Hsla,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Styled,
-    Subscription, Task, TextRun, Timer, UniformListScrollHandle, Window, canvas, div, font, img,
-    prelude::*, px, relative, uniform_list,
+    AnyElement, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity,
+    FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render, ScrollStrategy,
+    SharedString, Styled, Subscription, Task, TextRun, Timer, UniformListScrollHandle, Window,
+    canvas, div, font, img, prelude::*, px, relative, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Root, Sizable, Theme, WindowExt,
@@ -30,15 +30,21 @@ use gpui_component::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
+    bookmarks::{
+        Bookmark, add as add_bookmark, default_path as default_bookmarks_path,
+        load as load_bookmarks, remove as remove_bookmark_at, reorder as reorder_bookmark,
+        save as save_bookmarks,
+    },
     commands::{
-        ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, ExtendDown,
-        ExtendLeft, ExtendPageDown, ExtendPageUp, ExtendRight, ExtendToFirst, ExtendToLast,
-        ExtendUp, GoBack, GoForward, GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp, NewFolder,
-        OpenWithSelection, RedoFileOperation, SelectAll, SelectFirst, SelectLast, SelectPageDown,
-        SelectPageUp, UndoFileOperation,
+        ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CopySelection,
+        CutSelection, ExtendDown, ExtendLeft, ExtendPageDown, ExtendPageUp, ExtendRight,
+        ExtendToFirst, ExtendToLast, ExtendUp, GoBack, GoForward, GoToParent, MoveDown, MoveLeft,
+        MoveRight, MoveUp, NewFolder, OpenWithSelection, PasteFiles, RedoFileOperation, SelectAll,
+        SelectFirst, SelectLast, SelectPageDown, SelectPageUp, UndoFileOperation,
     },
     file_ops::{
-        OperationJournal, create_directory, redo_operation, undo_operation, validate_entry_name,
+        OperationJournal, TransferMode, create_directory, redo_operation, summarize_failures,
+        transfer_paths, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, FileEntry, format_size, merge_sorted_entries, stream_directory,
@@ -79,6 +85,8 @@ const ENTRY_MENU_WIDTH: f32 = 208.0;
 const ENTRY_MENU_HEIGHT: f32 = 430.0;
 const DIRECTORY_MENU_HEIGHT: f32 = 342.0;
 const ENTRY_MENU_MARGIN: f32 = 8.0;
+const BOOKMARK_MENU_WIDTH: f32 = 152.0;
+const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
 const IOSEVKA_UI_FONTS: [&str; 2] = ["Iosevka Nerd Font Mono", "Iosevka"];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -134,6 +142,71 @@ enum ContextMenuTarget {
     CurrentDirectory,
 }
 
+#[derive(Clone, Debug)]
+struct FileClipboard {
+    mode: TransferMode,
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct FileDrag {
+    paths: Vec<PathBuf>,
+    bookmark_candidates: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct BookmarkDrag {
+    index: usize,
+    path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BookmarkInsertion {
+    index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BookmarkMenu {
+    index: usize,
+    position: Point<Pixels>,
+}
+
+struct DragPreview {
+    label: String,
+    detail: &'static str,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        h_flex()
+            .max_w(px(280.0))
+            .px_3()
+            .py_2()
+            .gap_2()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.popover.opacity(0.94))
+            .text_color(colors.popover_foreground)
+            .shadow_md()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.primary)
+                    .child(self.detail),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(self.label.clone()),
+            )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WrappedPreviewLine {
     source_line: Option<usize>,
@@ -160,7 +233,9 @@ pub struct Marcel {
     search_input: Entity<InputState>,
     _search_subscriptions: Vec<Subscription>,
     operation_journal: OperationJournal,
+    file_clipboard: Option<FileClipboard>,
     operation_busy: bool,
+    operation_cancel: Option<Arc<AtomicBool>>,
     operation_task: Option<Task<()>>,
     select_after_directory_load: Option<PathBuf>,
     selection: SelectionModel,
@@ -214,6 +289,17 @@ pub struct Marcel {
     place_icons: HashMap<PathBuf, PathBuf>,
     places_loading: bool,
     places_task: Option<Task<()>>,
+    bookmarks: Vec<Bookmark>,
+    bookmark_icons: HashMap<PathBuf, PathBuf>,
+    bookmarks_path: PathBuf,
+    bookmarks_loading: bool,
+    bookmarks_load_task: Option<Task<()>>,
+    bookmarks_save_task: Option<Task<()>>,
+    bookmark_insertion: Option<BookmarkInsertion>,
+    bookmark_menu: Option<BookmarkMenu>,
+    bookmark_region_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    bookmark_row_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+    place_drop_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
 }
 
 impl Marcel {
@@ -263,7 +349,9 @@ impl Marcel {
             search_input,
             _search_subscriptions: vec![search_subscription],
             operation_journal: OperationJournal::default(),
+            file_clipboard: None,
             operation_busy: false,
+            operation_cancel: None,
             operation_task: None,
             select_after_directory_load: None,
             selection: SelectionModel::default(),
@@ -317,8 +405,20 @@ impl Marcel {
             place_icons: HashMap::new(),
             places_loading: true,
             places_task: None,
+            bookmarks: Vec::new(),
+            bookmark_icons: HashMap::new(),
+            bookmarks_path: default_bookmarks_path(&home_dir),
+            bookmarks_loading: true,
+            bookmarks_load_task: None,
+            bookmarks_save_task: None,
+            bookmark_insertion: None,
+            bookmark_menu: None,
+            bookmark_region_bounds: Rc::new(Cell::new(None)),
+            bookmark_row_bounds: Rc::new(RefCell::new(HashMap::new())),
+            place_drop_bounds: Rc::new(RefCell::new(HashMap::new())),
         };
         this.start_places_load(home_dir, cx);
+        this.start_bookmarks_load(cx);
         this.start_directory_load(true, cx);
         this
     }
@@ -353,8 +453,294 @@ impl Marcel {
         }));
     }
 
+    fn start_bookmarks_load(&mut self, cx: &mut Context<Self>) {
+        let path = self.bookmarks_path.clone();
+        let load_task = cx.background_executor().spawn(smol::unblock(move || {
+            let bookmarks = load_bookmarks(&path)?;
+            let mut icon_provider = crate::icons::IconProvider::discover();
+            let icons = bookmarks
+                .iter()
+                .filter_map(|bookmark| {
+                    icon_provider
+                        .icon_for(&bookmark.path, true)
+                        .map(|icon| (bookmark.path.clone(), icon))
+                })
+                .collect();
+            anyhow::Ok((bookmarks, icons))
+        }));
+
+        self.bookmarks_load_task = Some(cx.spawn(async move |this, cx| {
+            let result = load_task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.bookmarks_loading = false;
+                match result {
+                    Ok((bookmarks, icons)) => {
+                        this.bookmarks = bookmarks;
+                        this.bookmark_icons = icons;
+                    }
+                    Err(error) => {
+                        eprintln!("Could not load Marcel bookmarks: {error:#}");
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn start_bookmarks_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmarks_save_task.is_some() {
+            return;
+        }
+        let path = self.bookmarks_path.clone();
+        let snapshot = self.bookmarks.clone();
+        let saved_snapshot = snapshot.clone();
+        let save_task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || save_bookmarks(&path, &snapshot)));
+
+        self.bookmarks_save_task = Some(cx.spawn_in(window, async move |this, window| {
+            let result = save_task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                this.bookmarks_save_task = None;
+                if let Err(error) = result {
+                    window.push_notification(
+                        Notification::error(format!("Could not save bookmarks: {error}")),
+                        cx,
+                    );
+                } else if this.bookmarks != saved_snapshot {
+                    this.start_bookmarks_save(window, cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn add_dragged_bookmarks(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut added = 0;
+        for path in paths {
+            if add_bookmark(&mut self.bookmarks, path.clone()) {
+                if let Some(icon) = self
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.path == path)
+                    .and_then(|entry| entry.icon_path.clone())
+                {
+                    self.bookmark_icons.insert(path.clone(), icon);
+                }
+                added += 1;
+            }
+        }
+        self.bookmark_insertion = None;
+        if added == 0 {
+            window.push_notification(
+                Notification::info("Those folders are already bookmarked"),
+                cx,
+            );
+            return;
+        }
+        self.start_bookmarks_save(window, cx);
+        window.push_notification(
+            Notification::success(format!("Added {added} bookmark(s)")),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn move_bookmark(
+        &mut self,
+        from: usize,
+        insertion: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.bookmark_insertion = None;
+        if reorder_bookmark(&mut self.bookmarks, from, insertion) {
+            self.start_bookmarks_save(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn remove_bookmark(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.bookmark_menu = None;
+        let Some(bookmark) = remove_bookmark_at(&mut self.bookmarks, index) else {
+            return;
+        };
+        self.bookmark_icons.remove(&bookmark.path);
+        self.start_bookmarks_save(window, cx);
+        window.push_notification(
+            Notification::success(format!("Removed bookmark “{}”", bookmark.label())),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn render_bookmark_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.bookmark_menu?;
+        self.bookmarks.get(menu.index)?;
+        let colors = cx.theme().colors;
+        let radius = cx.theme().radius;
+        let window_size = window.bounds().size;
+        let left = f32::from(menu.position.x)
+            .min((f32::from(window_size.width) - BOOKMARK_MENU_WIDTH - ENTRY_MENU_MARGIN).max(0.0))
+            .max(ENTRY_MENU_MARGIN);
+        let top = f32::from(menu.position.y)
+            .min(
+                (f32::from(window_size.height) - BOOKMARK_MENU_HEIGHT - ENTRY_MENU_MARGIN).max(0.0),
+            )
+            .max(ENTRY_MENU_MARGIN);
+        let index = menu.index;
+
+        Some(
+            div()
+                .id("bookmark-context-menu")
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(BOOKMARK_MENU_WIDTH))
+                .p_1()
+                .rounded(radius)
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.popover)
+                .text_color(colors.popover_foreground)
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.bookmark_menu = None;
+                    cx.notify();
+                }))
+                .child(
+                    h_flex()
+                        .id("bookmark-menu-remove")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .cursor_pointer()
+                        .hover(|this| this.bg(colors.accent))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.remove_bookmark(index, window, cx);
+                        }))
+                        .child("Remove Bookmark"),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn file_drag_for(&self, path: &Path) -> FileDrag {
+        let paths = if self.selection.is_selected(path) {
+            let selected = self.selection.selected();
+            self.visible_paths()
+                .into_iter()
+                .filter(|candidate| selected.contains(candidate))
+                .collect::<Vec<_>>()
+        } else {
+            vec![path.to_path_buf()]
+        };
+        let bookmark_candidates = paths
+            .iter()
+            .filter(|candidate| {
+                self.entries
+                    .iter()
+                    .find(|entry| &entry.path == *candidate)
+                    .is_some_and(|entry| entry.navigable)
+            })
+            .cloned()
+            .collect();
+        FileDrag {
+            paths,
+            bookmark_candidates,
+        }
+    }
+
+    fn set_bookmark_insertion(
+        &mut self,
+        event: &DragMoveEvent<BookmarkDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(region) = self.bookmark_region_bounds.get() else {
+            return;
+        };
+        let pointer = event.event.position;
+        let index = if !region.contains(&pointer) {
+            return;
+        } else {
+            let rows = self.bookmark_row_bounds.borrow();
+            let mut ordered = rows.iter().collect::<Vec<_>>();
+            ordered.sort_by_key(|(index, _)| **index);
+            ordered
+                .iter()
+                .find_map(|(index, bounds)| {
+                    (pointer.y < bounds.top() + bounds.size.height / 2.0).then_some(**index)
+                })
+                .unwrap_or(self.bookmarks.len())
+        };
+        if self.bookmark_insertion != Some(BookmarkInsertion { index }) {
+            self.bookmark_insertion = Some(BookmarkInsertion { index });
+            cx.notify();
+        }
+    }
+
+    fn update_file_drag_cursor(
+        &self,
+        event: &DragMoveEvent<FileDrag>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = event.drag(cx).clone();
+        let pointer = event.event.position;
+        let can_move_to =
+            |path: &Path| !self.operation_busy && can_move_files_to(&drag.paths, path);
+
+        let over_browser_folder = self.entry_hit_bounds.borrow().iter().any(|(path, bounds)| {
+            bounds.contains(&pointer)
+                && self
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == *path)
+                    .is_some_and(|entry| entry.navigable && can_move_to(path))
+        });
+        let over_place = self
+            .place_drop_bounds
+            .borrow()
+            .iter()
+            .any(|(path, bounds)| bounds.contains(&pointer) && can_move_to(path));
+        let over_bookmark = self
+            .bookmark_row_bounds
+            .borrow()
+            .iter()
+            .any(|(index, bounds)| {
+                bounds.contains(&pointer)
+                    && self
+                        .bookmarks
+                        .get(*index)
+                        .is_some_and(|bookmark| can_move_to(&bookmark.path))
+            });
+        let over_bookmark_region = self
+            .bookmark_region_bounds
+            .get()
+            .is_some_and(|bounds| bounds.contains(&pointer));
+
+        let cursor = if over_browser_folder || over_place || over_bookmark {
+            CursorStyle::ClosedHand
+        } else if over_bookmark_region && !drag.bookmark_candidates.is_empty() {
+            CursorStyle::DragLink
+        } else {
+            CursorStyle::OperationNotAllowed
+        };
+        cx.set_active_drag_cursor_style(cursor, window);
+    }
+
     fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
         self.entry_menu = None;
+        self.bookmark_menu = None;
         self.directory_ticket = self.directory_ticket.wrapping_add(1);
         let ticket = self.directory_ticket;
         let path = self.current_dir.clone();
@@ -492,6 +878,17 @@ impl Marcel {
                 .and_then(|path| self.entries.iter().find(|entry| &entry.path == path))
                 .is_some_and(|entry| !entry.navigable),
             BrowserCommand::ClearSelection => !self.selection.selected().is_empty(),
+            BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
+                !self.operation_busy && !self.selection.selected().is_empty()
+            }
+            BrowserCommand::PasteFiles => {
+                !self.operation_busy
+                    && self.directory_error.is_none()
+                    && self
+                        .file_clipboard
+                        .as_ref()
+                        .is_some_and(|clipboard| !clipboard.paths.is_empty())
+            }
             BrowserCommand::NewFolder => !self.operation_busy && self.directory_error.is_none(),
             BrowserCommand::UndoFileOperation => {
                 !self.operation_busy && self.operation_journal.can_undo()
@@ -584,6 +981,9 @@ impl Marcel {
             BrowserCommand::GoBack => self.go_back(cx),
             BrowserCommand::GoForward => self.go_forward(cx),
             BrowserCommand::SelectAll => self.select_all_entries(cx),
+            BrowserCommand::CopySelection => self.stage_selection(TransferMode::Copy, window, cx),
+            BrowserCommand::CutSelection => self.stage_selection(TransferMode::Move, window, cx),
+            BrowserCommand::PasteFiles => self.start_paste(window, cx),
             BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
             BrowserCommand::UndoFileOperation => self.start_undo(window, cx),
             BrowserCommand::RedoFileOperation => self.start_redo(window, cx),
@@ -723,6 +1123,7 @@ impl Marcel {
         }
 
         self.operation_busy = true;
+        self.operation_cancel = None;
         let parent = self.current_dir.clone();
         let task = cx
             .background_executor()
@@ -732,6 +1133,7 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 this.operation_busy = false;
+                this.operation_cancel = None;
                 match result {
                     Ok(operation) => {
                         let path = operation.path().to_path_buf();
@@ -766,6 +1168,7 @@ impl Marcel {
         };
 
         self.operation_busy = true;
+        self.operation_cancel = None;
         let operation_for_task = operation.clone();
         let task = cx
             .background_executor()
@@ -775,10 +1178,11 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 this.operation_busy = false;
+                this.operation_cancel = None;
                 match result {
-                    Ok(()) => {
+                    Ok(undone) => {
                         let path = operation.path().to_path_buf();
-                        this.operation_journal.finish_undo(operation);
+                        this.operation_journal.finish_undo(undone);
                         this.refresh_after_operation(&path, false, cx);
                         window.push_notification(
                             Notification::success(format!(
@@ -810,6 +1214,7 @@ impl Marcel {
         };
 
         self.operation_busy = true;
+        self.operation_cancel = None;
         let operation_for_task = operation.clone();
         let task = cx
             .background_executor()
@@ -819,6 +1224,7 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 this.operation_busy = false;
+                this.operation_cancel = None;
                 match result {
                     Ok(redone) => {
                         let path = redone.path().to_path_buf();
@@ -838,6 +1244,145 @@ impl Marcel {
                         this.operation_journal.cancel_redo(operation);
                         window.push_notification(Notification::error(error.to_string()), cx);
                     }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn stage_selection(&mut self, mode: TransferMode, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.selection.selected();
+        let paths = self
+            .visible_paths()
+            .into_iter()
+            .filter(|path| selected.contains(path))
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return;
+        }
+        let count = paths.len();
+        self.file_clipboard = Some(FileClipboard { mode, paths });
+        self.entry_menu = None;
+        let verb = match mode {
+            TransferMode::Copy => "Copied",
+            TransferMode::Move => "Cut",
+        };
+        window.push_notification(
+            Notification::success(format!("{verb} {count} item(s) to the file clipboard")),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn start_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = self.file_clipboard.clone() else {
+            return;
+        };
+        self.start_transfer(
+            clipboard.paths.clone(),
+            self.current_dir.clone(),
+            clipboard.mode,
+            Some(clipboard),
+            window,
+            cx,
+        );
+    }
+
+    fn start_drag_move(
+        &mut self,
+        paths: Vec<PathBuf>,
+        destination: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.bookmark_insertion = None;
+        self.start_transfer(paths, destination, TransferMode::Move, None, window, cx);
+    }
+
+    fn start_transfer(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        mode: TransferMode,
+        clipboard: Option<FileClipboard>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.operation_busy || sources.is_empty() {
+            return;
+        }
+        self.entry_menu = None;
+        self.operation_busy = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.operation_cancel = Some(cancel.clone());
+        let task = cx.background_executor().spawn(smol::unblock(move || {
+            transfer_paths(&sources, &destination, mode, cancel)
+        }));
+
+        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+            let outcome = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                this.operation_busy = false;
+                this.operation_cancel = None;
+                if let Some(operation) = outcome.operation {
+                    this.operation_journal.record(operation);
+                }
+
+                if mode == TransferMode::Move
+                    && !outcome.completed.is_empty()
+                    && let Some(clipboard) = clipboard
+                {
+                    let completed_sources = clipboard
+                        .paths
+                        .iter()
+                        .filter(|source| {
+                            source.file_name().is_some_and(|name| {
+                                outcome
+                                    .completed
+                                    .iter()
+                                    .any(|path| path.file_name() == Some(name))
+                            })
+                        })
+                        .cloned()
+                        .collect::<HashSet<_>>();
+                    let remaining = clipboard
+                        .paths
+                        .into_iter()
+                        .filter(|path| !completed_sources.contains(path))
+                        .collect::<Vec<_>>();
+                    this.file_clipboard = (!remaining.is_empty()).then_some(FileClipboard {
+                        mode,
+                        paths: remaining,
+                    });
+                }
+
+                if let Some(first) = outcome
+                    .completed
+                    .iter()
+                    .find(|path| path.parent() == Some(this.current_dir.as_path()))
+                {
+                    this.select_after_directory_load = Some(first.clone());
+                }
+                this.start_directory_load(false, cx);
+
+                if outcome.failures.is_empty() {
+                    let verb = match mode {
+                        TransferMode::Copy => "Copied",
+                        TransferMode::Move => "Moved",
+                    };
+                    window.push_notification(
+                        Notification::success(format!(
+                            "{verb} {} item(s)",
+                            outcome.completed.len()
+                        )),
+                        cx,
+                    );
+                } else {
+                    window.push_notification(
+                        Notification::error(summarize_failures(&outcome.failures)),
+                        cx,
+                    );
                 }
                 cx.notify();
             });
@@ -956,6 +1501,13 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.operation_busy
+            && let Some(cancel) = &self.operation_cancel
+        {
+            cancel.store(true, Ordering::Release);
+            window.push_notification(Notification::info("Cancelling file operation…"), cx);
+            return;
+        }
         if self.filter_query.is_empty() {
             self.execute_browser_command(BrowserCommand::ClearSelection, window, cx);
         } else {
@@ -977,6 +1529,23 @@ impl Marcel {
 
     fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
         self.execute_browser_command(BrowserCommand::SelectAll, window, cx);
+    }
+
+    fn on_copy_selection(
+        &mut self,
+        _: &CopySelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::CopySelection, window, cx);
+    }
+
+    fn on_cut_selection(&mut self, _: &CutSelection, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::CutSelection, window, cx);
+    }
+
+    fn on_paste_files(&mut self, _: &PasteFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::PasteFiles, window, cx);
     }
 
     fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -1669,6 +2238,9 @@ impl Marcel {
         let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection);
         let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll);
         let new_folder_enabled = self.command_enabled(BrowserCommand::NewFolder);
+        let copy_enabled = self.command_enabled(BrowserCommand::CopySelection);
+        let cut_enabled = self.command_enabled(BrowserCommand::CutSelection);
+        let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles);
         let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
         let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
         let window_size = window.bounds().size;
@@ -1748,7 +2320,36 @@ impl Marcel {
                             ),
                     )
                     .child(planned("– New File"))
-                    .child(planned("– Paste"))
+                    .child(
+                        h_flex()
+                            .id("directory-menu-paste")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .when(paste_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(colors.accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_menu = None;
+                                        this.execute_browser_command(
+                                            BrowserCommand::PasteFiles,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(!paste_enabled, |this| {
+                                this.text_color(colors.muted_foreground)
+                            })
+                            .child(if paste_enabled { "Paste" } else { "– Paste" })
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Ctrl+V"),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .id("directory-menu-undo")
@@ -1959,9 +2560,94 @@ impl Marcel {
                         .child("Open With…"),
                 )
                 .child(separator())
-                .child(planned("– Cut"))
-                .child(planned("– Copy"))
-                .child(planned("– Paste"))
+                .child(
+                    h_flex()
+                        .id("entry-menu-cut")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(cut_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.execute_browser_command(
+                                        BrowserCommand::CutSelection,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                        })
+                        .when(!cut_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child(if cut_enabled { "Cut" } else { "– Cut" })
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child("Ctrl+X"),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .id("entry-menu-copy")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(copy_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.execute_browser_command(
+                                        BrowserCommand::CopySelection,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                        })
+                        .when(!copy_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child(if copy_enabled { "Copy" } else { "– Copy" })
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child("Ctrl+C"),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .id("entry-menu-paste")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(paste_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.entry_menu = None;
+                                    this.execute_browser_command(
+                                        BrowserCommand::PasteFiles,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                        })
+                        .when(!paste_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child(if paste_enabled { "Paste" } else { "– Paste" })
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child("Ctrl+V"),
+                        ),
+                )
                 .child(planned("– Duplicate"))
                 .child(separator())
                 .child(planned("– Rename…"))
@@ -2422,6 +3108,11 @@ impl Marcel {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
         let active = self.current_dir == place.path;
+        let operation_busy = self.operation_busy;
+        let drop_path = place.path.clone();
+        let can_drop_path = place.path.clone();
+        let bounds_path = place.path.clone();
+        let place_drop_bounds = self.place_drop_bounds.clone();
         let icon = self
             .place_icons
             .get(&place.path)
@@ -2446,6 +3137,7 @@ impl Marcel {
         // this small navigation surface is intentionally Marcel-owned.
         h_flex()
             .id(("place", index))
+            .relative()
             .w_full()
             .h_8()
             .px_2()
@@ -2460,11 +3152,175 @@ impl Marcel {
                 this.bg(colors.sidebar_accent)
                     .text_color(colors.sidebar_accent_foreground)
             })
+            .can_drop(move |value, _, _| {
+                !operation_busy
+                    && value
+                        .downcast_ref::<FileDrag>()
+                        .is_some_and(|drag| can_move_files_to(&drag.paths, &can_drop_path))
+            })
+            .drag_over::<FileDrag>(move |style, _, _, _| {
+                style
+                    .bg(colors.sidebar_accent)
+                    .border_1()
+                    .border_color(colors.primary)
+            })
+            .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
+                this.start_drag_move(drag.paths.clone(), drop_path.clone(), window, cx);
+            }))
             .child(icon)
             .child(div().flex_none().text_sm().child(place.label))
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        place_drop_bounds
+                            .borrow_mut()
+                            .insert(bounds_path.clone(), bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_to(place.path.clone(), true, cx);
             }))
+            .into_any_element()
+    }
+
+    fn render_bookmark(
+        &self,
+        index: usize,
+        bookmark: Bookmark,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors;
+        let radius = cx.theme().radius;
+        let active = self.current_dir == bookmark.path;
+        let operation_busy = self.operation_busy;
+        let insertion_here = self.bookmark_insertion == Some(BookmarkInsertion { index });
+        let navigate_path = bookmark.path.clone();
+        let drop_path = bookmark.path.clone();
+        let can_drop_path = bookmark.path.clone();
+        let drag = BookmarkDrag {
+            index,
+            path: bookmark.path.clone(),
+        };
+        let bookmark_row_bounds = self.bookmark_row_bounds.clone();
+        let icon = self
+            .bookmark_icons
+            .get(&bookmark.path)
+            .cloned()
+            .map(|path| {
+                img(path)
+                    .size(px(20.0))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| {
+                div()
+                    .w(px(20.0))
+                    .text_color(colors.primary)
+                    .child("▸")
+                    .into_any_element()
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .h(px(2.0))
+                    .mx_2()
+                    .rounded_full()
+                    .bg(if insertion_here {
+                        colors.primary
+                    } else {
+                        colors.primary.opacity(0.0)
+                    }),
+            )
+            .child(
+                h_flex()
+                    .id(("bookmark", index))
+                    .relative()
+                    .w_full()
+                    .h_8()
+                    .px_2()
+                    .gap_2()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .hover(|this| {
+                        this.bg(colors.sidebar_accent.opacity(0.8))
+                            .text_color(colors.sidebar_accent_foreground)
+                    })
+                    .when(active, |this| {
+                        this.bg(colors.sidebar_accent)
+                            .text_color(colors.sidebar_accent_foreground)
+                    })
+                    .can_drop(move |value, _, _| {
+                        !operation_busy
+                            && value
+                                .downcast_ref::<FileDrag>()
+                                .is_some_and(|drag| can_move_files_to(&drag.paths, &can_drop_path))
+                    })
+                    .drag_over::<FileDrag>(move |style, _, _, _| {
+                        style
+                            .bg(colors.sidebar_accent)
+                            .border_1()
+                            .border_color(colors.primary)
+                    })
+                    .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
+                        this.start_drag_move(drag.paths.clone(), drop_path.clone(), window, cx);
+                    }))
+                    .on_drag(drag, |drag, _, _, cx| {
+                        let label = drag
+                            .path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| drag.path.display().to_string());
+                        cx.new(|_| DragPreview {
+                            label,
+                            detail: "Bookmark",
+                        })
+                    })
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.entry_menu = None;
+                            this.bookmark_menu = Some(BookmarkMenu {
+                                index,
+                                position: event.position,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(icon)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .child(bookmark.label()),
+                    )
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                bookmark_row_bounds.borrow_mut().insert(index, bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if !event.is_right_click() {
+                            this.navigate_to(navigate_path.clone(), true, cx);
+                        }
+                    })),
+            )
             .into_any_element()
     }
 
@@ -2482,7 +3338,12 @@ impl Marcel {
                         let click_path = path.clone();
                         let context_path = path.clone();
                         let bounds_path = path.clone();
+                        let drop_path = path.clone();
+                        let can_drop_path = path.clone();
                         let selected = this.selection.is_selected(&path);
+                        let drag = this.file_drag_for(&path);
+                        let navigable = entry.navigable;
+                        let operation_busy = this.operation_busy;
                         let entry_hit_bounds = this.entry_hit_bounds.clone();
                         let entry_content_bounds = this.entry_content_bounds.clone();
                         let browser_bounds = this.browser_bounds.clone();
@@ -2519,6 +3380,45 @@ impl Marcel {
                             .when(selected, |this| {
                                 this.bg(colors.list_active)
                                     .border_color(colors.list_active_border)
+                            })
+                            .on_drag(drag, |drag, _, _, cx| {
+                                let count = drag.paths.len();
+                                let label = if count == 1 {
+                                    drag.paths[0]
+                                        .file_name()
+                                        .map(|name| name.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| drag.paths[0].display().to_string())
+                                } else {
+                                    format!("{count} selected items")
+                                };
+                                cx.new(|_| DragPreview {
+                                    label,
+                                    detail: "Move",
+                                })
+                            })
+                            .on_drag_move::<FileDrag>(cx.listener(|this, event, window, cx| {
+                                this.update_file_drag_cursor(event, window, cx);
+                            }))
+                            .when(navigable, |this| {
+                                this.can_drop(move |value, _, _| {
+                                    !operation_busy
+                                        && value.downcast_ref::<FileDrag>().is_some_and(|drag| {
+                                            can_move_files_to(&drag.paths, &can_drop_path)
+                                        })
+                                })
+                                .drag_over::<FileDrag>(move |style, _, _, _| {
+                                    style.bg(colors.list_active).border_color(colors.primary)
+                                })
+                                .on_drop(cx.listener(
+                                    move |this, drag: &FileDrag, window, cx| {
+                                        this.start_drag_move(
+                                            drag.paths.clone(),
+                                            drop_path.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ))
                             })
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                 this.activate_entry(&click_path, event, cx);
@@ -2624,7 +3524,12 @@ impl Marcel {
                             let click_path = path.clone();
                             let context_path = path.clone();
                             let bounds_path = path.clone();
+                            let drop_path = path.clone();
+                            let can_drop_path = path.clone();
                             let selected = this.selection.is_selected(&path);
+                            let drag = this.file_drag_for(&path);
+                            let navigable = entry.navigable;
+                            let operation_busy = this.operation_busy;
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
                             let entry_hit_bounds = this.entry_hit_bounds.clone();
                             let entry_content_bounds = this.entry_content_bounds.clone();
@@ -2694,6 +3599,58 @@ impl Marcel {
                                     .when(selected, |this| {
                                         this.bg(colors.list_active)
                                             .border_color(colors.list_active_border)
+                                    })
+                                    .on_drag(drag, |drag, _, _, cx| {
+                                        let count = drag.paths.len();
+                                        let label = if count == 1 {
+                                            drag.paths[0]
+                                                .file_name()
+                                                .map(|name| name.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|| {
+                                                    drag.paths[0].display().to_string()
+                                                })
+                                        } else {
+                                            format!("{count} selected items")
+                                        };
+                                        cx.new(|_| DragPreview {
+                                            label,
+                                            detail: "Move",
+                                        })
+                                    })
+                                    .on_drag_move::<FileDrag>(cx.listener(
+                                        |this, event, window, cx| {
+                                            this.update_file_drag_cursor(event, window, cx);
+                                        },
+                                    ))
+                                    .when(navigable, |this| {
+                                        this.can_drop(move |value, _, _| {
+                                            !operation_busy
+                                                && value.downcast_ref::<FileDrag>().is_some_and(
+                                                    |drag| {
+                                                        can_move_files_to(
+                                                            &drag.paths,
+                                                            &can_drop_path,
+                                                        )
+                                                    },
+                                                )
+                                        })
+                                        .drag_over::<FileDrag>(move |style, _, _, _| {
+                                            style
+                                                .bg(colors.list_active)
+                                                .border_color(colors.primary)
+                                        })
+                                        .on_drop(
+                                            cx.listener(
+                                                move |this, drag: &FileDrag, window, cx| {
+                                                    this.start_drag_move(
+                                                        drag.paths.clone(),
+                                                        drop_path.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ),
+                                        )
                                     })
                                     .on_click(cx.listener(
                                         move |this, event: &ClickEvent, _, cx| {
@@ -3216,6 +4173,11 @@ impl Render for Marcel {
         }
 
         let colors = cx.theme().colors;
+        self.place_drop_bounds.borrow_mut().clear();
+        self.bookmark_row_bounds.borrow_mut().clear();
+        if !cx.has_active_drag() {
+            self.bookmark_insertion = None;
+        }
         let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
         let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
         let window_width = f32::from(window.bounds().size.width);
@@ -3234,6 +4196,19 @@ impl Render for Marcel {
             .enumerate()
             .map(|(index, place)| self.render_place(index, place, cx))
             .collect::<Vec<_>>();
+        let bookmark_buttons = self
+            .bookmarks
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, bookmark)| self.render_bookmark(index, bookmark, cx))
+            .collect::<Vec<_>>();
+        let bookmark_final_insertion = self.bookmark_insertion
+            == Some(BookmarkInsertion {
+                index: self.bookmarks.len(),
+            });
+        let bookmarks_ready = !self.bookmarks_loading;
+        let bookmark_region_bounds = self.bookmark_region_bounds.clone();
         let font_view = cx.entity();
         let font_switch = Switch::new("iosevka-ui-font")
             .small()
@@ -3309,45 +4284,141 @@ impl Render for Marcel {
                     .child("▦"),
             );
 
-        let sidebar = div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(sidebar_width)
-            .h_full()
-            .p_4()
-            .gap_2()
-            .bg(colors.sidebar)
-            .border_r_1()
-            .border_color(colors.sidebar_border)
-            .text_color(colors.sidebar_foreground)
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child("Places"),
-            )
-            .children(place_buttons)
-            .when(self.places_loading, |this| {
-                this.child(
+        let sidebar =
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(sidebar_width)
+                .h_full()
+                .p_4()
+                .gap_2()
+                .bg(colors.sidebar)
+                .border_r_1()
+                .border_color(colors.sidebar_border)
+                .text_color(colors.sidebar_foreground)
+                .child(
                     div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
+                        .text_sm()
                         .text_color(colors.muted_foreground)
-                        .child("Finding places…"),
+                        .child("Places"),
                 )
-            })
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(font_switch)
-                    .child(hidden_switch)
-                    .child(view_switch),
-            );
+                .children(place_buttons)
+                .when(self.places_loading, |this| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(colors.muted_foreground)
+                            .child("Finding places…"),
+                    )
+                })
+                .child(div().h(px(1.0)).my_1().bg(colors.sidebar_border))
+                .child(
+                    div()
+                        .id("bookmarks-section")
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .rounded(cx.theme().radius)
+                        .can_drop(move |value, _, _| {
+                            bookmarks_ready
+                                && (value.downcast_ref::<BookmarkDrag>().is_some()
+                                    || value
+                                        .downcast_ref::<FileDrag>()
+                                        .is_some_and(|drag| !drag.bookmark_candidates.is_empty()))
+                        })
+                        .drag_over::<FileDrag>(move |style, _, _, _| {
+                            style
+                                .bg(colors.sidebar_accent.opacity(0.35))
+                                .border_1()
+                                .border_color(colors.primary)
+                        })
+                        .drag_over::<BookmarkDrag>(move |style, _, _, _| {
+                            style.bg(colors.sidebar_accent.opacity(0.2))
+                        })
+                        .on_drag_move::<BookmarkDrag>(cx.listener(|this, event, window, cx| {
+                            this.set_bookmark_insertion(event, cx);
+                            let cursor = if event.bounds.contains(&event.event.position) {
+                                CursorStyle::ClosedHand
+                            } else {
+                                CursorStyle::OperationNotAllowed
+                            };
+                            cx.set_active_drag_cursor_style(cursor, window);
+                        }))
+                        .on_drop(cx.listener(|this, drag: &BookmarkDrag, window, cx| {
+                            let insertion = this
+                                .bookmark_insertion
+                                .map(|insertion| insertion.index)
+                                .unwrap_or(this.bookmarks.len());
+                            this.move_bookmark(drag.index, insertion, window, cx);
+                        }))
+                        .on_drop(cx.listener(|this, drag: &FileDrag, window, cx| {
+                            this.add_dragged_bookmarks(&drag.bookmark_candidates, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .h_7()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .text_sm()
+                                .text_color(colors.muted_foreground)
+                                .child("Bookmarks"),
+                        )
+                        .children(bookmark_buttons)
+                        .when(self.bookmarks_loading, |this| {
+                            this.child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Loading bookmarks…"),
+                            )
+                        })
+                        .when(
+                            !self.bookmarks_loading && self.bookmarks.is_empty(),
+                            |this| {
+                                this.child(
+                                    div()
+                                        .px_3()
+                                        .py_1()
+                                        .text_xs()
+                                        .text_color(colors.muted_foreground)
+                                        .child("Drag folders here"),
+                                )
+                            },
+                        )
+                        .child(div().h(px(2.0)).mx_2().rounded_full().bg(
+                            if bookmark_final_insertion {
+                                colors.primary
+                            } else {
+                                colors.primary.opacity(0.0)
+                            },
+                        ))
+                        .child(div().flex_1())
+                        .child(
+                            canvas(
+                                move |bounds, _, _| bookmark_region_bounds.set(Some(bounds)),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(font_switch)
+                        .child(hidden_switch)
+                        .child(view_switch),
+                );
 
         let browser = div()
             .id("browser-pane")
@@ -3376,6 +4447,9 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_go_forward))
             .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_copy_selection))
+            .on_action(cx.listener(Self::on_cut_selection))
+            .on_action(cx.listener(Self::on_paste_files))
             .on_action(cx.listener(Self::on_new_folder))
             .on_action(cx.listener(Self::on_undo_file_operation))
             .on_action(cx.listener(Self::on_redo_file_operation))
@@ -3716,12 +4790,28 @@ impl Render for Marcel {
 
         let pane_view = cx.entity();
         let entry_menu = self.render_entry_menu(window, cx);
+        let bookmark_menu = self.render_bookmark_menu(window, cx);
         // gpui-component 0.5.1's Root stores dialog and notification state but
         // does not attach those layers in Root::render. Mount its public layer
         // renderers here so WindowExt dialogs/notifications are actually
         // visible while retaining the component implementations.
         let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
+        // gpui-component 0.5.1 hardcodes NotificationList to top-right and
+        // exposes no placement option. Keep the component notifications and
+        // lifecycle, but mount their public entities in Marcel's bottom-right
+        // stack until the component supports configurable placement.
+        let notifications = Root::read(window, cx).notification.read(cx).notifications();
+        let visible_from = notifications.len().saturating_sub(10);
+        let notification_layer = (!notifications.is_empty()).then(|| {
+            div()
+                .absolute()
+                .right_4()
+                .bottom_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .children(notifications.into_iter().skip(visible_from))
+        });
         div()
             .relative()
             .flex()
@@ -3729,6 +4819,12 @@ impl Render for Marcel {
             .size_full()
             .bg(colors.background)
             .text_color(colors.foreground)
+            .on_drag_move::<FileDrag>(|_, window, cx| {
+                cx.set_active_drag_cursor_style(CursorStyle::OperationNotAllowed, window);
+            })
+            .on_drag_move::<BookmarkDrag>(|_, window, cx| {
+                cx.set_active_drag_cursor_style(CursorStyle::OperationNotAllowed, window);
+            })
             .on_key_down(cx.listener(Self::on_window_key_down))
             .child(topbar)
             .child(
@@ -3757,6 +4853,7 @@ impl Render for Marcel {
                 ),
             )
             .when_some(entry_menu, |this, menu| this.child(menu))
+            .when_some(bookmark_menu, |this, menu| this.child(menu))
             .when_some(dialog_layer, |this, layer| this.child(layer))
             .when_some(notification_layer, |this, layer| this.child(layer))
     }
@@ -3770,6 +4867,15 @@ fn normalize_start_directory(path: PathBuf) -> PathBuf {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"))
     }
+}
+
+fn can_move_files_to(paths: &[PathBuf], destination: &Path) -> bool {
+    !paths.is_empty()
+        && paths.iter().all(|source| {
+            source != destination
+                && source.parent() != Some(destination)
+                && !destination.starts_with(source)
+        })
 }
 
 fn grid_column_count(viewport_width: f32) -> usize {
@@ -4092,6 +5198,22 @@ mod tests {
         assert_eq!(grid_column_count(279.0), 1);
         assert_eq!(grid_column_count(280.0), 2);
         assert_eq!(grid_column_count(640.0), 4);
+    }
+
+    #[test]
+    fn internal_move_drop_rejects_noops_and_descendants() {
+        assert!(!can_move_files_to(
+            &[PathBuf::from("/work/report.txt")],
+            Path::new("/work")
+        ));
+        assert!(!can_move_files_to(
+            &[PathBuf::from("/work/photos")],
+            Path::new("/work/photos/edited")
+        ));
+        assert!(can_move_files_to(
+            &[PathBuf::from("/work/report.txt")],
+            Path::new("/archive")
+        ));
     }
 
     #[test]

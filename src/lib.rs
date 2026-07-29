@@ -1,4 +1,5 @@
 mod app;
+mod bookmarks;
 pub mod commands;
 pub mod file_ops;
 pub mod fs;

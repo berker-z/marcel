@@ -56,13 +56,26 @@ item here belongs in that sprint.
 - [x] Implement Show Hidden Files through the Places footer and
   current-directory menu.
 - [x] Implement New Folder and its bounded, conflict-validating undo/redo path.
-- [ ] Implement New File, Paste, Open in Terminal, and directory Properties
-  behind their shared commands.
+- [x] Implement the session-local Copy, Cut, and Paste slice behind shared
+  commands, no-overwrite transfers, cancellation, and identity-validating
+  undo/redo.
+- [ ] Implement New File, Open in Terminal, and directory Properties behind
+  their shared commands.
 - [x] Complete the bounded safe-operation foundation and New Folder slice in
   [`Sprint 3`](sprints/003-safe-file-operations.md).
 - Create folders and files.
 - Rename files with a pointer-friendly inline interaction.
-- Copy, cut, paste, duplicate, move, trash, restore, and permanently delete.
+- Finish desktop clipboard interoperability, cross-filesystem cut/paste,
+  progress UI, and queued transfers; then add duplicate, move-to, trash,
+  restore, and permanent deletion.
+- Add ZIP archive creation and extraction through the shared background
+  operation scheduler, with progress, cancellation, conflict handling, and
+  protection against unsafe archive paths.
+- Research and document Marcel's symbolic-link policy before expanding write
+  operations: compare Yazi and conventional GUI file managers for copying,
+  moving, deleting, previewing, resolving broken links, following links during
+  recursion, and preventing cycles. Turn the result into explicit behavioral
+  tests and user-facing wording.
 - Add bounded in-memory undo and redo for every reversible file operation,
   including precise records for partially successful multi-file operations.
 - Show progress, cancellation, conflicts, and recoverable errors for file
@@ -76,29 +89,30 @@ item here belongs in that sprint.
 
 ## Bookmarks and drag interactions
 
-- Add a persistent Bookmarks section directly below Places, separated visually
-  from the automatically discovered XDG locations.
-- Allow dragging a folder from the browser into the Bookmarks section to create
-  a bookmark without moving or modifying the folder itself.
-- Add a bookmark context menu with Remove Bookmark. Removing a bookmark must
+- [x] Add a persistent Bookmarks section directly below Places, separated
+  visually from the automatically discovered XDG locations.
+- [x] Allow dragging a folder from the browser into the Bookmarks section to
+  create a bookmark without moving or modifying the folder itself.
+- [x] Add a bookmark context menu with Remove Bookmark. Removing a bookmark must
   never delete, trash, or otherwise mutate its target directory.
-- Allow pointer reordering within Bookmarks, with an unambiguous insertion
+- [x] Allow pointer reordering within Bookmarks, with an unambiguous insertion
   indicator and persisted order.
 - Support dragging a bookmark out of the section as another discoverable way to
   remove it, while requiring a safe threshold so ordinary navigation clicks
   cannot remove bookmarks accidentally.
-- Define one reusable Marcel drag-session model covering payload identity,
-  allowed actions, drop-target negotiation, insertion indicators, cancellation,
-  edge scrolling, and keyboard/accessibility alternatives.
-- Use bookmark creation and reordering as the first non-filesystem proving
-  ground for that drag infrastructure before enabling drag-to-copy or
-  drag-to-move.
-- Later, allow selected filesystem items to be dropped onto bookmark and Places
-  destinations using the same safe file-operation scheduler, conflict UI,
-  progress reporting, and undo journal as keyboard/menu moves.
-- Clearly distinguish reordering a bookmark, bookmarking a folder, and moving
-  filesystem contents; the cursor and drop indicator must expose which action
-  will occur before release.
+- [x] Define the first reusable Marcel drag-session payload covering selection
+  identity, bookmark candidates, typed drop targets, insertion indicators, and
+  cancellation through GPUI's active-drag lifecycle. Extend it with explicit
+  action negotiation, edge scrolling, and keyboard/accessibility alternatives.
+- [x] Use bookmark creation and reordering as the first non-filesystem proving
+  ground for the shared drag payload and typed drop-target infrastructure.
+- [x] Allow selected filesystem items to be dropped onto browser folders,
+  Bookmarks, and Places using the safe move engine and undo journal.
+- Later, extend those drops with copy/link modifiers, cross-filesystem moves,
+  progress UI, hover-open, and native desktop drag-and-drop.
+- [x] Clearly distinguish reordering a bookmark, bookmarking a folder, and
+  moving filesystem contents with target styling, insertion lines, and
+  operation-specific cursors.
 
 ## Preview quality
 
@@ -113,6 +127,21 @@ item here belongs in that sprint.
 - Determine whether PDF page canvases should use actual per-page dimensions
   instead of a uniform fitted canvas.
 - Add adjacent-page prefetch tuning based on measured scroll behavior.
+
+## Settings, themes, and typography
+
+- Build a basic settings UI using gpui-component controls rather than leaving
+  preferences as scattered sidebar toggles.
+- Add a theme selector backed by Marcel's semantic color tokens and support
+  installing or loading additional palettes without introducing hard-coded
+  component colors.
+- Add a UI-font selector with system font discovery, an explicit default, and
+  a bundled-font policy. Preserve the fast Iosevka toggle as a convenient
+  preset until the selector replaces it.
+- Move Show Hidden, default view mode, typography, theme, preview behavior, and
+  other durable preferences into a documented settings model.
+- Persist settings under the XDG config directory with versioned, atomic,
+  recoverable writes.
 - Add media thumbnails, metadata, and explicit playback.
 - Unprioritized idea: add lightweight EPUB and MOBI previews showing the cover,
   metadata, table of contents where available, and a bounded text sample.
