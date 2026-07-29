@@ -16,6 +16,14 @@ pub async fn open_file(path: PathBuf) -> Result<()> {
         return Ok(());
     }
 
+    open_through_portal(path, false).await
+}
+
+pub async fn open_file_with(path: PathBuf) -> Result<()> {
+    open_through_portal(path, true).await
+}
+
+async fn open_through_portal(path: PathBuf, ask: bool) -> Result<()> {
     let file_path = path.clone();
     let file = smol::unblock(move || File::open(&file_path))
         .await
@@ -23,7 +31,7 @@ pub async fn open_file(path: PathBuf) -> Result<()> {
 
     let portal_result = async {
         let request = OpenFileRequest::default()
-            .ask(false)
+            .ask(ask)
             .send_file(&file.as_fd())
             .await
             .context("sending the file to the desktop portal")?;
@@ -35,21 +43,26 @@ pub async fn open_file(path: PathBuf) -> Result<()> {
 
     portal_result.map_err(|error| {
         anyhow!(
-            "could not open {} through `gio open` or the desktop portal: {error}",
+            "could not open {} through the desktop portal: {error}",
             path.display()
         )
     })
 }
 
 async fn run_gio(path: &Path) -> Result<bool> {
-    let result = smol::process::Command::new("gio")
+    let mut command = smol::process::Command::new("gio");
+    command
         .arg("open")
         .arg(path)
+        // The Nix development shell supplies Marcel's native runtime libraries
+        // through LD_LIBRARY_PATH. Letting that private search path leak into
+        // a desktop handler can make an independently packaged application
+        // load an incompatible glibc or graphics stack.
+        .env_remove("LD_LIBRARY_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+        .stderr(Stdio::null());
+    let result = command.status().await;
 
     match result {
         Ok(status) => Ok(status.success()),

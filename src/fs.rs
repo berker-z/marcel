@@ -4,6 +4,10 @@ use std::{
     fs::DirEntry,
     io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
 };
 
 use async_channel::Sender;
@@ -92,6 +96,26 @@ pub enum DirectoryUpdate {
 /// https://github.com/sxyazi/yazi/blob/main/yazi-fs/src/op.rs
 /// https://github.com/sxyazi/yazi/blob/main/yazi-fs/src/entries.rs
 pub fn stream_directory(path: &Path, sender: Sender<DirectoryUpdate>) {
+    stream_directory_inner(path, sender, None);
+}
+
+pub fn stream_directory_cancellable(
+    path: &Path,
+    sender: Sender<DirectoryUpdate>,
+    cancelled: Arc<AtomicBool>,
+) {
+    stream_directory_inner(path, sender, Some(&cancelled));
+}
+
+fn stream_directory_inner(
+    path: &Path,
+    sender: Sender<DirectoryUpdate>,
+    cancelled: Option<&AtomicBool>,
+) {
+    if cancelled.is_some_and(|cancelled| cancelled.load(AtomicOrdering::Acquire)) {
+        return;
+    }
+
     let reader = match std::fs::read_dir(path) {
         Ok(reader) => reader,
         Err(error) => {
@@ -103,6 +127,9 @@ pub fn stream_directory(path: &Path, sender: Sender<DirectoryUpdate>) {
     let mut icons = IconProvider::discover();
     let mut batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
     for entry in reader {
+        if cancelled.is_some_and(|cancelled| cancelled.load(AtomicOrdering::Acquire)) {
+            return;
+        }
         let Ok(entry) = entry else {
             continue;
         };
@@ -240,5 +267,15 @@ mod tests {
         assert_eq!(format_size(Some(42)), "42 B");
         assert_eq!(format_size(Some(1536)), "1.5 KiB");
         assert_eq!(format_size(None), "");
+    }
+
+    #[test]
+    fn cancelled_directory_stream_publishes_nothing() {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let (sender, receiver) = async_channel::unbounded();
+
+        stream_directory_cancellable(Path::new("."), sender, cancelled);
+
+        assert!(receiver.try_recv().is_err());
     }
 }

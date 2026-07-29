@@ -6,6 +6,7 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
         marcel::theme::init(cx);
+        marcel::commands::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(760.0)), cx);
 
@@ -22,7 +23,8 @@ fn main() {
                 |window, cx| {
                     let start_dir =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-                    let view = cx.new(|cx| Marcel::new(start_dir, cx));
+                    let view = cx.new(|cx| Marcel::new(start_dir, window, cx));
+                    view.update(cx, |view, _| view.focus_browser(window));
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )?;

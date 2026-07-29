@@ -12,8 +12,11 @@ types.
 ## Deliverables
 
 - [x] A three-pane application shell: places, directory contents, and preview.
-- [x] Draggable pane splitters with a 2:6:4 default ratio and bounded minimum
-  widths.
+- [x] A fixed, content-derived Places sidebar and draggable browser/preview
+  splitter with a 3:2 workspace default and bounded minimum widths.
+- [x] An application-wide top bar containing the title, navigation controls,
+  current-path breadcrumb surface, reserved search affordance, and view
+  controls.
 - [x] Asynchronous, incremental directory enumeration.
 - [x] Single selection and conventional pointer interaction.
 - [x] Multi-selection.
@@ -36,6 +39,9 @@ types.
   conventional directories as a fallback.
 - [x] A flat, content-first preview pane without redundant header, action, or
   nested card chrome.
+- [x] Cancellable, virtualized previews of a folder's immediate children, with
+  hover and double-click activation but no duplicate selection or file-action
+  surface.
 
 ## Remaining work
 
@@ -115,6 +121,11 @@ types.
   remain virtualized.
 - Individual preview lines are bounded before layout, preventing minified or
   generated one-line files from monopolizing a frame.
+- Folder previews reuse the cancellable, incrementally sorted directory
+  provider and a separate virtualized viewport. They enumerate only immediate
+  children, publish only while their preview ticket remains current, and do
+  not introduce selection, context menus, recursive size work, or destructive
+  actions inside the preview pane.
 - File paths remain `PathBuf`; lossy UTF-8 conversion is limited to display
   names.
 
@@ -131,6 +142,9 @@ types.
 - [x] Configured and fallback XDG Places parsing is covered by unit tests.
 - [x] Linux file activation honors MIME defaults without forcing an Open With
   dialog during the normal path.
+- [x] A selected folder streams its immediate children without blocking the UI;
+  double-clicking a preview child navigates or opens through the existing
+  activation path.
 
 ## Progress log
 
@@ -141,6 +155,8 @@ types.
   stale-preview rejection behind Marcel-owned modules.
 - Added image/GIF, bounded text/source, rendered Markdown, and metadata preview
   paths.
+- Added the selected item's complete filename to the preview footer above its
+  type, size, MIME, and preview-limit metadata.
 - Fixed large-text UI stalls with line virtualization and per-line bounds.
 - Added always-visible gpui-component scrollbars to browser and preview lists,
   plus Unicode-width-aware soft wrapping for the large-text fallback.
@@ -148,14 +164,30 @@ types.
   timeout-bounded Poppler provider, a virtualized page list, visible-first
   two-worker scheduling, fixed-size JPEG rasterization, and an identity-aware
   disk cache.
-- Replaced fixed pane widths with draggable gpui-component splitters using a
-  2:6:4 Places/browser/preview default and protective minimum widths.
+- Kept Places fixed and content-sized while retaining a draggable
+  gpui-component splitter for the browser/preview workspace with a 3:2 default
+  and protective minimum widths.
+- Moved title, navigation, current path, reserved search affordance, and view
+  controls into a single application-wide top bar. Places rows are
+  left-aligned and resolve semantic icons from the active freedesktop theme.
+- Compacted the top bar to a 40-pixel toolbar, removed redundant branding, and
+  aligned navigation over the Places column using explicit semantic foreground
+  colors for dark-theme readability.
 - Unified component and application colors under a palette-driven theme.
+- Moved Marcel-owned radii onto the shared theme token, added a live
+  system/Iosevka UI-font switch, and made virtualized text wrapping and row
+  height follow measured monospace glyph metrics.
 - Replaced hard-coded Home/Documents/Downloads entries with asynchronous XDG
   Places discovery.
 - Flattened the preview presentation and removed redundant Preview/Open chrome.
 - Corrected Linux activation for Hyprland and other desktops where `xdg-open`
   can fall through to a browser.
+- Isolated system application launches from Marcel's private
+  `LD_LIBRARY_PATH`, preventing Nix development-shell libraries from breaking
+  independently packaged handlers such as LibreOffice.
 - Replaced single selection with a path-keyed multi-selection model and added
   conventional Control, Shift, and empty-space drag selection as the first
   Sprint 2 slice.
+- Added Yazi-inspired folder previews as a bounded glance into the selected
+  directory: cancellable incremental enumeration, a virtualized scrollable
+  child list, live child counts, hover feedback, and double-click activation.

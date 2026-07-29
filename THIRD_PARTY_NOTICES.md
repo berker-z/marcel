@@ -19,6 +19,19 @@ adapted into Marcel itself.
   - `src/app.rs` adapts the task replacement and stale-preview rejection
     principles from `yazi-core/src/tab/preview.rs` and
     `yazi-core/src/tab/preview_lock.rs`.
+  - `src/app.rs` adapts the separation of finder matches as derived state over
+    the current folder from `yazi-core/src/tab/finder.rs` at upstream commit
+    `e58022b9aafc8dabf586e2cc29b79a230071716f`. Marcel uses a fuzzy-ranked
+    visible-index list shared by both GUI views rather than Yazi's finder
+    match-index map.
+  - `src/app.rs` and `src/fs.rs` adapt Yazi's separation of a hovered-folder
+    preview from the main browser, its bounded visible folder slice, and its
+    independently refreshed folder state from
+    `yazi-actor/src/lives/preview.rs`, `yazi-actor/src/mgr/peek.rs`, and
+    `yazi-core/src/tab/tab.rs` at upstream commit
+    `e58022b9aafc8dabf586e2cc29b79a230071716f`. Marcel uses a cancellable
+    batch stream and a GPUI virtualized list; it adds no selection or file
+    operations to the preview surface.
   - `src/app.rs` adapts the visible-page-first preloading, bounded worker-pool,
     duplicate suppression, and queued-work supersession principles from
     `yazi-core/src/tasks/prework.rs`, `yazi-scheduler/src/scheduler.rs`, and

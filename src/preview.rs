@@ -14,6 +14,9 @@ const MAX_PREVIEW_LINE_CHARS: usize = 2 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum Preview {
+    Directory {
+        path: PathBuf,
+    },
     Image {
         path: PathBuf,
         mime: String,
@@ -49,8 +52,8 @@ pub fn load_preview(
     cancelled: &Arc<std::sync::atomic::AtomicBool>,
 ) -> io::Result<Preview> {
     if entry.navigable {
-        return Ok(Preview::Metadata {
-            summary: format!("{}\n{}", entry.display_kind(), entry.path.display()),
+        return Ok(Preview::Directory {
+            path: entry.path.clone(),
         });
     }
 

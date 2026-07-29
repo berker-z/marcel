@@ -23,6 +23,20 @@ must arrive progressively without blocking navigation.
 - [x] MIME-specific icons with generic and built-in fallbacks.
 - [x] Progressive image thumbnails for visible and near-visible grid items.
 - [x] A bounded memory thumbnail cache and freedesktop-compatible disk cache.
+- [x] A browser-scoped command layer shared by keyboard and future action
+  surfaces.
+- [x] Arrow, Shift+Arrow, Home/End, Shift+Home/End, Page Up/Down,
+  Shift+Page Up/Down, Enter, Escape, Control+Arrow history/parent navigation,
+  and Control+A selection commands.
+- [x] Item context-menu selection semantics that preserve a multi-selection
+  while making the right-clicked member primary.
+- [x] An empty-space current-directory menu that clears item selection and
+  exposes the directory commands specified in the interaction contract.
+- [x] Window-wide, fuzzy current-directory filtering with a gpui-component
+  input, direct typing, Ctrl+F focus, keyboard result navigation, and a shared
+  visible-index layer for both views.
+- [x] A shared Show Hidden toggle for the Places footer and empty-space menu,
+  with Unix dotfile filtering and selection pruning.
 - [ ] Explicit loading, failure, and unsupported-thumbnail states.
 
 File move/copy drag-and-drop is a later sprint. This sprint must leave a clean
@@ -45,6 +59,11 @@ gesture boundary for it.
   drag-and-drop exists, dragging a selected item will start that operation.
 - The most recently focused selected file owns the preview. A multi-selection
   with no distinct primary item shows a compact selection summary.
+- Right-clicking within a multi-selection preserves every selected path and
+  makes the clicked path primary. Primary-only actions such as Open target that
+  item; future batch operations target the entire preserved selection.
+- Right-clicking empty browser space clears item selection and opens a
+  current-directory menu rather than an item-operation menu.
 
 ## Proposed model
 
@@ -136,11 +155,18 @@ decoding must be cached and stay off the foreground executor.
 - [ ] Edge dragging scrolls and can select items that began off-screen.
 - [ ] Double-click activation still works and does not leave a marquee active.
 - [ ] Switching view mode retains selected and primary paths.
+- [ ] Keyboard navigation follows the documented interaction model, keeps the
+  primary item visible, and does not steal keys while another control owns
+  focus.
 - [ ] Opening a directory with 50,000 entries does not eagerly decode icons or
   thumbnails for every entry.
 - [ ] Rapid navigation cannot publish stale thumbnails into the new directory.
 - [ ] Missing themes and corrupt icons degrade to a visible fallback.
 - [ ] Theme icons and thumbnails remain sharp at scale factors greater than one.
+- [ ] Direct typing starts filtering regardless of whether browser, preview,
+  Places, or toolbar focus was active.
+- [x] Filtering prunes hidden selections and Select All affects only visible
+  matches.
 
 ## Progress log
 
@@ -174,9 +200,9 @@ decoding must be cached and stay off the foreground executor.
 - Added unit coverage for selection replacement, toggling, bidirectional ranges,
   additive marquee snapshots, rectangle normalization, edge-scroll direction,
   and MIME icon fallback ordering.
-- Added compact gpui-component toolbar controls for switching between list and
-  icon views. Selection, primary item, and preview state remain path-keyed and
-  survive the renderer change.
+- Added a compact gpui-component switch between list and grid glyphs in the
+  Places footer. Selection, primary item, and preview state remain path-keyed
+  and survive the renderer change.
 - Added a responsive icon grid that virtualizes fixed-height rows and derives
   its column count from the current browser width. Tiles use the same click,
   modifier-selection, double-click activation, and marquee APIs as list rows.
@@ -200,6 +226,45 @@ decoding must be cached and stay off the foreground executor.
   or `iTXt` chunks, allowing thumbnails produced by other compliant desktop
   applications to be reused. New thumbnails use the PNG crate's fast
   compression profile.
+- Added a focused `MarcelBrowser` GPUI action context and a Marcel-owned command
+  dispatcher. Pointer clicks, future menus, and typed key actions share the
+  same selection/navigation methods and enabled-state checks.
+- Added a fuzzy-ranked visible-index layer over the authoritative directory
+  entries. The top-bar gpui-component input and window-wide printable-key
+  capture share this state; list/grid rendering, keyboard movement, range and
+  marquee selection, Select All, empty states, and thumbnail scheduling all
+  consume the resulting order.
+- Added direct typing from anywhere in Marcel, Ctrl+F focus, Up/Down match
+  navigation, Enter activation, Backspace editing away from the input, Escape
+  clearing, query preservation on refresh, and query clearing on navigation.
+- Pruned selection paths that become invisible after a query change so later
+  write operations cannot accidentally target hidden files.
+- Added a Show Hidden switch above the view-mode switch and activated the same
+  command in the empty-space context menu. Hidden dotfiles are shown by
+  default and use the same visible-index and selection-safety path as search
+  when the user hides them.
+- Replaced unreliable three-line grid label clipping with a bounded two-line
+  label. Long names are shortened before layout with a Unicode-aware middle
+  ellipsis that preserves the file extension.
+- Added conventional keyboard selection in list and icon views. Shift extends
+  from the path-keyed anchor, grid movement follows current columns, page
+  movement derives its step from the viewport, and selection is scrolled into
+  view before its preview is requested.
+- Added an item context menu in both views. Right-clicking an
+  unselected item selects it; right-clicking within a multi-selection preserves
+  that selection while making the clicked item primary. `Open` uses the shared
+  command dispatcher, and `Open With…` uses the desktop portal's explicit
+  application chooser. The intended write-operation surface remains visibly
+  disabled until its safety and undo contracts are implemented.
+- Added the empty-space current-directory menu in both non-empty and empty
+  folders. It clears item selection, keeps directory actions distinct from
+  selection actions, and initially enables Select All, Refresh, and Copy
+  Location while showing the remaining planned surface as disabled.
+- gpui-component 0.5.1's `PopupMenu` was trialed first, but its private,
+  unconditional `shadow_lg` renders as heavy opaque bands with GPUI 0.2.2 on
+  the target Linux compositor and cannot be overridden publicly. Marcel
+  therefore owns the small border-only popover shell while retaining the
+  shared command implementation.
 
 ## Study and provenance notes
 

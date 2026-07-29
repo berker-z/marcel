@@ -29,6 +29,15 @@ impl IconProvider {
         None
     }
 
+    pub fn icon_for_place(&mut self, label: &str) -> Option<PathBuf> {
+        for name in place_icon_candidates(label) {
+            if let Some(icon) = self.lookup(name) {
+                return Some(icon);
+            }
+        }
+        None
+    }
+
     fn lookup(&mut self, name: &str) -> Option<PathBuf> {
         if let Some(cached) = self.cache.get(name) {
             return cached.clone();
@@ -45,6 +54,21 @@ impl IconProvider {
 
         self.cache.insert(name.to_string(), icon.clone());
         icon
+    }
+}
+
+fn place_icon_candidates(label: &str) -> &'static [&'static str] {
+    match label {
+        "Home" => &["user-home", "folder-home", "folder"],
+        "Desktop" => &["user-desktop", "folder-desktop", "folder"],
+        "Documents" => &["folder-documents", "folder"],
+        "Downloads" => &["folder-download", "folder-downloads", "folder"],
+        "Music" => &["folder-music", "folder"],
+        "Pictures" => &["folder-pictures", "folder-images", "folder"],
+        "Public" => &["folder-publicshare", "folder-public", "folder"],
+        "Templates" => &["folder-templates", "folder"],
+        "Videos" => &["folder-videos", "folder-video", "folder"],
+        _ => &["folder"],
     }
 }
 
@@ -139,5 +163,18 @@ mod tests {
     fn archives_receive_package_fallbacks() {
         let candidates = icon_candidates(Path::new("source.tar.gz"), false);
         assert_eq!(candidates[1], "package-x-generic");
+    }
+
+    #[test]
+    fn places_use_freedesktop_semantic_icon_names() {
+        assert_eq!(
+            place_icon_candidates("Home"),
+            ["user-home", "folder-home", "folder"]
+        );
+        assert_eq!(
+            place_icon_candidates("Pictures"),
+            ["folder-pictures", "folder-images", "folder"]
+        );
+        assert_eq!(place_icon_candidates("Other"), ["folder"]);
     }
 }

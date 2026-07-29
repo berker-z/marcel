@@ -36,6 +36,12 @@ impl SelectionModel {
         self.primary = Some(path);
     }
 
+    pub fn make_primary(&mut self, path: &Path) {
+        if self.selected.contains(path) {
+            self.primary = Some(path.to_path_buf());
+        }
+    }
+
     pub fn toggle(&mut self, path: PathBuf) {
         if self.selected.remove(&path) {
             if self.primary.as_ref() == Some(&path) {
@@ -70,6 +76,33 @@ impl SelectionModel {
         };
         self.selected.extend(ordered[start..=end].iter().cloned());
         self.primary = Some(path);
+    }
+
+    pub fn select_all(&mut self, ordered: &[PathBuf]) {
+        if ordered.is_empty() {
+            self.clear();
+            return;
+        }
+
+        let primary = self
+            .primary
+            .as_ref()
+            .filter(|primary| ordered.contains(primary))
+            .cloned()
+            .unwrap_or_else(|| ordered[0].clone());
+        self.selected = ordered.iter().cloned().collect();
+        self.anchor = Some(primary.clone());
+        self.primary = Some(primary);
+    }
+
+    pub fn retain(&mut self, mut predicate: impl FnMut(&Path) -> bool) {
+        self.selected.retain(|path| predicate(path));
+        if self.primary.as_ref().is_some_and(|path| !predicate(path)) {
+            self.primary = None;
+        }
+        if self.anchor.as_ref().is_some_and(|path| !predicate(path)) {
+            self.anchor = None;
+        }
     }
 
     pub fn replace_from_marquee(
@@ -142,5 +175,41 @@ mod tests {
             selection.selected(),
             &HashSet::from([path("a"), path("c"), path("d")])
         );
+    }
+
+    #[test]
+    fn select_all_preserves_an_existing_primary_item() {
+        let ordered = [path("a"), path("b"), path("c")];
+        let mut selection = SelectionModel::default();
+        selection.select_only(path("b"));
+        selection.select_all(&ordered);
+
+        assert_eq!(selection.selected(), &HashSet::from(ordered));
+        assert_eq!(selection.primary(), Some(&path("b")));
+    }
+
+    #[test]
+    fn making_a_selected_item_primary_preserves_the_selection() {
+        let mut selection = SelectionModel::default();
+        selection.select_only(path("a"));
+        selection.toggle(path("b"));
+
+        selection.make_primary(Path::new("a"));
+
+        assert_eq!(selection.selected(), &HashSet::from([path("a"), path("b")]));
+        assert_eq!(selection.primary(), Some(&path("a")));
+    }
+
+    #[test]
+    fn retaining_visible_paths_removes_hidden_selection_state() {
+        let mut selection = SelectionModel::default();
+        selection.select_only(path("hidden"));
+        selection.toggle(path("visible"));
+        selection.make_primary(Path::new("hidden"));
+
+        selection.retain(|candidate| candidate == Path::new("visible"));
+
+        assert_eq!(selection.selected(), &HashSet::from([path("visible")]));
+        assert_eq!(selection.primary(), None);
     }
 }

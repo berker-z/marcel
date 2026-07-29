@@ -1,0 +1,87 @@
+use gpui::{App, KeyBinding, actions};
+
+pub const BROWSER_KEY_CONTEXT: &str = "MarcelBrowser";
+
+actions!(
+    marcel,
+    [
+        MoveUp,
+        MoveDown,
+        MoveLeft,
+        MoveRight,
+        ExtendUp,
+        ExtendDown,
+        ExtendLeft,
+        ExtendRight,
+        ExtendToFirst,
+        ExtendToLast,
+        ExtendPageUp,
+        ExtendPageDown,
+        SelectFirst,
+        SelectLast,
+        SelectPageUp,
+        SelectPageDown,
+        ActivateSelection,
+        OpenWithSelection,
+        ClearSelection,
+        GoToParent,
+        GoBack,
+        GoForward,
+        SelectAll,
+    ]
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserCommand {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    ExtendUp,
+    ExtendDown,
+    ExtendLeft,
+    ExtendRight,
+    ExtendToFirst,
+    ExtendToLast,
+    ExtendPageUp,
+    ExtendPageDown,
+    SelectFirst,
+    SelectLast,
+    SelectPageUp,
+    SelectPageDown,
+    ActivateSelection,
+    OpenWithSelection,
+    ClearSelection,
+    GoToParent,
+    GoBack,
+    GoForward,
+    SelectAll,
+}
+
+pub fn init(cx: &mut App) {
+    let context = Some(BROWSER_KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("up", MoveUp, context),
+        KeyBinding::new("down", MoveDown, context),
+        KeyBinding::new("left", MoveLeft, context),
+        KeyBinding::new("right", MoveRight, context),
+        KeyBinding::new("shift-up", ExtendUp, context),
+        KeyBinding::new("shift-down", ExtendDown, context),
+        KeyBinding::new("shift-left", ExtendLeft, context),
+        KeyBinding::new("shift-right", ExtendRight, context),
+        KeyBinding::new("shift-home", ExtendToFirst, context),
+        KeyBinding::new("shift-end", ExtendToLast, context),
+        KeyBinding::new("shift-pageup", ExtendPageUp, context),
+        KeyBinding::new("shift-pagedown", ExtendPageDown, context),
+        KeyBinding::new("home", SelectFirst, context),
+        KeyBinding::new("end", SelectLast, context),
+        KeyBinding::new("pageup", SelectPageUp, context),
+        KeyBinding::new("pagedown", SelectPageDown, context),
+        KeyBinding::new("enter", ActivateSelection, context),
+        KeyBinding::new("escape", ClearSelection, context),
+        KeyBinding::new("ctrl-up", GoToParent, context),
+        KeyBinding::new("ctrl-left", GoBack, context),
+        KeyBinding::new("ctrl-right", GoForward, context),
+        KeyBinding::new("ctrl-a", SelectAll, context),
+    ]);
+}
