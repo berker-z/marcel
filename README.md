@@ -24,6 +24,9 @@ promise. Development currently happens through the Nix flake.
   icon views.
 - Native directory watching with coalesced incremental updates, polling
   fallback, and stale-generation protection.
+- Incremental reconciliation after Marcel-owned file operations, preserving
+  the active directory session and scroll position instead of flashing through
+  a full reload.
 - Conventional click, Control-click, Shift-click, keyboard, and empty-space
   marquee selection.
 - Back, forward, parent, Places, XDG user directories, and navigation history.
@@ -167,8 +170,8 @@ Marcel is not ready to replace a mature system file manager for every workflow:
   Marcel works.
 - Cut/move is currently same-filesystem. Cross-filesystem moves and interactive
   conflict decisions are parked; occupied destinations are safely refused.
-- Rename, New File, Duplicate, Move To, Properties, Open in Terminal, ZIP
-  creation, and extraction are not implemented yet.
+- New File, Duplicate, Move To, Properties, Open in Terminal, ZIP creation, and
+  extraction are not implemented yet.
 - Removable-volume navigation, mount management, and remote locations are not
   implemented. Mounted-volume Trash behavior still needs its manual acceptance
   pass.
@@ -193,8 +196,8 @@ The immediate alpha-to-daily-driver sequence is:
 
 1. Complete destructive-operation, mounted-Trash, watcher, preview, and
    large-directory acceptance passes.
-2. Add Rename, then New File, Open in Terminal, Properties, Duplicate, and
-   Move To.
+2. Finish New File, Open in Terminal, and Properties, then add Duplicate and
+   Move To in their appropriate operation slices.
 3. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
    from the application coordinator.
 4. Implement bilateral native desktop drag-and-drop and clipboard

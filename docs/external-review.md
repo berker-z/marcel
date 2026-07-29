@@ -96,8 +96,10 @@ notifications fall back to polling, noisy paths are coalesced and deduplicated,
 metadata is revalidated off the foreground executor, and each bounded batch is
 applied with one projection/selection reconciliation pass. Generation checks
 prevent a replaced watcher from publishing after navigation. Marcel's own
-completed operations retain their conservative full reload until explicit
-operation-to-watcher reporting is proven.
+completed operations now report exact top-level upserts/removals through that
+same reducer. This preserves scroll, selection projection, thumbnails, and the
+active watcher in large directories; metadata failures retain a bounded full
+rescan fallback.
 
 ## Copy-semantics and scale debt
 

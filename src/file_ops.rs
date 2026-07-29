@@ -89,6 +89,11 @@ pub enum OperationRecord {
     Restore {
         records: Vec<TrashRecord>,
     },
+    Rename {
+        source: PathBuf,
+        destination: PathBuf,
+        identity: FileIdentity,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +115,12 @@ pub struct MoveRecord {
     source: PathBuf,
     destination: PathBuf,
     expected_state: Vec<PathSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectoryChanges {
+    pub removed: Vec<PathBuf>,
+    pub upserted: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +224,75 @@ impl OperationRecord {
                 .first()
                 .map(TrashRecord::original_path)
                 .unwrap_or_else(|| Path::new("")),
+            Self::Rename { destination, .. } => destination,
+        }
+    }
+
+    pub fn forward_directory_changes(&self) -> DirectoryChanges {
+        match self {
+            Self::CreateDirectory { path, .. } => DirectoryChanges {
+                upserted: vec![path.clone()],
+                ..DirectoryChanges::default()
+            },
+            Self::Copy {
+                destination,
+                created,
+                ..
+            } => DirectoryChanges {
+                upserted: created
+                    .iter()
+                    .filter(|snapshot| snapshot.path.parent() == Some(destination.as_path()))
+                    .map(|snapshot| snapshot.path.clone())
+                    .collect(),
+                ..DirectoryChanges::default()
+            },
+            Self::Move { transfers } => DirectoryChanges {
+                removed: transfers
+                    .iter()
+                    .map(|transfer| transfer.source.clone())
+                    .collect(),
+                upserted: transfers
+                    .iter()
+                    .map(|transfer| transfer.destination.clone())
+                    .collect(),
+            },
+            Self::Trash { records } => DirectoryChanges {
+                removed: records
+                    .iter()
+                    .map(|record| record.original_path().to_path_buf())
+                    .collect(),
+                ..DirectoryChanges::default()
+            },
+            Self::Restore { records } => DirectoryChanges {
+                upserted: records
+                    .iter()
+                    .map(|record| record.original_path().to_path_buf())
+                    .collect(),
+                ..DirectoryChanges::default()
+            },
+            Self::Rename {
+                source,
+                destination,
+                ..
+            } => DirectoryChanges {
+                removed: vec![source.clone()],
+                upserted: vec![destination.clone()],
+            },
+        }
+    }
+
+    pub fn reverse_directory_changes(&self) -> DirectoryChanges {
+        let forward = self.forward_directory_changes();
+        DirectoryChanges {
+            removed: forward.upserted,
+            upserted: forward.removed,
+        }
+    }
+
+    pub fn trash_records(&self) -> Option<&[TrashRecord]> {
+        match self {
+            Self::Trash { records } | Self::Restore { records } => Some(records),
+            _ => None,
         }
     }
 }
@@ -289,13 +369,13 @@ fn push_bounded(stack: &mut VecDeque<OperationRecord>, operation: OperationRecor
 
 pub fn validate_entry_name(name: &str) -> Result<()> {
     if name.is_empty() || name.trim().is_empty() {
-        bail!("Enter a folder name");
+        bail!("Enter a name");
     }
     if name == "." || name == ".." {
-        bail!("“{name}” is reserved and cannot be used as a folder name");
+        bail!("“{name}” is reserved and cannot be used as a name");
     }
     if name.contains('/') || name.contains('\0') {
-        bail!("Folder names cannot contain “/” or a null character");
+        bail!("Names cannot contain “/” or a null character");
     }
     Ok(())
 }
@@ -303,6 +383,44 @@ pub fn validate_entry_name(name: &str) -> Result<()> {
 pub fn create_directory(parent: &Path, name: &str) -> Result<OperationRecord> {
     validate_entry_name(name)?;
     create_directory_at(parent.join(name))
+}
+
+// Yazi's rename actor coordinates focused input, watcher updates, and reveal:
+// https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-actor/src/mgr/rename.rs
+// Marcel keeps those interaction principles but owns this stricter
+// RENAME_NOREPLACE and identity-validating Undo/Redo implementation. No Yazi
+// code is copied.
+pub fn rename_entry(source: &Path, name: &str) -> Result<OperationRecord> {
+    validate_entry_name(name)?;
+    let parent = source.parent().context("Rename source has no parent")?;
+    let current_name = source.file_name().context("Rename source has no name")?;
+    if current_name == OsStr::new(name) {
+        bail!("The new name is unchanged");
+    }
+    let destination = parent.join(name);
+    ensure_unoccupied(&destination)?;
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("Could not inspect “{}”", source.display()))?;
+    let expected = file_identity(&metadata);
+    validate_file_identity(source, &expected, "rename")?;
+    rename_no_replace(source, &destination).with_context(|| {
+        format!(
+            "Could not rename “{}” to “{}”",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    let metadata = fs::symlink_metadata(&destination).with_context(|| {
+        format!(
+            "Renamed “{}” but could not inspect the result",
+            destination.display()
+        )
+    })?;
+    Ok(OperationRecord::Rename {
+        source: source.to_path_buf(),
+        destination,
+        identity: file_identity(&metadata),
+    })
 }
 
 pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
@@ -367,6 +485,7 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
         OperationRecord::Restore { records } => Ok(OperationRecord::Restore {
             records: retrash_records(records)?,
         }),
+        OperationRecord::Rename { .. } => reverse_rename(operation),
     }
 }
 
@@ -424,7 +543,39 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
         OperationRecord::Restore { records } => Ok(OperationRecord::Restore {
             records: restore_trash_records(records)?,
         }),
+        OperationRecord::Rename { .. } => reverse_rename(operation),
     }
+}
+
+fn reverse_rename(operation: &OperationRecord) -> Result<OperationRecord> {
+    let OperationRecord::Rename {
+        source,
+        destination,
+        identity,
+    } = operation
+    else {
+        bail!("Operation is not a rename");
+    };
+    validate_file_identity(destination, identity, "reverse rename")?;
+    ensure_unoccupied(source)?;
+    rename_no_replace(destination, source).with_context(|| {
+        format!(
+            "Could not rename “{}” back to “{}”",
+            destination.display(),
+            source.display()
+        )
+    })?;
+    let metadata = fs::symlink_metadata(source).with_context(|| {
+        format!(
+            "Renamed “{}” but could not inspect the result",
+            source.display()
+        )
+    })?;
+    Ok(OperationRecord::Rename {
+        source: destination.clone(),
+        destination: source.clone(),
+        identity: file_identity(&metadata),
+    })
 }
 
 fn rollback_failed_redo(outcome: TransferOutcome) -> Result<OperationRecord> {
@@ -1237,6 +1388,18 @@ fn remove_snapshotted_tree(snapshots: &[PathSnapshot]) -> Result<()> {
     Ok(())
 }
 
+fn validate_file_identity(path: &Path, expected: &FileIdentity, action: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Cannot {action}: “{}” no longer exists", path.display()))?;
+    if file_identity(&metadata) != *expected {
+        bail!(
+            "Cannot {action}: “{}” changed or was replaced",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn ensure_unoccupied(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => bail!(
@@ -1321,6 +1484,67 @@ mod tests {
 
         assert!(create_directory(root.path(), "occupied").is_err());
         assert_eq!(fs::read(root.path().join("occupied")).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn rename_is_no_replace_and_supports_undo_redo() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("draft.txt");
+        let destination = root.path().join("final.txt");
+        fs::write(&source, b"contents").unwrap();
+
+        let operation = rename_entry(&source, "final.txt").unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"contents");
+        assert_eq!(
+            operation.forward_directory_changes(),
+            DirectoryChanges {
+                removed: vec![source.clone()],
+                upserted: vec![destination.clone()],
+            }
+        );
+        assert_eq!(
+            operation.reverse_directory_changes(),
+            DirectoryChanges {
+                removed: vec![destination.clone()],
+                upserted: vec![source.clone()],
+            }
+        );
+
+        let redo_record = undo_operation(&operation).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"contents");
+        assert!(!destination.exists());
+
+        let redone = redo_operation(&redo_record).unwrap();
+        assert_eq!(redone.path(), destination);
+        assert_eq!(fs::read(&destination).unwrap(), b"contents");
+    }
+
+    #[test]
+    fn rename_refuses_an_occupied_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let destination = root.path().join("occupied.txt");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&destination, b"keep").unwrap();
+
+        assert!(rename_entry(&source, "occupied.txt").is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&destination).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn rename_undo_refuses_a_modified_result() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("draft.txt");
+        let destination = root.path().join("final.txt");
+        fs::write(&source, b"original").unwrap();
+        let operation = rename_entry(&source, "final.txt").unwrap();
+        fs::write(&destination, b"modified").unwrap();
+
+        assert!(undo_operation(&operation).is_err());
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"modified");
     }
 
     #[test]
@@ -1411,6 +1635,13 @@ mod tests {
         assert_eq!(fs::read(album.join("notes.txt")).unwrap(), b"hello");
 
         let operation = outcome.operation.unwrap();
+        assert_eq!(
+            operation.forward_directory_changes(),
+            DirectoryChanges {
+                removed: Vec::new(),
+                upserted: vec![destination.join("album")],
+            }
+        );
         let redo_record = undo_operation(&operation).unwrap();
         assert!(!destination.join("album").exists());
         let redone = redo_operation(&redo_record).unwrap();
@@ -1523,6 +1754,13 @@ mod tests {
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
         let operation = outcome.operation.unwrap();
         assert!(!source.exists());
+        assert_eq!(
+            operation.forward_directory_changes(),
+            DirectoryChanges {
+                removed: vec![source.clone()],
+                upserted: vec![destination.join("move-me.txt")],
+            }
+        );
 
         let redo_record = undo_operation(&operation).unwrap();
         assert_eq!(fs::read(&source).unwrap(), b"contents");

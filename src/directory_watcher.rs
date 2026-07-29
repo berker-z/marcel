@@ -118,7 +118,7 @@ pub fn watch_directory(
             continue;
         }
 
-        let events = revalidate_paths(paths, &mut icons);
+        let events = revalidate_paths_with_icons(paths, &mut icons);
         if !events.is_empty()
             && updates
                 .send_blocking(DirectoryWatcherUpdate::Events(events))
@@ -177,7 +177,22 @@ fn collect_changed_paths(
     Some(paths.into_iter().collect())
 }
 
-fn revalidate_paths(paths: Vec<PathBuf>, icons: &mut IconProvider) -> Vec<DirectoryEvent> {
+pub(crate) fn revalidate_paths(paths: Vec<PathBuf>) -> Vec<DirectoryEvent> {
+    let mut icons = IconProvider::discover();
+    paths
+        .into_iter()
+        .map(|path| match FileEntry::from_path(&path, &mut icons) {
+            Ok(entry) => DirectoryEvent::Changed(entry),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => DirectoryEvent::Removed(path),
+            Err(_) => DirectoryEvent::RescanRequired,
+        })
+        .collect()
+}
+
+fn revalidate_paths_with_icons(
+    paths: Vec<PathBuf>,
+    icons: &mut IconProvider,
+) -> Vec<DirectoryEvent> {
     paths
         .into_iter()
         .filter_map(|path| match FileEntry::from_path(&path, icons) {
@@ -239,7 +254,8 @@ mod tests {
         std::fs::write(&existing, b"hello").unwrap();
         let mut icons = IconProvider::discover();
 
-        let events = revalidate_paths(vec![existing.clone(), missing.clone()], &mut icons);
+        let events =
+            revalidate_paths_with_icons(vec![existing.clone(), missing.clone()], &mut icons);
 
         assert!(events.iter().any(
             |event| matches!(event, DirectoryEvent::Changed(entry) if entry.path == existing)
@@ -248,6 +264,14 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, DirectoryEvent::Removed(path) if path == &missing))
+        );
+    }
+
+    #[test]
+    fn operation_revalidation_requests_rescan_for_ambiguous_errors() {
+        assert_eq!(
+            revalidate_paths(vec![PathBuf::from("/")]),
+            vec![DirectoryEvent::RescanRequired]
         );
     }
 }

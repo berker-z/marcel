@@ -5,9 +5,8 @@ shortcuts, context menus, and future toolbar actions. Sprint documents decide
 when each command is implemented; this is the cross-sprint interaction
 contract.
 
-The navigation and selection shortcuts below are implemented. New Folder and
-its bounded undo/redo path are the first active file operations; the remaining
-file-operation shortcuts stay inactive until their transaction and undo
+The navigation, selection, and listed file-operation shortcuts below are
+implemented. Planned commands stay inactive until their transaction and undo
 behavior exists.
 
 ## Principles
@@ -38,6 +37,7 @@ behavior exists.
 | `Ctrl+Right` | Go forward in navigation history |
 | `Ctrl+A` | Select all items in the current directory |
 | `Ctrl+Shift+N` | Create a folder in the current directory |
+| `F2` | Rename the single selected item |
 
 Plain left/right behavior may differ between list and icon views, but the
 Control-modified navigation commands above take precedence in both.
@@ -187,9 +187,10 @@ requests the desktop application chooser. Cut, Copy, and Paste are active
 through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
 Remaining planned commands are disabled and prefixed with `–`: Duplicate,
-Rename, Move To, Create Link, Compress, Copy Path, and Properties. A planned
-command loses the prefix only when its implementation, enabled-state rules,
-error handling, and any required undo record are ready.
+Move To, Create Link, Compress, Copy Path, and Properties. Rename is active for
+exactly one ordinary filesystem selection and edits the name inline in both
+views. A planned command loses the prefix only when its implementation,
+enabled-state rules, error handling, and any required undo record are ready.
 
 Trash is the bottom-most item in Places and aggregates valid top-level entries
 from the freedesktop home and mounted-volume Trash roots. Trashed directories

@@ -36,6 +36,7 @@ actions!(
         DeletePermanently,
         EmptyTrash,
         NewFolder,
+        RenameSelection,
         UndoFileOperation,
         RedoFileOperation,
     ]
@@ -74,6 +75,7 @@ pub enum BrowserCommand {
     DeletePermanently,
     EmptyTrash,
     NewFolder,
+    RenameSelection,
     UndoFileOperation,
     RedoFileOperation,
 }
@@ -109,6 +111,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("delete", TrashSelection, context),
         KeyBinding::new("shift-delete", DeletePermanently, context),
         KeyBinding::new("ctrl-shift-n", NewFolder, context),
+        KeyBinding::new("f2", RenameSelection, context),
         KeyBinding::new("ctrl-z", UndoFileOperation, context),
         KeyBinding::new("ctrl-y", RedoFileOperation, context),
     ]);

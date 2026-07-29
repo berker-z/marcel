@@ -21,7 +21,7 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Position, SelectToStart as InputSelectToStart},
     notification::Notification,
     progress::Progress,
     resizable::{h_resizable, resizable_panel},
@@ -42,17 +42,18 @@ use crate::{
         CutSelection, DeletePermanently, EmptyTrash, ExtendDown, ExtendLeft, ExtendPageDown,
         ExtendPageUp, ExtendRight, ExtendToFirst, ExtendToLast, ExtendUp, GoBack, GoForward,
         GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp, NewFolder, OpenWithSelection,
-        PasteFiles, RedoFileOperation, RestoreSelection, SelectAll, SelectFirst, SelectLast,
-        SelectPageDown, SelectPageUp, TrashSelection, UndoFileOperation,
+        PasteFiles, RedoFileOperation, RenameSelection, RestoreSelection, SelectAll, SelectFirst,
+        SelectLast, SelectPageDown, SelectPageUp, TrashSelection, UndoFileOperation,
     },
     delete_ops::{delete_paths, summarize_failures as summarize_delete_failures},
     directory_session::{
         ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
     },
-    directory_watcher::{DirectoryWatcherUpdate, watch_directory},
+    directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     file_ops::{
-        OperationRecord, TransferMode, create_directory, redo_operation, summarize_failures,
-        transfer_paths_with_progress, undo_operation, validate_entry_name,
+        DirectoryChanges, OperationRecord, TransferMode, create_directory, redo_operation,
+        rename_entry, summarize_failures, transfer_paths_with_progress, undo_operation,
+        validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, format_size, merge_sorted_entries, stream_directory,
@@ -190,7 +191,10 @@ struct DragPreview {
 
 enum PermanentDeleteResult {
     Files(crate::delete_ops::DeleteOutcome),
-    Trash(crate::trash_ops::TrashOutcome),
+    Trash {
+        outcome: crate::trash_ops::TrashOutcome,
+        requested: Vec<TrashRecord>,
+    },
 }
 
 impl Render for DragPreview {
@@ -245,6 +249,9 @@ pub struct Marcel {
     directory: DirectorySession,
     search_input: Entity<InputState>,
     _search_subscriptions: Vec<Subscription>,
+    rename_path: Option<PathBuf>,
+    rename_input: Option<Entity<InputState>>,
+    rename_subscription: Option<Subscription>,
     operations: OperationController,
     entry_menu: Option<EntryMenu>,
     marquee: Option<MarqueeGesture>,
@@ -352,6 +359,9 @@ impl Marcel {
             directory: DirectorySession::new(start_dir.clone()),
             search_input,
             _search_subscriptions: vec![search_subscription],
+            rename_path: None,
+            rename_input: None,
+            rename_subscription: None,
             operations: OperationController::default(),
             entry_menu: None,
             marquee: None,
@@ -870,6 +880,9 @@ impl Marcel {
     }
 
     fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
+        self.rename_path = None;
+        self.rename_input = None;
+        self.rename_subscription = None;
         if self.browsing_trash {
             self.start_trash_load(clear_filter, cx);
             return;
@@ -1140,7 +1153,9 @@ impl Marcel {
                         .find(|entry| &entry.path == path)
                 })
                 .is_some_and(|entry| !entry.navigable && entry.kind != EntryKind::Directory),
-            BrowserCommand::ClearSelection => !self.directory.selection.selected().is_empty(),
+            BrowserCommand::ClearSelection => {
+                self.rename_path.is_some() || !self.directory.selection.selected().is_empty()
+            }
             BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
                 !self.browsing_trash
                     && !self.operations.is_busy()
@@ -1157,6 +1172,19 @@ impl Marcel {
             }
             BrowserCommand::NewFolder => {
                 !self.browsing_trash && !self.operations.is_busy() && self.directory.error.is_none()
+            }
+            BrowserCommand::RenameSelection => {
+                !self.browsing_trash
+                    && !self.operations.is_busy()
+                    && self.directory.error.is_none()
+                    && self.directory.selection.selected().len() == 1
+                    && self
+                        .directory
+                        .selection
+                        .primary()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .is_some()
             }
             BrowserCommand::TrashSelection => {
                 !self.browsing_trash
@@ -1268,8 +1296,12 @@ impl Marcel {
             BrowserCommand::ActivateSelection => self.activate_primary(cx),
             BrowserCommand::OpenWithSelection => self.open_primary_with(cx),
             BrowserCommand::ClearSelection => {
-                self.clear_selection();
-                cx.notify();
+                if self.rename_path.is_some() {
+                    self.cancel_rename(window, cx);
+                } else {
+                    self.clear_selection();
+                    cx.notify();
+                }
             }
             BrowserCommand::GoToParent => self.go_up(cx),
             BrowserCommand::GoBack => self.go_back(cx),
@@ -1283,6 +1315,7 @@ impl Marcel {
             BrowserCommand::DeletePermanently => self.open_permanent_delete_dialog(window, cx),
             BrowserCommand::EmptyTrash => self.open_empty_trash_dialog(window, cx),
             BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
+            BrowserCommand::RenameSelection => self.begin_rename(window, cx),
             BrowserCommand::UndoFileOperation => self.start_undo(window, cx),
             BrowserCommand::RedoFileOperation => self.start_redo(window, cx),
         }
@@ -1396,6 +1429,149 @@ impl Marcel {
         cx.notify();
     }
 
+    fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_menu = None;
+        let Some(path) = self.directory.selection.primary().cloned() else {
+            return;
+        };
+        let Some(name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+        else {
+            window.push_notification(
+                Notification::error("This filename is not valid UTF-8 and cannot be edited yet"),
+                cx,
+            );
+            return;
+        };
+        let is_directory = self
+            .directory
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .is_some_and(|entry| entry.kind == EntryKind::Directory);
+        let selection_end = rename_stem_end(&name, is_directory);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.submit_rename(input, window, cx);
+                }
+                InputEvent::Change | InputEvent::Focus => {}
+            },
+        );
+        self.rename_path = Some(path);
+        self.rename_input = Some(input.clone());
+        self.rename_subscription = Some(subscription);
+        cx.notify();
+
+        cx.defer_in(window, move |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_cursor_position(Position::new(0, selection_end as u32), window, cx);
+            });
+            window.dispatch_action(Box::new(InputSelectToStart), cx);
+        });
+    }
+
+    fn submit_rename(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.rename_path.clone() else {
+            return;
+        };
+        let name = input.read(cx).value().to_string();
+        if let Err(error) = validate_entry_name(&name) {
+            window.push_notification(Notification::error(error.to_string()), cx);
+            input.update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
+        if path.file_name() == Some(std::ffi::OsStr::new(&name)) {
+            self.cancel_rename(window, cx);
+            return;
+        }
+
+        self.rename_path = None;
+        self.rename_input = None;
+        self.rename_subscription = None;
+        self.browser_focus.focus(window);
+        self.start_rename(path, name, window, cx);
+    }
+
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.rename_path = None;
+        self.rename_input = None;
+        self.rename_subscription = None;
+        self.browser_focus.focus(window);
+        cx.notify();
+    }
+
+    fn start_rename(
+        &mut self,
+        source: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.operations.begin_simple() {
+            return;
+        }
+        let attempted_destination = source
+            .parent()
+            .map(|parent| parent.join(&name))
+            .unwrap_or_else(|| source.clone());
+        let task_source = source.clone();
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || rename_entry(&task_source, &name)));
+        let operation_task = cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                match result {
+                    Ok(operation) => {
+                        let destination = operation.path().to_path_buf();
+                        let display_name = destination
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let changes = operation.forward_directory_changes();
+                        this.operations.record(operation);
+                        this.apply_directory_changes(changes, Some(destination), cx);
+                        window.push_notification(
+                            Notification::success(format!("Renamed to “{display_name}”")),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                        // Most failures leave the source untouched. A failure
+                        // after the no-replace syscall (for example while
+                        // inspecting the result) may still have renamed it, so
+                        // revalidate both possible paths instead of assuming
+                        // either filesystem state.
+                        this.apply_directory_changes(
+                            DirectoryChanges {
+                                upserted: vec![source.clone(), attempted_destination.clone()],
+                                ..DirectoryChanges::default()
+                            },
+                            None,
+                            cx,
+                        );
+                    }
+                }
+                this.operations.finish_active();
+                cx.notify();
+            });
+        });
+        self.operations.set_task(operation_task);
+        cx.notify();
+    }
+
     fn open_new_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.entry_menu = None;
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
@@ -1448,8 +1624,9 @@ impl Marcel {
                 match result {
                     Ok(operation) => {
                         let path = operation.path().to_path_buf();
+                        let changes = operation.forward_directory_changes();
                         this.operations.record(operation);
-                        this.refresh_after_operation(&path, true, cx);
+                        this.apply_directory_changes(changes, Some(path.clone()), cx);
                         window.push_notification(
                             Notification::success(format!(
                                 "Created folder “{}”",
@@ -1487,10 +1664,35 @@ impl Marcel {
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
                     Ok(undone) => {
-                        let path = operation.path().to_path_buf();
+                        let reveal = matches!(&operation, OperationRecord::Rename { .. });
+                        let path = if reveal {
+                            undone.path().to_path_buf()
+                        } else {
+                            operation.path().to_path_buf()
+                        };
+                        let changes = operation.reverse_directory_changes();
                         let message = operation_history_message(&operation, false);
+                        if this.browsing_trash {
+                            match &operation {
+                                OperationRecord::Trash { records } => this.remove_trash_entries(
+                                    records
+                                        .iter()
+                                        .map(|record| record.backing_path().to_path_buf())
+                                        .collect(),
+                                    cx,
+                                ),
+                                OperationRecord::Restore { .. } => {
+                                    this.upsert_trash_entries(
+                                        undone.trash_records().unwrap_or_default().to_vec(),
+                                        cx,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            this.apply_directory_changes(changes, reveal.then_some(path), cx);
+                        }
                         this.operations.finish_undo(undone);
-                        this.refresh_after_operation(&path, false, cx);
                         window.push_notification(Notification::success(message), cx);
                     }
                     Err(error) => {
@@ -1522,9 +1724,31 @@ impl Marcel {
                 match result {
                     Ok(redone) => {
                         let path = redone.path().to_path_buf();
+                        let changes = redone.forward_directory_changes();
                         let message = operation_history_message(&redone, true);
+                        if this.browsing_trash {
+                            match &redone {
+                                OperationRecord::Trash { .. } => {
+                                    this.upsert_trash_entries(
+                                        redone.trash_records().unwrap_or_default().to_vec(),
+                                        cx,
+                                    );
+                                }
+                                OperationRecord::Restore { records } => {
+                                    this.remove_trash_entries(
+                                        records
+                                            .iter()
+                                            .map(|record| record.backing_path().to_path_buf())
+                                            .collect(),
+                                        cx,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            this.apply_directory_changes(changes, Some(path), cx);
+                        }
                         this.operations.finish_redo(redone);
-                        this.refresh_after_operation(&path, true, cx);
                         window.push_notification(Notification::success(message), cx);
                     }
                     Err(error) => {
@@ -1596,12 +1820,16 @@ impl Marcel {
         let operation_task = cx.spawn_in(window, async move |this, window| {
             let outcome = task.await;
             let _ = this.update_in(window, |this, window, cx| {
+                let changes = DirectoryChanges {
+                    removed: outcome.completed.clone(),
+                    ..DirectoryChanges::default()
+                };
                 if !outcome.records.is_empty() {
                     this.operations.record(OperationRecord::Trash {
                         records: outcome.records,
                     });
                 }
-                this.start_directory_load(false, cx);
+                this.apply_directory_changes(changes, None, cx);
                 if outcome.failures.is_empty() {
                     window.push_notification(
                         Notification::success(format!(
@@ -1638,6 +1866,10 @@ impl Marcel {
         }
         self.entry_menu = None;
         let count = records.len();
+        let backing_paths = records
+            .iter()
+            .map(|record| record.backing_path().to_path_buf())
+            .collect::<Vec<_>>();
         let task = cx
             .background_executor()
             .spawn(smol::unblock(move || restore_trash_records(&records)));
@@ -1647,7 +1879,7 @@ impl Marcel {
                 match result {
                     Ok(records) => {
                         this.operations.record(OperationRecord::Restore { records });
-                        this.start_trash_load(false, cx);
+                        this.remove_trash_entries(backing_paths, cx);
                         window.push_notification(
                             Notification::success(format!("Restored {count} item(s)")),
                             cx,
@@ -1807,7 +2039,11 @@ impl Marcel {
         let task_progress = progress.clone();
         let task = cx.background_executor().spawn(smol::unblock(move || {
             if let Some(records) = trash_records {
-                PermanentDeleteResult::Trash(purge_trash_records(&records, task_progress))
+                let outcome = purge_trash_records(&records, task_progress);
+                PermanentDeleteResult::Trash {
+                    outcome,
+                    requested: records,
+                }
             } else {
                 PermanentDeleteResult::Files(delete_paths(&paths, task_progress))
             }
@@ -1815,19 +2051,38 @@ impl Marcel {
         let operation_task = cx.spawn_in(window, async move |this, window| {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                let (completed, failure) = match result {
+                let (completed, failure, removed_paths) = match result {
                     PermanentDeleteResult::Files(outcome) => {
                         let failure = (!outcome.failures.is_empty())
                             .then(|| summarize_delete_failures(&outcome.failures));
-                        (outcome.completed.len(), failure)
+                        let removed = outcome.completed.clone();
+                        (outcome.completed.len(), failure, removed)
                     }
-                    PermanentDeleteResult::Trash(outcome) => {
+                    PermanentDeleteResult::Trash { outcome, requested } => {
                         let failure = (!outcome.failures.is_empty())
                             .then(|| summarize_trash_failures(&outcome.failures));
-                        (outcome.completed.len(), failure)
+                        let completed_set =
+                            outcome.completed.iter().cloned().collect::<HashSet<_>>();
+                        let removed = requested
+                            .iter()
+                            .filter(|record| completed_set.contains(record.original_path()))
+                            .map(|record| record.backing_path().to_path_buf())
+                            .collect();
+                        (outcome.completed.len(), failure, removed)
                     }
                 };
-                this.start_directory_load(false, cx);
+                if this.browsing_trash {
+                    this.remove_trash_entries(removed_paths, cx);
+                } else {
+                    this.apply_directory_changes(
+                        DirectoryChanges {
+                            removed: removed_paths,
+                            ..DirectoryChanges::default()
+                        },
+                        None,
+                        cx,
+                    );
+                }
                 if let Some(failure) = failure {
                     let message = if completed > 0 {
                         format!("Permanently deleted {completed} item(s); {failure}")
@@ -1905,6 +2160,7 @@ impl Marcel {
         };
         self.entry_menu = None;
         self.start_operation_progress_refresh(cx);
+        let change_sources = sources.clone();
         let task = cx.background_executor().spawn(smol::unblock(move || {
             transfer_paths_with_progress(&sources, &destination, mode, cancel, progress)
         }));
@@ -1912,6 +2168,25 @@ impl Marcel {
         let operation_task = cx.spawn_in(window, async move |this, window| {
             let outcome = task.await;
             let _ = this.update_in(window, |this, window, cx| {
+                let changes = outcome.operation.as_ref().map_or_else(
+                    || DirectoryChanges {
+                        removed: if mode == TransferMode::Move {
+                            change_sources
+                                .iter()
+                                .filter(|source| {
+                                    outcome.completed.iter().any(|destination| {
+                                        destination.file_name() == source.file_name()
+                                    })
+                                })
+                                .cloned()
+                                .collect()
+                        } else {
+                            Vec::new()
+                        },
+                        upserted: outcome.completed.clone(),
+                    },
+                    OperationRecord::forward_directory_changes,
+                );
                 if let Some(operation) = outcome.operation {
                     this.operations.record(operation);
                 }
@@ -1924,14 +2199,12 @@ impl Marcel {
                         .retain_uncompleted_move(clipboard, &outcome.completed);
                 }
 
-                if let Some(first) = outcome
+                let reveal = outcome
                     .completed
                     .iter()
                     .find(|path| path.parent() == Some(this.directory.current_dir.as_path()))
-                {
-                    this.directory.pending_reveal = Some(first.clone());
-                }
-                this.start_directory_load(false, cx);
+                    .cloned();
+                this.apply_directory_changes(changes, reveal, cx);
 
                 if outcome.failures.is_empty() {
                     let verb = match mode {
@@ -1967,16 +2240,137 @@ impl Marcel {
         cx.notify();
     }
 
-    fn refresh_after_operation(&mut self, path: &Path, select: bool, cx: &mut Context<Self>) {
+    fn apply_directory_changes(
+        &mut self,
+        changes: DirectoryChanges,
+        reveal: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if self.browsing_trash {
-            self.start_trash_load(false, cx);
             return;
         }
-        if path.parent() != Some(self.directory.current_dir.as_path()) {
+
+        let current_dir = self.directory.current_dir.clone();
+        let removed = changes
+            .removed
+            .into_iter()
+            .filter(|path| path.parent() == Some(current_dir.as_path()))
+            .collect::<Vec<_>>();
+        let upserted = changes
+            .upserted
+            .into_iter()
+            .filter(|path| path.parent() == Some(current_dir.as_path()))
+            .collect::<Vec<_>>();
+        if removed.is_empty() && upserted.is_empty() {
             return;
         }
-        self.directory.pending_reveal = select.then(|| path.to_path_buf());
-        self.start_directory_load(false, cx);
+
+        let directory_generation = self.directory.generation;
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || revalidate_paths(upserted)));
+        cx.spawn(async move |this, cx| {
+            let mut events = task.await;
+            events.extend(removed.into_iter().map(DirectoryEvent::Removed));
+            let _ = this.update(cx, |this, cx| {
+                if this.browsing_trash
+                    || directory_generation != this.directory.generation
+                    || current_dir != this.directory.current_dir
+                {
+                    return;
+                }
+
+                let affected = directory_event_paths(&events);
+                this.directory.pending_reveal = reveal
+                    .filter(|path| path.parent() == Some(this.directory.current_dir.as_path()));
+                match this.directory.apply_events(events) {
+                    ApplyDirectoryEvents::Applied(reconcile) => {
+                        this.invalidate_watched_thumbnails(&affected);
+                        this.apply_selection_reconcile(reconcile, cx);
+                        this.select_pending_loaded_entry(cx);
+                        // Unlike a streamed directory load, this is the only
+                        // result batch. Do not retain an impossible reveal
+                        // across later unrelated watcher events.
+                        this.directory.pending_reveal = None;
+                    }
+                    ApplyDirectoryEvents::RescanRequired => {
+                        this.start_directory_load(false, cx);
+                        return;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_trash_entries(&mut self, backing_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if !self.browsing_trash || backing_paths.is_empty() {
+            return;
+        }
+        for path in &backing_paths {
+            self.trash_records.remove(path);
+        }
+        let events = backing_paths
+            .iter()
+            .cloned()
+            .map(DirectoryEvent::Removed)
+            .collect();
+        match self.directory.apply_events(events) {
+            ApplyDirectoryEvents::Applied(reconcile) => {
+                self.invalidate_watched_thumbnails(&backing_paths);
+                self.apply_selection_reconcile(reconcile, cx);
+            }
+            ApplyDirectoryEvents::RescanRequired => self.start_trash_load(false, cx),
+        }
+        cx.notify();
+    }
+
+    fn upsert_trash_entries(&mut self, records: Vec<TrashRecord>, cx: &mut Context<Self>) {
+        if !self.browsing_trash || records.is_empty() {
+            return;
+        }
+        let directory_generation = self.directory.generation;
+        let task = cx.background_executor().spawn(smol::unblock(move || {
+            let mut icons = crate::icons::IconProvider::discover();
+            records
+                .into_iter()
+                .filter_map(|record| {
+                    let mut entry = FileEntry::from_path(record.backing_path(), &mut icons).ok()?;
+                    entry.name = record
+                        .original_path()
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| entry.name.clone());
+                    entry.navigable = false;
+                    Some((entry, record))
+                })
+                .collect::<Vec<_>>()
+        }));
+        cx.spawn(async move |this, cx| {
+            let entries = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.browsing_trash || directory_generation != this.directory.generation {
+                    return;
+                }
+                let mut events = Vec::with_capacity(entries.len());
+                for (entry, record) in entries {
+                    this.trash_records.insert(entry.path.clone(), record);
+                    events.push(DirectoryEvent::Changed(entry));
+                }
+                match this.directory.apply_events(events) {
+                    ApplyDirectoryEvents::Applied(reconcile) => {
+                        this.apply_selection_reconcile(reconcile, cx);
+                    }
+                    ApplyDirectoryEvents::RescanRequired => {
+                        this.start_trash_load(false, cx);
+                        return;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn on_move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -2159,6 +2553,15 @@ impl Marcel {
 
     fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
         self.execute_browser_command(BrowserCommand::NewFolder, window, cx);
+    }
+
+    fn on_rename_selection(
+        &mut self,
+        _: &RenameSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::RenameSelection, window, cx);
     }
 
     fn on_undo_file_operation(
@@ -2778,6 +3181,7 @@ impl Marcel {
         let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection);
         let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll);
         let new_folder_enabled = self.command_enabled(BrowserCommand::NewFolder);
+        let rename_enabled = self.command_enabled(BrowserCommand::RenameSelection);
         let copy_enabled = self.command_enabled(BrowserCommand::CopySelection);
         let cut_enabled = self.command_enabled(BrowserCommand::CutSelection);
         let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles);
@@ -3230,7 +3634,40 @@ impl Marcel {
                 )
                 .child(planned("– Duplicate"))
                 .child(separator())
-                .child(planned("– Rename…"))
+                .child(
+                    h_flex()
+                        .id("entry-menu-rename")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(rename_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.entry_menu = None;
+                                    this.execute_browser_command(
+                                        BrowserCommand::RenameSelection,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                        })
+                        .when(!rename_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child(if rename_enabled {
+                            "Rename…"
+                        } else {
+                            "– Rename…"
+                        })
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child("F2"),
+                        ),
+                )
                 .child(planned("– Move To…"))
                 .child(
                     h_flex()
@@ -4061,6 +4498,9 @@ impl Marcel {
                         let can_drop_path = path.clone();
                         let selected = this.directory.selection.is_selected(&path);
                         let navigable = entry.navigable;
+                        let rename_input = (this.rename_path.as_ref() == Some(&path))
+                            .then(|| this.rename_input.clone())
+                            .flatten();
                         let drag = if selected {
                             selected_drag
                                 .clone()
@@ -4069,7 +4509,7 @@ impl Marcel {
                             Self::single_file_drag(&path, navigable)
                         };
                         let operation_busy = this.operations.is_busy();
-                        let dragging_enabled = !this.browsing_trash;
+                        let dragging_enabled = !this.browsing_trash && rename_input.is_none();
                         let entry_hit_bounds = this.entry_hit_bounds.clone();
                         let entry_content_bounds = this.entry_content_bounds.clone();
                         let browser_bounds = this.browser_bounds.clone();
@@ -4084,6 +4524,20 @@ impl Marcel {
                                 .w(px(20.0))
                                 .text_color(colors.primary)
                                 .child(entry.icon())
+                                .into_any_element()
+                        };
+                        let name = if let Some(input) = rename_input {
+                            div()
+                                .w(px(300.0))
+                                .child(Input::new(&input).small())
+                                .into_any_element()
+                        } else {
+                            div()
+                                .max_w(px(480.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(entry.name)
                                 .into_any_element()
                         };
 
@@ -4163,14 +4617,7 @@ impl Marcel {
                                 }),
                             )
                             .child(icon)
-                            .child(
-                                div()
-                                    .max_w(px(480.0))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(entry.name),
-                            )
+                            .child(name)
                             .child(
                                 div()
                                     .text_xs()
@@ -4265,6 +4712,9 @@ impl Marcel {
                             let can_drop_path = path.clone();
                             let selected = this.directory.selection.is_selected(&path);
                             let navigable = entry.navigable;
+                            let rename_input = (this.rename_path.as_ref() == Some(&path))
+                                .then(|| this.rename_input.clone())
+                                .flatten();
                             let drag = if selected {
                                 selected_drag
                                     .clone()
@@ -4273,7 +4723,7 @@ impl Marcel {
                                 Self::single_file_drag(&path, navigable)
                             };
                             let operation_busy = this.operations.is_busy();
-                            let dragging_enabled = !this.browsing_trash;
+                            let dragging_enabled = !this.browsing_trash && rename_input.is_none();
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
                             let entry_hit_bounds = this.entry_hit_bounds.clone();
                             let entry_content_bounds = this.entry_content_bounds.clone();
@@ -4322,6 +4772,27 @@ impl Marcel {
                                             .into_any_element()
                                     }
                                 }
+                            };
+                            let name = if let Some(input) = rename_input {
+                                div()
+                                    .w_full()
+                                    .h(px(GRID_LABEL_HEIGHT))
+                                    .flex_none()
+                                    .child(Input::new(&input).small())
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .w_full()
+                                    .max_w(px(GRID_TILE_WIDTH - 16.0))
+                                    .h(px(GRID_LABEL_HEIGHT))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .whitespace_normal()
+                                    .line_clamp(2)
+                                    .text_center()
+                                    .text_xs()
+                                    .child(display_name)
+                                    .into_any_element()
                             };
 
                             Some(
@@ -4417,19 +4888,7 @@ impl Marcel {
                                         ),
                                     )
                                     .child(visual)
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .max_w(px(GRID_TILE_WIDTH - 16.0))
-                                            .h(px(GRID_LABEL_HEIGHT))
-                                            .flex_none()
-                                            .overflow_hidden()
-                                            .whitespace_normal()
-                                            .line_clamp(2)
-                                            .text_center()
-                                            .text_xs()
-                                            .child(display_name),
-                                    )
+                                    .child(name)
                                     .child(
                                         canvas(
                                             move |bounds, _, _| {
@@ -5204,6 +5663,7 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_delete_permanently))
             .on_action(cx.listener(Self::on_empty_trash))
             .on_action(cx.listener(Self::on_new_folder))
+            .on_action(cx.listener(Self::on_rename_selection))
             .on_action(cx.listener(Self::on_undo_file_operation))
             .on_action(cx.listener(Self::on_redo_file_operation))
             .on_mouse_down(
@@ -5638,6 +6098,18 @@ fn normalize_start_directory(path: PathBuf) -> PathBuf {
     }
 }
 
+fn rename_stem_end(name: &str, is_directory: bool) -> usize {
+    if is_directory {
+        return name.chars().count();
+    }
+    name.char_indices()
+        .rev()
+        .find_map(|(index, character)| {
+            (character == '.' && index > 0).then(|| name[..index].chars().count())
+        })
+        .unwrap_or_else(|| name.chars().count())
+}
+
 fn operation_history_message(operation: &OperationRecord, redo: bool) -> String {
     let name = operation
         .path()
@@ -5659,6 +6131,20 @@ fn operation_history_message(operation: &OperationRecord, redo: bool) -> String 
             "Moved restored item(s) back to Trash".to_string()
         }
         (OperationRecord::Restore { .. }, true) => "Restored item(s) again".to_string(),
+        (OperationRecord::Rename { source, .. }, false) => {
+            let original = source
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
+            format!("Restored name “{original}”")
+        }
+        (OperationRecord::Rename { destination, .. }, true) => {
+            let renamed = destination
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
+            format!("Renamed to “{renamed}” again")
+        }
     }
 }
 
@@ -6070,6 +6556,14 @@ mod tests {
 
         assert!(elided.ends_with(".jpeg"));
         assert!(UnicodeWidthStr::width(elided.as_str()) <= 18);
+    }
+
+    #[test]
+    fn rename_selection_preserves_a_file_extension_but_selects_directory_dots() {
+        assert_eq!(rename_stem_end("report.final.txt", false), 12);
+        assert_eq!(rename_stem_end(".bashrc", false), 7);
+        assert_eq!(rename_stem_end("folder.with.dots", true), 16);
+        assert_eq!(rename_stem_end("猫.txt", false), 1);
     }
 
     #[test]

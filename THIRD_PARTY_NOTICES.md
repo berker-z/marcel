@@ -87,6 +87,15 @@ adapted into Marcel itself.
     `319f90e0eab185a231eef5562215ba322e320286`. Marcel adds whole-selection
     atomic quarantine, filesystem-identity revalidation, paired Trash metadata
     cleanup, and its own progress interface. No Yazi code was copied.
+  - Sprint 9's Rename interaction in `src/app.rs` and safe operation in
+    `src/file_ops.rs` conceptually adapt Yazi's focused rename input,
+    extension-aware cursor placement, watcher/model coordination, and reveal
+    behavior from `yazi-actor/src/mgr/rename.rs`, `yazi-fs/src/op.rs`,
+    `yazi-vfs/src/engine/engine.rs`, and
+    `yazi-fs/src/engine/local/local.rs` at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286`. Marcel uses an inline GPUI
+    editor, Linux `RENAME_NOREPLACE`, conservative identity-validating
+    Undo/Redo, and never overwrites. No Yazi code was copied.
 
 Yazi is a primary architectural influence for asynchronous filesystem work,
 task scheduling, cancellation, previews, and responsiveness. Future direct or

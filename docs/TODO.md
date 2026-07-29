@@ -19,6 +19,9 @@ item here belongs in that sprint.
   bottom-most Places entry.
 - Complete the permanent-delete and Empty Trash manual checks in
   [`Sprint 8`](sprints/008-permanent-deletion.md).
+- Complete New File, Open in Terminal, and Properties in
+  [`Sprint 9`](sprints/009-conventional-local-actions.md); safe inline Rename
+  is implemented.
 - Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
   operation-controller and directory-session extractions are complete.
 - Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
@@ -120,7 +123,8 @@ optional feature ideas.
 - [x] Complete the bounded safe-operation foundation and New Folder slice in
   [`Sprint 3`](sprints/003-safe-file-operations.md).
 - Create folders and files.
-- Rename files with a pointer-friendly inline interaction.
+- [x] Rename files with a pointer-friendly inline interaction, `F2`, atomic
+  no-overwrite publication, and identity-validating Undo/Redo.
 - Finish desktop clipboard interoperability and queued transfers; then add
   duplicate and move-to. Cross-filesystem
   cut/paste and interactive conflict decisions are explicitly parked until
@@ -140,9 +144,11 @@ optional feature ideas.
 - Extend progress/cancellation beyond copy and move as more long-running
   operation types land; add conflict decisions when that parked work resumes.
 - [x] Watch the active directory and apply coalesced external filesystem
-  changes incrementally without a full reload. Marcel's own completed
-  operations still perform a conservative reload until operation-to-watcher
-  reporting is implemented.
+  changes incrementally without a full reload.
+- [x] Apply exact top-level results from Marcel-owned create, rename,
+  copy/move, Trash/restore, permanent-delete, and Undo/Redo operations through
+  the directory reducer without clearing the active session. Keep full rescans
+  only as an explicit correctness fallback.
 - [x] Add instantaneous fuzzy filtering for the current directory with
   window-wide type-to-filter behavior.
 - Add recursive filename and content search without blocking navigation.

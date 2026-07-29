@@ -27,9 +27,13 @@ turning every notification into a full reload or foreground-executor work.
 
 ## Deliberate limits
 
-- Marcel's own completed write operations still request a conservative full
-  directory load. Replacing that with explicit operation-to-watcher reporting
-  is a follow-up after watcher behavior is proven.
+- [x] Marcel-owned create, rename, copy/move, Trash/restore, permanent-delete,
+  and Undo/Redo results now publish exact top-level path changes through the
+  same directory-session reducer. Metadata and icon revalidation remains off
+  the foreground executor; a full rescan is reserved for revalidation failure.
+- The external watcher may subsequently report the same paths. Reducer
+  upserts/removals are idempotent, so those confirmations do not require
+  suppressing or restarting the watcher.
 - Only the active browser directory is watched. Folder previews, bookmarked
   directories, and inactive history entries do not consume watcher resources.
 - Native remote-filesystem behavior varies. The polling fallback provides
