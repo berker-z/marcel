@@ -7,6 +7,13 @@ item here belongs in that sprint.
 
 ## Current priorities
 
+- Complete the copy-fidelity fixtures and implementation in
+  [`Sprint 6`](sprints/006-copy-fidelity-and-scale.md), then begin Trash.
+- Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
+  operation-controller and directory-session extractions are complete.
+- Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
+  watching is connected through the extracted session reducer, with native and
+  polling backends plus bounded rescan fallback.
 - Complete Sprint 1 preview and navigation acceptance runs.
 - Ask Berker to demonstrate the known PDF preview resize problem and describe
   the expected behavior before choosing a fix.
@@ -83,8 +90,10 @@ item here belongs in that sprint.
   including precise records for partially successful multi-file operations.
 - Extend progress/cancellation beyond copy and move as more long-running
   operation types land; add conflict decisions when that parked work resumes.
-- Watch directories and apply incremental filesystem changes without full
-  reloads.
+- [x] Watch the active directory and apply coalesced external filesystem
+  changes incrementally without a full reload. Marcel's own completed
+  operations still perform a conservative reload until operation-to-watcher
+  reporting is implemented.
 - [x] Add instantaneous fuzzy filtering for the current directory with
   window-wide type-to-filter behavior.
 - Add recursive filename and content search without blocking navigation.

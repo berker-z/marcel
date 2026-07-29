@@ -97,6 +97,35 @@ stack, so completion and error messages cannot visually overlap progress.
 Cross-filesystem moves and interactive destination-conflict decisions are
 deliberately parked; no-overwrite failure remains the safe behavior.
 
+Successful local-copy fidelity is defined in
+[`copy-semantics.md`](copy-semantics.md). Supported metadata loss fails before
+publication. Copy undo records are capped at 100,000 combined snapshots; a
+larger copy still succeeds but is explicitly reported as unavailable to undo.
+Undo and redo validate exact tree membership in addition to filesystem
+identities before mutating any recorded path.
+
+Operation lifecycle ownership lives in `OperationController`: clipboard,
+journal, busy/cancellation state, task handles, and progress transitions share
+one boundary. `Marcel` remains the GPUI coordinator that translates controller
+outcomes into navigation, selection, refresh, dialogs, and notifications.
+Filesystem effects remain implemented and tested in `file_ops.rs`.
+
+Current-directory ownership lives in `DirectorySession`: source entries,
+filtered visible indexes, hidden-file policy, selection reconciliation,
+generation-guarded loading, and pending reveal transition together. Browser
+scroll state, painted bounds, marquee geometry, and rendering remain view state
+on `Marcel`. Future filesystem watchers must publish typed directory events
+through the session reducer instead of mutating browser vectors directly.
+
+The active local directory is watched non-recursively. Native notifications
+fall back to one-second polling when the recommended backend cannot watch the
+location. Events are coalesced and deduplicated off the GPUI foreground
+executor, then their final metadata is revalidated into upserts or removals.
+One reducer batch rebuilds sorting/filtering and reconciles selection once.
+Watcher errors, changes to the watched directory itself, and oversized batches
+request a bounded full rescan. Navigation cancels the prior watcher by
+generation and prevents stale events from publishing into the new directory.
+
 ## Internal drag and bookmarks
 
 Dragging a browser item starts an internal filesystem payload. If the item is

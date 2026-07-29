@@ -44,18 +44,22 @@ use crate::{
         MoveRight, MoveUp, NewFolder, OpenWithSelection, PasteFiles, RedoFileOperation, SelectAll,
         SelectFirst, SelectLast, SelectPageDown, SelectPageUp, UndoFileOperation,
     },
+    directory_session::{
+        ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
+    },
+    directory_watcher::{DirectoryWatcherUpdate, watch_directory},
     file_ops::{
-        OperationJournal, TransferMode, TransferProgress, create_directory, redo_operation,
-        summarize_failures, transfer_paths_with_progress, undo_operation, validate_entry_name,
+        TransferMode, create_directory, redo_operation, summarize_failures,
+        transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, FileEntry, format_size, merge_sorted_entries, stream_directory,
         stream_directory_cancellable,
     },
     history::NavigationHistory,
+    operations::{FileClipboard, OperationController},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
-    selection::SelectionModel,
     thumbnails,
 };
 
@@ -145,12 +149,6 @@ enum ContextMenuTarget {
 }
 
 #[derive(Clone, Debug)]
-struct FileClipboard {
-    mode: TransferMode,
-    paths: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug)]
 struct FileDrag {
     paths: Arc<[PathBuf]>,
     bookmark_candidates: Arc<[PathBuf]>,
@@ -173,16 +171,15 @@ struct BookmarkMenu {
     position: Point<Pixels>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct EntryHitRegion {
+    bounds: Bounds<Pixels>,
+    navigable: bool,
+}
+
 struct DragPreview {
     label: String,
     detail: &'static str,
-}
-
-struct ActiveTransferProgress {
-    mode: TransferMode,
-    source_count: usize,
-    destination: PathBuf,
-    progress: Arc<TransferProgress>,
 }
 
 impl Render for DragPreview {
@@ -234,29 +231,17 @@ pub struct Marcel {
     system_ui_font: SharedString,
     use_iosevka_ui: bool,
     iosevka_ui_font: Option<SharedString>,
-    current_dir: PathBuf,
-    entries: Vec<FileEntry>,
-    visible_entries: Vec<usize>,
-    filter_query: String,
-    show_hidden: bool,
+    directory: DirectorySession,
     search_input: Entity<InputState>,
     _search_subscriptions: Vec<Subscription>,
-    operation_journal: OperationJournal,
-    file_clipboard: Option<FileClipboard>,
-    operation_busy: bool,
-    operation_cancel: Option<Arc<AtomicBool>>,
-    operation_task: Option<Task<()>>,
-    operation_progress: Option<ActiveTransferProgress>,
-    operation_progress_task: Option<Task<()>>,
-    select_after_directory_load: Option<PathBuf>,
-    selection: SelectionModel,
+    operations: OperationController,
     entry_menu: Option<EntryMenu>,
     marquee: Option<MarqueeGesture>,
     marquee_scroll_task: Option<Task<()>>,
     file_drag_pointer: Option<Point<Pixels>>,
     file_drag_scroll_task: Option<Task<()>>,
     browser_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    entry_hit_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
+    entry_hit_bounds: Rc<RefCell<HashMap<PathBuf, EntryHitRegion>>>,
     entry_content_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
     directory_scroll: UniformListScrollHandle,
     view_mode: ViewMode,
@@ -266,13 +251,10 @@ pub struct Marcel {
     thumbnail_queue: VecDeque<PathBuf>,
     thumbnail_pending: HashSet<PathBuf>,
     thumbnail_inflight: HashSet<PathBuf>,
+    thumbnail_stale: HashSet<PathBuf>,
     thumbnail_wake_sender: async_channel::Sender<()>,
     thumbnail_wake_receiver: async_channel::Receiver<()>,
     thumbnail_workers: Vec<Task<()>>,
-    directory_loading: bool,
-    directory_error: Option<String>,
-    directory_ticket: u64,
-    directory_task: Option<Task<()>>,
     preview_state: PreviewState,
     preview_ticket: u64,
     preview_task: Option<Task<()>>,
@@ -354,22 +336,10 @@ impl Marcel {
             system_ui_font,
             use_iosevka_ui,
             iosevka_ui_font,
-            current_dir: start_dir.clone(),
-            entries: Vec::new(),
-            visible_entries: Vec::new(),
-            filter_query: String::new(),
-            show_hidden: true,
+            directory: DirectorySession::new(start_dir.clone()),
             search_input,
             _search_subscriptions: vec![search_subscription],
-            operation_journal: OperationJournal::default(),
-            file_clipboard: None,
-            operation_busy: false,
-            operation_cancel: None,
-            operation_task: None,
-            operation_progress: None,
-            operation_progress_task: None,
-            select_after_directory_load: None,
-            selection: SelectionModel::default(),
+            operations: OperationController::default(),
             entry_menu: None,
             marquee: None,
             marquee_scroll_task: None,
@@ -386,13 +356,10 @@ impl Marcel {
             thumbnail_queue: VecDeque::new(),
             thumbnail_pending: HashSet::new(),
             thumbnail_inflight: HashSet::new(),
+            thumbnail_stale: HashSet::new(),
             thumbnail_wake_sender,
             thumbnail_wake_receiver,
             thumbnail_workers: Vec::new(),
-            directory_loading: false,
-            directory_error: None,
-            directory_ticket: 0,
-            directory_task: None,
             preview_state: PreviewState::Empty,
             preview_ticket: 0,
             preview_task: None,
@@ -538,10 +505,16 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if paths.is_empty() {
+            self.bookmark_insertion = None;
+            return;
+        }
+
         let mut added = 0;
         for path in paths {
             if add_bookmark(&mut self.bookmarks, path.clone()) {
                 if let Some(icon) = self
+                    .directory
                     .entries
                     .iter()
                     .find(|entry| &entry.path == path)
@@ -652,12 +625,9 @@ impl Marcel {
     }
 
     fn render_operation_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let active = self.operation_progress.as_ref()?;
+        let active = self.operations.progress()?;
         let snapshot = active.progress.snapshot();
-        let cancelling = self
-            .operation_cancel
-            .as_ref()
-            .is_some_and(|cancel| cancel.load(Ordering::Acquire));
+        let cancelling = self.operations.is_cancelling();
         let colors = cx.theme().colors;
         let title = if cancelling {
             "Cancelling…"
@@ -770,14 +740,14 @@ impl Marcel {
     }
 
     fn selected_file_drag(&self) -> Option<FileDrag> {
-        let selected = self.selection.selected();
+        let selected = self.directory.selection.selected();
         if selected.is_empty() {
             return None;
         }
         let mut paths = Vec::with_capacity(selected.len());
         let mut bookmark_candidates = Vec::new();
-        for index in &self.visible_entries {
-            let Some(entry) = self.entries.get(*index) else {
+        for index in &self.directory.visible_entries {
+            let Some(entry) = self.directory.entries.get(*index) else {
                 continue;
             };
             if selected.contains(&entry.path) {
@@ -845,16 +815,11 @@ impl Marcel {
         if self.file_drag_scroll_task.is_none() {
             self.start_file_drag_autoscroll(cx);
         }
-        let can_move_to =
-            |path: &Path| !self.operation_busy && can_move_files_to(&drag.paths, path);
+        let operation_busy = self.operations.is_busy();
+        let can_move_to = |path: &Path| !operation_busy && can_move_files_to(&drag.paths, path);
 
-        let over_browser_folder = self.entry_hit_bounds.borrow().iter().any(|(path, bounds)| {
-            bounds.contains(&pointer)
-                && self
-                    .entries
-                    .iter()
-                    .find(|entry| entry.path == *path)
-                    .is_some_and(|entry| entry.navigable && can_move_to(path))
+        let over_browser_folder = self.entry_hit_bounds.borrow().iter().any(|(path, hit)| {
+            can_drop_on_entry_hit(hit, pointer, &drag.paths, path, operation_busy)
         });
         let over_place = self
             .place_drop_bounds
@@ -890,56 +855,46 @@ impl Marcel {
     fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
         self.entry_menu = None;
         self.bookmark_menu = None;
-        self.directory_ticket = self.directory_ticket.wrapping_add(1);
-        let ticket = self.directory_ticket;
-        let path = self.current_dir.clone();
-
-        self.directory_task.take();
+        let (ticket, path) = self.directory.begin_load(clear_filter);
         self.thumbnail_workers.clear();
         self.thumbnail_queue.clear();
         self.thumbnail_pending.clear();
         self.thumbnail_inflight.clear();
+        self.thumbnail_stale.clear();
         while self.thumbnail_wake_receiver.try_recv().is_ok() {}
         self.thumbnails.clear();
         self.thumbnail_order.clear();
         self.entry_content_bounds.borrow_mut().clear();
-        self.entries.clear();
-        self.visible_entries.clear();
-        if clear_filter {
-            self.filter_query.clear();
-        }
-        self.directory_error = None;
-        self.directory_loading = true;
         self.clear_selection();
 
         let (sender, receiver) = async_channel::unbounded();
+        let stream_path = path.clone();
         cx.background_executor()
-            .spawn(smol::unblock(move || stream_directory(&path, sender)))
+            .spawn(smol::unblock(move || {
+                stream_directory(&stream_path, sender)
+            }))
             .detach();
 
-        self.directory_task = Some(cx.spawn(async move |this, cx| {
+        self.directory.load_task = Some(cx.spawn(async move |this, cx| {
             while let Ok(update) = receiver.recv().await {
                 let should_continue = this
                     .update(cx, |this, cx| {
-                        if ticket != this.directory_ticket {
+                        if ticket != this.directory.generation {
                             return false;
                         }
 
                         match update {
                             DirectoryUpdate::Batch(batch) => {
-                                this.entries =
-                                    merge_sorted_entries(std::mem::take(&mut this.entries), batch);
-                                this.rebuild_visible_entries();
-                                this.reconcile_filter_selection(cx);
+                                let reconcile = this.directory.merge_batch(batch);
+                                this.apply_selection_reconcile(reconcile, cx);
                                 this.select_pending_loaded_entry(cx);
                             }
                             DirectoryUpdate::Done => {
-                                this.directory_loading = false;
-                                this.select_after_directory_load = None;
+                                this.directory.finish_load();
+                                this.start_directory_watcher(ticket, path.clone(), cx);
                             }
                             DirectoryUpdate::Error(error) => {
-                                this.directory_loading = false;
-                                this.directory_error = Some(error);
+                                this.directory.fail_load(error);
                             }
                         }
                         cx.notify();
@@ -955,96 +910,144 @@ impl Marcel {
         cx.notify();
     }
 
-    fn select_pending_loaded_entry(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.select_after_directory_load.as_ref() else {
-            return;
-        };
-        let visible = self.visible_entries.iter().any(|index| {
-            self.entries
-                .get(*index)
-                .is_some_and(|entry| &entry.path == path)
-        });
-        if !visible {
-            return;
-        }
-        let Some(entry) = self
-            .entries
-            .iter()
-            .find(|entry| &entry.path == path)
-            .cloned()
-        else {
-            return;
-        };
+    fn start_directory_watcher(&mut self, ticket: u64, path: PathBuf, cx: &mut Context<Self>) {
+        let (sender, receiver) = async_channel::unbounded();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let watcher_cancelled = cancelled.clone();
+        let watched_path = path.clone();
+        cx.background_executor()
+            .spawn(smol::unblock(move || {
+                watch_directory(&watched_path, sender, watcher_cancelled)
+            }))
+            .detach();
 
-        self.select_after_directory_load = None;
-        self.selection.select_only(entry.path.clone());
-        self.start_preview(entry, cx);
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(update) = receiver.recv().await {
+                let should_continue = this
+                    .update(cx, |this, cx| {
+                        if ticket != this.directory.generation || path != this.directory.current_dir
+                        {
+                            return false;
+                        }
+
+                        match update {
+                            DirectoryWatcherUpdate::Events(events) => {
+                                let affected = directory_event_paths(&events);
+                                match this.directory.apply_events(events) {
+                                    ApplyDirectoryEvents::Applied(reconcile) => {
+                                        this.invalidate_watched_thumbnails(&affected);
+                                        this.apply_selection_reconcile(reconcile, cx);
+                                        this.select_pending_loaded_entry(cx);
+                                    }
+                                    ApplyDirectoryEvents::RescanRequired => {
+                                        this.start_directory_load(false, cx);
+                                        return false;
+                                    }
+                                }
+                            }
+                            DirectoryWatcherUpdate::RescanRequired => {
+                                this.start_directory_load(false, cx);
+                                return false;
+                            }
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        });
+        self.directory.set_watcher(cancelled, task);
+    }
+
+    fn invalidate_watched_thumbnails(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            self.thumbnails.remove(path);
+            self.thumbnail_order.retain(|existing| existing != path);
+            self.thumbnail_queue.retain(|queued| queued != path);
+            self.thumbnail_pending.remove(path);
+            if self.thumbnail_inflight.contains(path) {
+                self.thumbnail_stale.insert(path.clone());
+            }
+        }
+    }
+
+    fn select_pending_loaded_entry(&mut self, cx: &mut Context<Self>) {
+        if let Some(entry) = self.directory.take_pending_visible_entry() {
+            self.start_preview(entry, cx);
+        }
     }
 
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {
-        if path == self.current_dir {
+        if path == self.directory.current_dir {
             return;
         }
         if add_to_history {
             self.history.push(&path);
         }
-        self.current_dir = path;
-        self.select_after_directory_load = None;
+        self.directory.current_dir = path;
+        self.directory.pending_reveal = None;
         self.start_directory_load(true, cx);
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_back() {
-            self.current_dir = path;
-            self.select_after_directory_load = None;
+            self.directory.current_dir = path;
+            self.directory.pending_reveal = None;
             self.start_directory_load(true, cx);
         }
     }
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_forward() {
-            self.current_dir = path;
-            self.select_after_directory_load = None;
+            self.directory.current_dir = path;
+            self.directory.pending_reveal = None;
             self.start_directory_load(true, cx);
         }
     }
 
     fn go_up(&mut self, cx: &mut Context<Self>) {
-        if let Some(parent) = self.current_dir.parent() {
+        if let Some(parent) = self.directory.current_dir.parent() {
             self.navigate_to(parent.to_path_buf(), true, cx);
         }
     }
 
     fn command_enabled(&self, command: BrowserCommand) -> bool {
         match command {
-            BrowserCommand::GoToParent => self.current_dir.parent().is_some(),
+            BrowserCommand::GoToParent => self.directory.current_dir.parent().is_some(),
             BrowserCommand::GoBack => self.history.can_go_back(),
             BrowserCommand::GoForward => self.history.can_go_forward(),
-            BrowserCommand::ActivateSelection => self.selection.primary().is_some(),
+            BrowserCommand::ActivateSelection => self.directory.selection.primary().is_some(),
             BrowserCommand::OpenWithSelection => self
+                .directory
                 .selection
                 .primary()
-                .and_then(|path| self.entries.iter().find(|entry| &entry.path == path))
+                .and_then(|path| {
+                    self.directory
+                        .entries
+                        .iter()
+                        .find(|entry| &entry.path == path)
+                })
                 .is_some_and(|entry| !entry.navigable),
-            BrowserCommand::ClearSelection => !self.selection.selected().is_empty(),
+            BrowserCommand::ClearSelection => !self.directory.selection.selected().is_empty(),
             BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
-                !self.operation_busy && !self.selection.selected().is_empty()
+                !self.operations.is_busy() && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::PasteFiles => {
-                !self.operation_busy
-                    && self.directory_error.is_none()
+                !self.operations.is_busy()
+                    && self.directory.error.is_none()
                     && self
-                        .file_clipboard
-                        .as_ref()
+                        .operations
+                        .clipboard()
                         .is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
-            BrowserCommand::NewFolder => !self.operation_busy && self.directory_error.is_none(),
-            BrowserCommand::UndoFileOperation => {
-                !self.operation_busy && self.operation_journal.can_undo()
+            BrowserCommand::NewFolder => {
+                !self.operations.is_busy() && self.directory.error.is_none()
             }
-            BrowserCommand::RedoFileOperation => {
-                !self.operation_busy && self.operation_journal.can_redo()
-            }
+            BrowserCommand::UndoFileOperation => self.operations.can_undo(),
+            BrowserCommand::RedoFileOperation => self.operations.can_redo(),
             BrowserCommand::MoveUp
             | BrowserCommand::MoveDown
             | BrowserCommand::MoveLeft
@@ -1061,7 +1064,7 @@ impl Marcel {
             | BrowserCommand::SelectLast
             | BrowserCommand::SelectPageUp
             | BrowserCommand::SelectPageDown
-            | BrowserCommand::SelectAll => !self.visible_entries.is_empty(),
+            | BrowserCommand::SelectAll => !self.directory.visible_entries.is_empty(),
         }
     }
 
@@ -1145,12 +1148,16 @@ impl Marcel {
         extend: bool,
         cx: &mut Context<Self>,
     ) {
-        let current = self.selection.primary().and_then(|path| {
-            self.visible_entries.iter().position(|entry_index| {
-                self.entries
-                    .get(*entry_index)
-                    .is_some_and(|entry| &entry.path == path)
-            })
+        let current = self.directory.selection.primary().and_then(|path| {
+            self.directory
+                .visible_entries
+                .iter()
+                .position(|entry_index| {
+                    self.directory
+                        .entries
+                        .get(*entry_index)
+                        .is_some_and(|entry| &entry.path == path)
+                })
         });
         let columns = match self.view_mode {
             ViewMode::List => 1,
@@ -1159,7 +1166,7 @@ impl Marcel {
         let viewport_items = self.keyboard_page_size(columns);
         let Some(target) = selection_target(
             current,
-            self.visible_entries.len(),
+            self.directory.visible_entries.len(),
             columns,
             viewport_items,
             self.view_mode,
@@ -1176,10 +1183,11 @@ impl Marcel {
         };
         if extend {
             let ordered = self.visible_paths();
-            self.selection
+            self.directory
+                .selection
                 .select_range(entry.path.clone(), &ordered, false);
         } else {
-            self.selection.select_only(entry.path.clone());
+            self.directory.selection.select_only(entry.path.clone());
         }
 
         let scroll_row = match self.view_mode {
@@ -1206,9 +1214,15 @@ impl Marcel {
 
     fn activate_primary(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self
+            .directory
             .selection
             .primary()
-            .and_then(|path| self.entries.iter().find(|entry| &entry.path == path))
+            .and_then(|path| {
+                self.directory
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.path == path)
+            })
             .cloned()
         else {
             return;
@@ -1218,11 +1232,17 @@ impl Marcel {
 
     fn select_all_entries(&mut self, cx: &mut Context<Self>) {
         let ordered = self.visible_paths();
-        self.selection.select_all(&ordered);
+        self.directory.selection.select_all(&ordered);
         if let Some(entry) = self
+            .directory
             .selection
             .primary()
-            .and_then(|path| self.entries.iter().find(|entry| &entry.path == path))
+            .and_then(|path| {
+                self.directory
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.path == path)
+            })
             .cloned()
         {
             self.start_preview(entry, cx);
@@ -1267,26 +1287,22 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_busy {
+        if !self.operations.begin_simple() {
             return;
         }
 
-        self.operation_busy = true;
-        self.operation_cancel = None;
-        let parent = self.current_dir.clone();
+        let parent = self.directory.current_dir.clone();
         let task = cx
             .background_executor()
             .spawn(smol::unblock(move || create_directory(&parent, &name)));
 
-        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+        let operation_task = cx.spawn_in(window, async move |this, window| {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                this.operation_busy = false;
-                this.operation_cancel = None;
                 match result {
                     Ok(operation) => {
                         let path = operation.path().to_path_buf();
-                        this.operation_journal.record(operation);
+                        this.operations.record(operation);
                         this.refresh_after_operation(&path, true, cx);
                         window.push_notification(
                             Notification::success(format!(
@@ -1302,36 +1318,31 @@ impl Marcel {
                         window.push_notification(Notification::error(error.to_string()), cx);
                     }
                 }
+                this.operations.finish_active();
                 cx.notify();
             });
-        }));
+        });
+        self.operations.set_task(operation_task);
         cx.notify();
     }
 
     fn start_undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_busy {
-            return;
-        }
-        let Some(operation) = self.operation_journal.begin_undo() else {
+        let Some(operation) = self.operations.begin_undo() else {
             return;
         };
 
-        self.operation_busy = true;
-        self.operation_cancel = None;
         let operation_for_task = operation.clone();
         let task = cx
             .background_executor()
             .spawn(smol::unblock(move || undo_operation(&operation_for_task)));
 
-        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+        let operation_task = cx.spawn_in(window, async move |this, window| {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                this.operation_busy = false;
-                this.operation_cancel = None;
                 match result {
                     Ok(undone) => {
                         let path = operation.path().to_path_buf();
-                        this.operation_journal.finish_undo(undone);
+                        this.operations.finish_undo(undone);
                         this.refresh_after_operation(&path, false, cx);
                         window.push_notification(
                             Notification::success(format!(
@@ -1344,40 +1355,35 @@ impl Marcel {
                         );
                     }
                     Err(error) => {
-                        this.operation_journal.cancel_undo(operation);
+                        this.operations.cancel_undo(operation);
                         window.push_notification(Notification::error(error.to_string()), cx);
                     }
                 }
+                this.operations.finish_active();
                 cx.notify();
             });
-        }));
+        });
+        self.operations.set_task(operation_task);
         cx.notify();
     }
 
     fn start_redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_busy {
-            return;
-        }
-        let Some(operation) = self.operation_journal.begin_redo() else {
+        let Some(operation) = self.operations.begin_redo() else {
             return;
         };
 
-        self.operation_busy = true;
-        self.operation_cancel = None;
         let operation_for_task = operation.clone();
         let task = cx
             .background_executor()
             .spawn(smol::unblock(move || redo_operation(&operation_for_task)));
 
-        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+        let operation_task = cx.spawn_in(window, async move |this, window| {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                this.operation_busy = false;
-                this.operation_cancel = None;
                 match result {
                     Ok(redone) => {
                         let path = redone.path().to_path_buf();
-                        this.operation_journal.finish_redo(redone);
+                        this.operations.finish_redo(redone);
                         this.refresh_after_operation(&path, true, cx);
                         window.push_notification(
                             Notification::success(format!(
@@ -1390,18 +1396,20 @@ impl Marcel {
                         );
                     }
                     Err(error) => {
-                        this.operation_journal.cancel_redo(operation);
+                        this.operations.cancel_redo(operation);
                         window.push_notification(Notification::error(error.to_string()), cx);
                     }
                 }
+                this.operations.finish_active();
                 cx.notify();
             });
-        }));
+        });
+        self.operations.set_task(operation_task);
         cx.notify();
     }
 
     fn stage_selection(&mut self, mode: TransferMode, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.selection.selected();
+        let selected = self.directory.selection.selected();
         let paths = self
             .visible_paths()
             .into_iter()
@@ -1411,7 +1419,8 @@ impl Marcel {
             return;
         }
         let count = paths.len();
-        self.file_clipboard = Some(FileClipboard { mode, paths });
+        self.operations
+            .set_clipboard(Some(FileClipboard { mode, paths }));
         self.entry_menu = None;
         let verb = match mode {
             TransferMode::Copy => "Copied",
@@ -1425,12 +1434,12 @@ impl Marcel {
     }
 
     fn start_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = self.file_clipboard.clone() else {
+        let Some(clipboard) = self.operations.clipboard().cloned() else {
             return;
         };
         self.start_transfer(
             clipboard.paths.clone(),
-            self.current_dir.clone(),
+            self.directory.current_dir.clone(),
             clipboard.mode,
             Some(clipboard),
             window,
@@ -1450,12 +1459,12 @@ impl Marcel {
     }
 
     fn start_operation_progress_refresh(&mut self, cx: &mut Context<Self>) {
-        self.operation_progress_task = Some(cx.spawn(async move |this, cx| {
+        let progress_task = cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(80)).await;
                 let keep_running = this
                     .update(cx, |this, cx| {
-                        let keep_running = this.operation_progress.is_some();
+                        let keep_running = this.operations.progress().is_some();
                         if keep_running {
                             cx.notify();
                         }
@@ -1466,12 +1475,12 @@ impl Marcel {
                     break;
                 }
             }
-        }));
+        });
+        self.operations.set_progress_task(progress_task);
     }
 
     fn cancel_active_operation(&mut self, cx: &mut Context<Self>) {
-        if let Some(cancel) = &self.operation_cancel {
-            cancel.store(true, Ordering::Release);
+        if self.operations.request_cancel() {
             cx.notify();
         }
     }
@@ -1485,70 +1494,39 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_busy || sources.is_empty() {
+        let Some((cancel, progress)) =
+            self.operations
+                .begin_transfer(mode, sources.len(), destination.clone())
+        else {
             return;
-        }
+        };
         self.entry_menu = None;
-        self.operation_busy = true;
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.operation_cancel = Some(cancel.clone());
-        let progress = Arc::new(TransferProgress::default());
-        self.operation_progress = Some(ActiveTransferProgress {
-            mode,
-            source_count: sources.len(),
-            destination: destination.clone(),
-            progress: progress.clone(),
-        });
         self.start_operation_progress_refresh(cx);
         let task = cx.background_executor().spawn(smol::unblock(move || {
             transfer_paths_with_progress(&sources, &destination, mode, cancel, progress)
         }));
 
-        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+        let operation_task = cx.spawn_in(window, async move |this, window| {
             let outcome = task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                this.operation_busy = false;
-                this.operation_cancel = None;
-                this.operation_progress = None;
-                this.operation_progress_task.take();
                 if let Some(operation) = outcome.operation {
-                    this.operation_journal.record(operation);
+                    this.operations.record(operation);
                 }
 
                 if mode == TransferMode::Move
                     && !outcome.completed.is_empty()
                     && let Some(clipboard) = clipboard
                 {
-                    let completed_sources = clipboard
-                        .paths
-                        .iter()
-                        .filter(|source| {
-                            source.file_name().is_some_and(|name| {
-                                outcome
-                                    .completed
-                                    .iter()
-                                    .any(|path| path.file_name() == Some(name))
-                            })
-                        })
-                        .cloned()
-                        .collect::<HashSet<_>>();
-                    let remaining = clipboard
-                        .paths
-                        .into_iter()
-                        .filter(|path| !completed_sources.contains(path))
-                        .collect::<Vec<_>>();
-                    this.file_clipboard = (!remaining.is_empty()).then_some(FileClipboard {
-                        mode,
-                        paths: remaining,
-                    });
+                    this.operations
+                        .retain_uncompleted_move(clipboard, &outcome.completed);
                 }
 
                 if let Some(first) = outcome
                     .completed
                     .iter()
-                    .find(|path| path.parent() == Some(this.current_dir.as_path()))
+                    .find(|path| path.parent() == Some(this.directory.current_dir.as_path()))
                 {
-                    this.select_after_directory_load = Some(first.clone());
+                    this.directory.pending_reveal = Some(first.clone());
                 }
                 this.start_directory_load(false, cx);
 
@@ -1557,30 +1535,40 @@ impl Marcel {
                         TransferMode::Copy => "Copied",
                         TransferMode::Move => "Moved",
                     };
+                    let undo_note = if outcome.undo_unavailable {
+                        " · too large to retain in undo history"
+                    } else {
+                        ""
+                    };
                     window.push_notification(
                         Notification::success(format!(
-                            "{verb} {} item(s)",
-                            outcome.completed.len()
+                            "{verb} {} item(s){undo_note}",
+                            outcome.completed.len(),
                         )),
                         cx,
                     );
                 } else {
-                    window.push_notification(
-                        Notification::error(summarize_failures(&outcome.failures)),
-                        cx,
-                    );
+                    let mut message = summarize_failures(&outcome.failures);
+                    if outcome.undo_unavailable {
+                        message.push_str(
+                            "; successful items were too large to retain in undo history",
+                        );
+                    }
+                    window.push_notification(Notification::error(message), cx);
                 }
+                this.operations.finish_active();
                 cx.notify();
             });
-        }));
+        });
+        self.operations.set_task(operation_task);
         cx.notify();
     }
 
     fn refresh_after_operation(&mut self, path: &Path, select: bool, cx: &mut Context<Self>) {
-        if path.parent() != Some(self.current_dir.as_path()) {
+        if path.parent() != Some(self.directory.current_dir.as_path()) {
             return;
         }
-        self.select_after_directory_load = select.then(|| path.to_path_buf());
+        self.directory.pending_reveal = select.then(|| path.to_path_buf());
         self.start_directory_load(false, cx);
     }
 
@@ -1687,14 +1675,11 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_busy
-            && let Some(cancel) = &self.operation_cancel
-        {
-            cancel.store(true, Ordering::Release);
+        if self.operations.is_busy() && self.operations.request_cancel() {
             window.push_notification(Notification::info("Cancelling file operation…"), cx);
             return;
         }
-        if self.filter_query.is_empty() {
+        if self.directory.filter_query.is_empty() {
             self.execute_browser_command(BrowserCommand::ClearSelection, window, cx);
         } else {
             self.clear_filter(window, cx);
@@ -1816,7 +1801,7 @@ impl Marcel {
             return;
         }
 
-        let ticket = self.directory_ticket;
+        let ticket = self.directory.generation;
         let executor = cx.background_executor().clone();
         // Yazi uses a configurable preload worker pool; two workers are its
         // default. Marcel keeps that proven conservative default so decoding
@@ -1851,11 +1836,15 @@ impl Marcel {
                         .await;
                     let keep_running = this
                         .update(cx, |this, cx| {
-                            if ticket != this.directory_ticket {
+                            if ticket != this.directory.generation {
                                 return false;
                             }
                             this.thumbnail_inflight.remove(&path);
                             this.thumbnail_pending.remove(&path);
+                            if this.thumbnail_stale.remove(&path) {
+                                cx.notify();
+                                return true;
+                            }
                             let state = match result {
                                 Ok(thumbnail) => ThumbnailState::Ready(thumbnail),
                                 Err(_) => ThumbnailState::Failed,
@@ -1889,7 +1878,7 @@ impl Marcel {
     }
 
     fn clear_selection(&mut self) {
-        self.selection.clear();
+        self.directory.selection.clear();
         self.marquee = None;
         self.marquee_scroll_task.take();
         self.clear_preview();
@@ -2020,103 +2009,27 @@ impl Marcel {
     }
 
     fn visible_entry(&self, index: usize) -> Option<&FileEntry> {
-        self.visible_entries
-            .get(index)
-            .and_then(|entry_index| self.entries.get(*entry_index))
+        self.directory.visible_entry(index)
     }
 
     fn visible_paths(&self) -> Vec<PathBuf> {
-        self.visible_entries
-            .iter()
-            .filter_map(|index| self.entries.get(*index))
-            .map(|entry| entry.path.clone())
-            .collect()
+        self.directory.visible_paths()
     }
 
-    fn rebuild_visible_entries(&mut self) {
-        if self.filter_query.is_empty() {
-            self.visible_entries = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(index, entry)| {
-                    (self.show_hidden || !is_hidden_name(&entry.name)).then_some(index)
-                })
-                .collect();
-            return;
-        }
-
-        // Yazi keeps finder matches as derived state over the current folder
-        // and catches that state up when the folder revision changes. Marcel
-        // applies the same separation to a fuzzy-ranked visible-index layer.
-        // Source (MIT, upstream commit e58022b9aafc8dabf586e2cc29b79a230071716f):
-        // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-core/src/tab/finder.rs
-        let mut matches = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                if !self.show_hidden && is_hidden_name(&entry.name) {
-                    return None;
-                }
-                fuzzy_score(&entry.name, &self.filter_query).map(|score| (index, score))
-            })
-            .collect::<Vec<_>>();
-        matches.sort_unstable_by(|(left_index, left_score), (right_index, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_index.cmp(right_index))
-        });
-        self.visible_entries = matches.into_iter().map(|(index, _)| index).collect();
-    }
-
-    fn reconcile_filter_selection(&mut self, cx: &mut Context<Self>) {
-        let visible = self
-            .visible_entries
-            .iter()
-            .filter_map(|index| self.entries.get(*index))
-            .map(|entry| entry.path.as_path())
-            .collect::<HashSet<_>>();
-        self.selection.retain(|path| visible.contains(path));
-
-        if self.selection.primary().is_some() {
-            return;
-        }
-
-        let selected_entry = self
-            .visible_entries
-            .iter()
-            .filter_map(|index| self.entries.get(*index))
-            .find(|entry| self.selection.is_selected(&entry.path))
-            .cloned();
-        let entry = selected_entry.clone().or_else(|| {
-            if self.filter_query.is_empty() {
-                None
-            } else {
-                self.visible_entry(0).cloned()
-            }
-        });
-        if let Some(entry) = entry {
-            if selected_entry.is_some() {
-                self.selection.make_primary(&entry.path);
-            } else {
-                self.selection.select_only(entry.path.clone());
-            }
-            self.start_preview(entry, cx);
-        } else {
-            self.selection.clear();
-            self.clear_preview();
+    fn apply_selection_reconcile(&mut self, reconcile: ReconcileSelection, cx: &mut Context<Self>) {
+        match reconcile {
+            ReconcileSelection::Unchanged => {}
+            ReconcileSelection::Preview(entry) => self.start_preview(entry, cx),
+            ReconcileSelection::ClearPreview => self.clear_preview(),
         }
     }
 
     fn set_filter_query(&mut self, query: String, cx: &mut Context<Self>) {
-        if query == self.filter_query {
+        let Some(reconcile) = self.directory.set_filter_query(query) else {
             return;
-        }
+        };
 
-        self.filter_query = query;
-        self.rebuild_visible_entries();
-        self.reconcile_filter_selection(cx);
+        self.apply_selection_reconcile(reconcile, cx);
         self.directory_scroll = UniformListScrollHandle::new();
         self.entry_hit_bounds.borrow_mut().clear();
         self.entry_content_bounds.borrow_mut().clear();
@@ -2126,13 +2039,11 @@ impl Marcel {
     }
 
     fn set_show_hidden(&mut self, show_hidden: bool, cx: &mut Context<Self>) {
-        if self.show_hidden == show_hidden {
+        let Some(reconcile) = self.directory.set_show_hidden(show_hidden) else {
             return;
-        }
+        };
 
-        self.show_hidden = show_hidden;
-        self.rebuild_visible_entries();
-        self.reconcile_filter_selection(cx);
+        self.apply_selection_reconcile(reconcile, cx);
         self.directory_scroll = UniformListScrollHandle::new();
         self.entry_hit_bounds.borrow_mut().clear();
         self.entry_content_bounds.borrow_mut().clear();
@@ -2151,7 +2062,7 @@ impl Marcel {
         match event {
             InputEvent::Change => {
                 let query = input.read(cx).value().to_string();
-                let cleared = query.is_empty() && !self.filter_query.is_empty();
+                let cleared = query.is_empty() && !self.directory.filter_query.is_empty();
                 self.set_filter_query(query, cx);
                 if cleared {
                     self.browser_focus.focus(window);
@@ -2217,7 +2128,7 @@ impl Marcel {
             return;
         }
 
-        if !self.filter_query.is_empty() {
+        if !self.directory.filter_query.is_empty() {
             match stroke.key.as_str() {
                 "escape" if !browser_focused => {
                     self.clear_filter(window, cx);
@@ -2225,7 +2136,7 @@ impl Marcel {
                     return;
                 }
                 "backspace" => {
-                    let mut query = self.filter_query.clone();
+                    let mut query = self.directory.filter_query.clone();
                     query.pop();
                     self.replace_search_text(query, window, cx);
                     self.focus_search(window, cx);
@@ -2262,12 +2173,12 @@ impl Marcel {
             return;
         };
         if text.chars().any(char::is_control)
-            || (self.filter_query.is_empty() && text.chars().all(char::is_whitespace))
+            || (self.directory.filter_query.is_empty() && text.chars().all(char::is_whitespace))
         {
             return;
         }
 
-        let mut query = self.filter_query.clone();
+        let mut query = self.directory.filter_query.clone();
         query.push_str(text);
         self.replace_search_text(query, window, cx);
         self.focus_search(window, cx);
@@ -2331,6 +2242,7 @@ impl Marcel {
         }
 
         let Some(entry) = self
+            .directory
             .entries
             .iter()
             .find(|entry| entry.path == path)
@@ -2342,15 +2254,18 @@ impl Marcel {
         let modifiers = event.modifiers();
         if modifiers.shift {
             let ordered = self.visible_paths();
-            self.selection
-                .select_range(entry.path.clone(), &ordered, modifiers.secondary());
+            self.directory.selection.select_range(
+                entry.path.clone(),
+                &ordered,
+                modifiers.secondary(),
+            );
         } else if modifiers.secondary() {
-            self.selection.toggle(entry.path.clone());
+            self.directory.selection.toggle(entry.path.clone());
         } else {
-            self.selection.select_only(entry.path.clone());
+            self.directory.selection.select_only(entry.path.clone());
         }
 
-        if self.selection.primary() == Some(&entry.path) {
+        if self.directory.selection.primary() == Some(&entry.path) {
             self.start_preview(entry.clone(), cx);
         } else {
             self.clear_preview();
@@ -2369,6 +2284,7 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self
+            .directory
             .entries
             .iter()
             .find(|entry| entry.path == path)
@@ -2377,10 +2293,10 @@ impl Marcel {
             return;
         };
 
-        if self.selection.is_selected(path) {
-            self.selection.make_primary(path);
+        if self.directory.selection.is_selected(path) {
+            self.directory.selection.make_primary(path);
         } else {
-            self.selection.select_only(path.to_path_buf());
+            self.directory.selection.select_only(path.to_path_buf());
         }
         self.entry_menu = Some(EntryMenu {
             position,
@@ -2398,7 +2314,7 @@ impl Marcel {
                 .entry_hit_bounds
                 .borrow()
                 .values()
-                .any(|entry_bounds| entry_bounds.contains(&event.position))
+                .any(|entry| entry.bounds.contains(&event.position))
         {
             return;
         }
@@ -2651,11 +2567,11 @@ impl Marcel {
                             .hover(|this| this.bg(colors.accent))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.entry_menu = None;
-                                this.set_show_hidden(!this.show_hidden, cx);
+                                this.set_show_hidden(!this.directory.show_hidden, cx);
                             }))
                             .child("Show Hidden Files")
                             .child(div().flex_1())
-                            .when(self.show_hidden, |this| this.child("✓")),
+                            .when(self.directory.show_hidden, |this| this.child("✓")),
                     )
                     .child(separator())
                     .child(planned("– Open in Terminal"))
@@ -2669,7 +2585,7 @@ impl Marcel {
                             .hover(|this| this.bg(colors.accent))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
-                                    this.current_dir.display().to_string(),
+                                    this.directory.current_dir.display().to_string(),
                                 ));
                                 this.dismiss_entry_menu(cx);
                             }))
@@ -2859,7 +2775,7 @@ impl Marcel {
                 .entry_hit_bounds
                 .borrow()
                 .values()
-                .any(|entry_bounds| entry_bounds.contains(&event.position))
+                .any(|entry| entry.bounds.contains(&event.position))
         {
             return;
         }
@@ -2875,9 +2791,9 @@ impl Marcel {
             .borrow_mut()
             .retain(|path, _| visible_paths.contains(path));
         let scroll = self.directory_scroll.0.borrow().base_handle.offset();
-        let base_selection = self.selection.selected().clone();
+        let base_selection = self.directory.selection.selected().clone();
         if !additive {
-            self.selection.clear();
+            self.directory.selection.clear();
             self.clear_preview();
         }
         self.marquee = Some(MarqueeGesture {
@@ -2936,7 +2852,8 @@ impl Marcel {
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
 
-        self.selection
+        self.directory
+            .selection
             .replace_from_marquee(&base_selection, intersecting, additive);
         if clear_preview {
             self.clear_preview();
@@ -3307,9 +3224,15 @@ impl Marcel {
 
     fn open_primary_with(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
+            .directory
             .selection
             .primary()
-            .and_then(|path| self.entries.iter().find(|entry| &entry.path == path))
+            .and_then(|path| {
+                self.directory
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.path == path)
+            })
             .filter(|entry| !entry.navigable)
             .map(|entry| entry.path.clone())
         else {
@@ -3324,7 +3247,7 @@ impl Marcel {
             cx.spawn(async move |this, cx| {
                 if let Err(error) = open_task.await {
                     let _ = this.update(cx, |this, cx| {
-                        if this.selection.primary() == Some(&path) {
+                        if this.directory.selection.primary() == Some(&path) {
                             this.preview_state = PreviewState::Error(error.to_string());
                             cx.notify();
                         }
@@ -3338,8 +3261,8 @@ impl Marcel {
     fn render_place(&self, index: usize, place: Place, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
-        let active = self.current_dir == place.path;
-        let operation_busy = self.operation_busy;
+        let active = self.directory.current_dir == place.path;
+        let operation_busy = self.operations.is_busy();
         let drop_path = place.path.clone();
         let can_drop_path = place.path.clone();
         let bounds_path = place.path.clone();
@@ -3426,8 +3349,8 @@ impl Marcel {
     ) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
-        let active = self.current_dir == bookmark.path;
-        let operation_busy = self.operation_busy;
+        let active = self.directory.current_dir == bookmark.path;
+        let operation_busy = self.operations.is_busy();
         let insertion_here = self.bookmark_insertion == Some(BookmarkInsertion { index });
         let navigate_path = bookmark.path.clone();
         let drop_path = bookmark.path.clone();
@@ -3568,7 +3491,7 @@ impl Marcel {
             .flatten();
         uniform_list(
             "directory-entries",
-            self.visible_entries.len(),
+            self.directory.visible_entries.len(),
             cx.processor(move |this, range: Range<usize>, _window, cx| {
                 range
                     .filter_map(|index| {
@@ -3579,7 +3502,7 @@ impl Marcel {
                         let bounds_path = path.clone();
                         let drop_path = path.clone();
                         let can_drop_path = path.clone();
-                        let selected = this.selection.is_selected(&path);
+                        let selected = this.directory.selection.is_selected(&path);
                         let navigable = entry.navigable;
                         let drag = if selected {
                             selected_drag
@@ -3588,7 +3511,7 @@ impl Marcel {
                         } else {
                             Self::single_file_drag(&path, navigable)
                         };
-                        let operation_busy = this.operation_busy;
+                        let operation_busy = this.operations.is_busy();
                         let entry_hit_bounds = this.entry_hit_bounds.clone();
                         let entry_content_bounds = this.entry_content_bounds.clone();
                         let browser_bounds = this.browser_bounds.clone();
@@ -3697,9 +3620,10 @@ impl Marcel {
                             .child(
                                 canvas(
                                     move |bounds, _, _| {
-                                        entry_hit_bounds
-                                            .borrow_mut()
-                                            .insert(bounds_path.clone(), bounds);
+                                        entry_hit_bounds.borrow_mut().insert(
+                                            bounds_path.clone(),
+                                            EntryHitRegion { bounds, navigable },
+                                        );
                                         if let Some(browser) = browser_bounds.get() {
                                             let scroll =
                                                 directory_scroll.0.borrow().base_handle.offset();
@@ -3750,16 +3674,17 @@ impl Marcel {
             self.grid_layout_columns = columns;
             self.entry_content_bounds.borrow_mut().clear();
         }
-        let row_count = self.visible_entries.len().div_ceil(columns);
+        let row_count = self.directory.visible_entries.len().div_ceil(columns);
 
         uniform_list(
             "directory-grid-rows",
             row_count,
             cx.processor(move |this, rows: Range<usize>, _window, cx| {
                 let thumbnail_start = rows.start.saturating_sub(1) * columns;
-                let thumbnail_end = ((rows.end + 1) * columns).min(this.visible_entries.len());
+                let thumbnail_end =
+                    ((rows.end + 1) * columns).min(this.directory.visible_entries.len());
                 let visible_start = rows.start * columns;
-                let visible_end = (rows.end * columns).min(this.visible_entries.len());
+                let visible_end = (rows.end * columns).min(this.directory.visible_entries.len());
                 this.ensure_thumbnails(
                     visible_start..visible_end,
                     thumbnail_start..thumbnail_end,
@@ -3768,7 +3693,7 @@ impl Marcel {
 
                 rows.map(|row| {
                     let start = row * columns;
-                    let end = (start + columns).min(this.visible_entries.len());
+                    let end = (start + columns).min(this.directory.visible_entries.len());
                     let tiles = (start..end)
                         .filter_map(|index| {
                             let entry = this.visible_entry(index)?.clone();
@@ -3778,7 +3703,7 @@ impl Marcel {
                             let bounds_path = path.clone();
                             let drop_path = path.clone();
                             let can_drop_path = path.clone();
-                            let selected = this.selection.is_selected(&path);
+                            let selected = this.directory.selection.is_selected(&path);
                             let navigable = entry.navigable;
                             let drag = if selected {
                                 selected_drag
@@ -3787,7 +3712,7 @@ impl Marcel {
                             } else {
                                 Self::single_file_drag(&path, navigable)
                             };
-                            let operation_busy = this.operation_busy;
+                            let operation_busy = this.operations.is_busy();
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
                             let entry_hit_bounds = this.entry_hit_bounds.clone();
                             let entry_content_bounds = this.entry_content_bounds.clone();
@@ -3945,9 +3870,10 @@ impl Marcel {
                                     .child(
                                         canvas(
                                             move |bounds, _, _| {
-                                                entry_hit_bounds
-                                                    .borrow_mut()
-                                                    .insert(bounds_path.clone(), bounds);
+                                                entry_hit_bounds.borrow_mut().insert(
+                                                    bounds_path.clone(),
+                                                    EntryHitRegion { bounds, navigable },
+                                                );
                                                 if let Some(browser) = browser_bounds.get() {
                                                     let scroll = directory_scroll
                                                         .0
@@ -3992,14 +3918,14 @@ impl Marcel {
 
     fn render_browser(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
-        let empty_message = self.visible_entries.is_empty().then(|| {
-            if let Some(error) = &self.directory_error {
+        let empty_message = self.directory.visible_entries.is_empty().then(|| {
+            if let Some(error) = &self.directory.error {
                 format!("Could not read this folder\n{error}")
-            } else if self.directory_loading && self.entries.is_empty() {
+            } else if self.directory.loading && self.directory.entries.is_empty() {
                 "Loading folder…".to_string()
-            } else if !self.filter_query.is_empty() {
-                format!("No matches for “{}”", self.filter_query)
-            } else if !self.show_hidden && !self.entries.is_empty() {
+            } else if !self.directory.filter_query.is_empty() {
+                format!("No matches for “{}”", self.directory.filter_query)
+            } else if !self.directory.show_hidden && !self.directory.entries.is_empty() {
                 "This folder contains only hidden files".to_string()
             } else {
                 "This folder is empty".to_string()
@@ -4097,20 +4023,20 @@ impl Marcel {
             )
             .child(contents)
             .when_some(marquee, |this, marquee| this.child(marquee))
-            .when(self.directory_loading, |this| {
+            .when(self.directory.loading, |this| {
                 this.child(
                     div()
                         .px_3()
                         .py_1()
                         .text_xs()
                         .text_color(colors.muted_foreground)
-                        .child(if self.filter_query.is_empty() {
-                            format!("Loading… {} items", self.entries.len())
+                        .child(if self.directory.filter_query.is_empty() {
+                            format!("Loading… {} items", self.directory.entries.len())
                         } else {
                             format!(
                                 "Loading… {} of {} items match",
-                                self.visible_entries.len(),
-                                self.entries.len()
+                                self.directory.visible_entries.len(),
+                                self.directory.entries.len()
                             )
                         }),
                 )
@@ -4424,9 +4350,9 @@ impl Marcel {
 
 impl Render for Marcel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.search_input.read(cx).value().as_ref() != self.filter_query {
+        if self.search_input.read(cx).value().as_ref() != self.directory.filter_query {
             self.search_input.update(cx, |input, cx| {
-                input.set_value(self.filter_query.clone(), window, cx);
+                input.set_value(self.directory.filter_query.clone(), window, cx);
             });
         }
 
@@ -4489,7 +4415,7 @@ impl Render for Marcel {
         let hidden_switch = Switch::new("show-hidden-files")
             .small()
             .label("Show Hidden")
-            .checked(self.show_hidden)
+            .checked(self.directory.show_hidden)
             .tooltip("Show files whose names begin with a dot")
             .on_click(move |checked, _, cx| {
                 hidden_switch_view.update(cx, |this, cx| {
@@ -4807,13 +4733,13 @@ impl Render for Marcel {
                             .justify_center()
                             .rounded(cx.theme().radius)
                             .text_lg()
-                            .text_color(if self.current_dir.parent().is_some() {
+                            .text_color(if self.directory.current_dir.parent().is_some() {
                                 colors.sidebar_foreground
                             } else {
                                 colors.muted_foreground
                             })
                             .child("↑")
-                            .when(self.current_dir.parent().is_some(), |button| {
+                            .when(self.directory.current_dir.parent().is_some(), |button| {
                                 button
                                     .cursor_pointer()
                                     .hover(|button| button.bg(colors.sidebar_accent))
@@ -4903,7 +4829,7 @@ impl Render for Marcel {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(self.current_dir.display().to_string()),
+                            .child(self.directory.current_dir.display().to_string()),
                     )
                     .child(
                         Input::new(&self.search_input)
@@ -4914,10 +4840,12 @@ impl Render for Marcel {
                     ),
             );
 
-        let selected_entry = self
-            .selection
-            .primary()
-            .and_then(|path| self.entries.iter().find(|entry| &entry.path == path));
+        let selected_entry = self.directory.selection.primary().and_then(|path| {
+            self.directory
+                .entries
+                .iter()
+                .find(|entry| &entry.path == path)
+        });
         let preview_name = selected_entry.map(|entry| entry.name.clone());
         let preview_details = selected_entry.map(|entry| {
             if entry.navigable {
@@ -5140,15 +5068,44 @@ fn can_move_files_to(paths: &[PathBuf], destination: &Path) -> bool {
         })
 }
 
+fn can_drop_on_entry_hit(
+    hit: &EntryHitRegion,
+    pointer: Point<Pixels>,
+    sources: &[PathBuf],
+    destination: &Path,
+    operation_busy: bool,
+) -> bool {
+    !operation_busy
+        && hit.navigable
+        && hit.bounds.contains(&pointer)
+        && can_move_files_to(sources, destination)
+}
+
+fn directory_event_paths(events: &[DirectoryEvent]) -> Vec<PathBuf> {
+    let mut paths = HashSet::with_capacity(events.len());
+    for event in events {
+        match event {
+            DirectoryEvent::Added(entry) | DirectoryEvent::Changed(entry) => {
+                paths.insert(entry.path.clone());
+            }
+            DirectoryEvent::Removed(path) => {
+                paths.insert(path.clone());
+            }
+            DirectoryEvent::Renamed { from, entry } => {
+                paths.insert(from.clone());
+                paths.insert(entry.path.clone());
+            }
+            DirectoryEvent::RescanRequired => {}
+        }
+    }
+    paths.into_iter().collect()
+}
+
 fn grid_column_count(viewport_width: f32) -> usize {
     let available = (viewport_width - GRID_SIDE_PADDING * 2.0).max(GRID_TILE_WIDTH);
     ((available + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP))
         .floor()
         .max(1.0) as usize
-}
-
-fn is_hidden_name(name: &str) -> bool {
-    name.starts_with('.') && name != "." && name != ".."
 }
 
 fn should_defer_global_filter_to_input(search_focused: bool, input_focused: bool) -> bool {
@@ -5200,46 +5157,6 @@ fn take_display_columns(value: &str, max_columns: usize) -> &str {
     }
 
     &value[..end]
-}
-
-fn fuzzy_score(candidate: &str, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let candidate = candidate.to_lowercase().chars().collect::<Vec<_>>();
-    let query = query.to_lowercase().chars().collect::<Vec<_>>();
-    let mut search_from = 0;
-    let mut previous_match = None;
-    let mut score = 0i64;
-
-    for needle in &query {
-        let relative = candidate
-            .get(search_from..)?
-            .iter()
-            .position(|character| character == needle)?;
-        let position = search_from + relative;
-
-        score += if previous_match.is_some_and(|previous| position == previous + 1) {
-            24
-        } else {
-            4
-        };
-        if position == 0
-            || candidate
-                .get(position.saturating_sub(1))
-                .is_some_and(|character| matches!(character, ' ' | '-' | '_' | '.'))
-        {
-            score += 16;
-        }
-        score -= position as i64;
-
-        previous_match = Some(position);
-        search_from = position + 1;
-    }
-
-    score -= candidate.len().saturating_sub(query.len()) as i64;
-    Some(score)
 }
 
 fn prioritize_thumbnail_indices(visible: Range<usize>, nearby: Range<usize>) -> Vec<usize> {
@@ -5415,6 +5332,7 @@ fn code_fence(contents: &str, language: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::directory_session::{fuzzy_score, is_hidden_name};
 
     #[test]
     fn code_fence_grows_past_fences_in_content() {
@@ -5476,6 +5394,38 @@ mod tests {
         assert!(can_move_files_to(
             &[PathBuf::from("/work/report.txt")],
             Path::new("/archive")
+        ));
+    }
+
+    #[test]
+    fn browser_drop_hit_uses_painted_entry_metadata() {
+        let pointer = Point::new(px(50.0), px(50.0));
+        let bounds = Bounds::from_corners(
+            Point::new(px(0.0), px(0.0)),
+            Point::new(px(100.0), px(100.0)),
+        );
+        let sources = [PathBuf::from("/work/report.txt")];
+        let destination = Path::new("/archive");
+
+        assert!(can_drop_on_entry_hit(
+            &EntryHitRegion {
+                bounds,
+                navigable: true,
+            },
+            pointer,
+            &sources,
+            destination,
+            false,
+        ));
+        assert!(!can_drop_on_entry_hit(
+            &EntryHitRegion {
+                bounds,
+                navigable: false,
+            },
+            pointer,
+            &sources,
+            destination,
+            false,
         ));
     }
 

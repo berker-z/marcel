@@ -38,6 +38,48 @@ impl FileEntry {
     fn from_dir_entry(entry: DirEntry, icons: &mut IconProvider) -> io::Result<Self> {
         let path = entry.path();
         let file_type = entry.file_type()?;
+        let followed_metadata = if file_type.is_symlink() {
+            path.metadata().ok()
+        } else {
+            entry.metadata().ok()
+        };
+        Ok(Self::from_parts(
+            path,
+            entry.file_name(),
+            file_type,
+            followed_metadata,
+            icons,
+        ))
+    }
+
+    pub(crate) fn from_path(path: &Path, icons: &mut IconProvider) -> io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        let file_type = metadata.file_type();
+        let followed_metadata = if file_type.is_symlink() {
+            path.metadata().ok()
+        } else {
+            Some(metadata)
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+            .to_os_string();
+        Ok(Self::from_parts(
+            path.to_path_buf(),
+            name,
+            file_type,
+            followed_metadata,
+            icons,
+        ))
+    }
+
+    fn from_parts(
+        path: PathBuf,
+        name: std::ffi::OsString,
+        file_type: std::fs::FileType,
+        followed_metadata: Option<std::fs::Metadata>,
+        icons: &mut IconProvider,
+    ) -> Self {
         let kind = if file_type.is_dir() {
             EntryKind::Directory
         } else if file_type.is_file() {
@@ -48,16 +90,10 @@ impl FileEntry {
             EntryKind::Other
         };
 
-        let followed_metadata = if file_type.is_symlink() {
-            path.metadata().ok()
-        } else {
-            entry.metadata().ok()
-        };
-
         let navigable =
             file_type.is_dir() || followed_metadata.as_ref().is_some_and(|meta| meta.is_dir());
-        Ok(Self {
-            name: entry.file_name().to_string_lossy().into_owned(),
+        Self {
+            name: name.to_string_lossy().into_owned(),
             navigable,
             size: followed_metadata
                 .as_ref()
@@ -66,7 +102,7 @@ impl FileEntry {
             icon_path: icons.icon_for(&path, navigable),
             path,
             kind,
-        })
+        }
     }
 
     pub fn display_kind(&self) -> &'static str {
@@ -174,6 +210,10 @@ pub fn merge_sorted_entries(left: Vec<FileEntry>, right: Vec<FileEntry>) -> Vec<
     merged.extend(left);
     merged.extend(right);
     merged
+}
+
+pub(crate) fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by(compare_entries);
 }
 
 fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {

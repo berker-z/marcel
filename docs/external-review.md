@@ -54,6 +54,12 @@ performed a directory lookup whose cost depended on scroll position. Both hot
 paths were removed and documented in Sprint 3, but they are useful evidence for
 establishing clearer ownership boundaries.
 
+A later invalid-drop test exposed the same shape in drag-hover negotiation:
+each painted candidate searched the source entry vector by path, making drags
+from the end of a 10,000-entry directory briefly stall. Painted hit regions now
+carry the navigable flag needed for target decisions, so pointer movement stays
+proportional to the small painted set rather than directory position.
+
 ### Recommended response
 
 Do not perform an abstract clean-architecture rewrite. Extract coherent,
@@ -72,16 +78,37 @@ These types can begin as ordinary Rust structs owned by `Marcel`. They should
 become independent GPUI entities only when independent notification,
 rendering, or task lifetimes provide a concrete benefit.
 
+Status: Sprint 4A introduced `OperationController` as an ordinary Rust struct
+owned by `Marcel`. It now owns the clipboard, journal, busy/cancellation state,
+task handles, progress state, and their pure transitions while preserving
+`file_ops.rs` as the filesystem engine.
+
+Sprint 4B introduced `DirectorySession`, also as an ordinary Rust struct owned
+by `Marcel`. It owns the current directory's source entries, fuzzy-ranked
+visible projection, hidden-file policy, selection reconciliation, load
+generation and task lifetime, load errors, and pending reveal. `app.rs` retains
+view concerns such as scroll handles, painted hit bounds, marquee geometry, and
+preview side effects. A pure add/remove/change/rename/rescan reducer is tested
+and ready to become the watcher integration boundary.
+
+Sprint 5 connected that boundary to an active-directory watcher. Native
+notifications fall back to polling, noisy paths are coalesced and deduplicated,
+metadata is revalidated off the foreground executor, and each bounded batch is
+applied with one projection/selection reconciliation pass. Generation checks
+prevent a replaced watcher from publishing after navigation. Marcel's own
+completed operations retain their conservative full reload until explicit
+operation-to-watcher reporting is proven.
+
 ## Copy-semantics and scale debt
 
-The review correctly observed that Marcel currently preserves:
+At review time, Marcel preserved:
 
 - file contents;
 - directory structure;
 - symbolic links without following them;
 - basic permission bits.
 
-It does not yet promise preservation of:
+It did not yet promise preservation of:
 
 - timestamps;
 - extended attributes;
@@ -90,29 +117,35 @@ It does not yet promise preservation of:
 - sparse-file layout;
 - hardlink relationships.
 
-Ownership in particular requires a product policy: a normal unprivileged file
-manager copy should not automatically claim the semantics of a privileged
-archival copy. Marcel needs an explicit copy-semantics contract and fixtures
-before users should trust it with irreplaceable directory trees.
+The ownership concern remains important: a normal unprivileged file manager
+copy must not claim the semantics of privileged archival replication.
 
-Scale also needs attention. A current recursive copy may:
+At review time, a recursive copy could:
 
 1. measure the source tree for progress;
 2. snapshot the source for validation;
 3. traverse the source while copying;
 4. snapshot the destination.
 
-The source and destination snapshots are retained in the bounded operation
-journal. This provides strong undo/redo refusal behavior but creates repeated
-tree walks and potentially large in-memory vectors. Future work should examine
-combining measurement with source snapshotting, collecting destination
-identities during the copy, and bounding journal cost by memory as well as
-operation count.
+Sprint 6 established the explicit contract and fixtures. Marcel now preserves
+regular-file and directory modes, file access/modification times, directory
+modification times, supported user xattrs and POSIX ACLs, sparse extents, and
+hardlinks within one copied tree. Ownership, privileged labels, birth time,
+filesystem flags, reflinks, and cross-top-level hardlinks remain explicit
+non-goals.
+
+Sprint 6 also collects snapshot paths during the main copy traversal and
+performs a flat destination identity refresh after publication, eliminating
+the separate source and destination enumeration passes. Copy undo records are
+capped at 100,000 combined snapshots and oversized copies explicitly complete
+without entering undo history. Validation compares exact tree membership as
+well as identities before mutation. Progress measurement remains a separate
+source traversal.
 
 No-overwrite publication protects the destination namespace, but it does not
 make the source tree transactional. External mutation during a copy can still
-produce a result observed across different source states. The copy-semantics
-document must describe this honestly.
+produce a result observed across different source states; the copy-semantics
+document now states this explicitly.
 
 ## Priority recommendation
 

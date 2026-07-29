@@ -55,6 +55,21 @@ adapted into Marcel itself.
     session-serialized and adds hidden staging, Linux `RENAME_NOREPLACE`,
     recursive identity validation, bounded atomic progress snapshots, and
     general filesystem undo/redo. No Yazi code was copied.
+  - Sprint 6's copy-fidelity audit additionally studied
+    `yazi-scheduler/src/file/traverse.rs`,
+    `yazi-fs/src/engine/local/copier.rs`, and
+    `yazi-fs/src/engine/attrs.rs` at the same commit. Marcel conceptually
+    adapts Yazi's opaque-symlink traversal, file mode/time baseline, and
+    buffered progressive copying while adding Marcel-owned sparse, xattr/ACL,
+    hardlink, staging, and undo semantics. No Yazi code was copied.
+  - `src/directory_watcher.rs` conceptually adapts Yazi's non-recursive
+    recommended watcher, polling fallback, 250 ms event coalescing,
+    deduplication, and metadata-revalidated upsert/delete flow from
+    `yazi-watcher/src/local/local.rs` at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286`. Marcel publishes bounded batches
+    through its own `DirectoryEvent` reducer and uses GPUI/background-executor
+    lifetimes rather than Yazi's Tokio, VFS, and global event infrastructure.
+    No Yazi code was copied.
 
 Yazi is a primary architectural influence for asynchronous filesystem work,
 task scheduling, cancellation, previews, and responsiveness. Future direct or

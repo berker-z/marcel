@@ -119,6 +119,10 @@ bounded undo/redo history when it is genuinely reversible.
   preventing repeated full-directory scans in very large folders. Single-row
   payloads consume the row's existing directory flag directly, so rendering
   near the end of a large directory does not scan from its beginning.
+- [x] Painted entry hit regions retain the row's navigable flag. Drag-hover
+  target negotiation therefore examines only painted regions and never
+  searches the full directory vector by path, keeping invalid sidebar drops
+  independent of the dragged item's position in a very large directory.
 
 ### Deliberate drag limits
 

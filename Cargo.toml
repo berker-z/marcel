@@ -15,12 +15,14 @@ image = { version = "0.25", default-features = false, features = ["bmp", "gif", 
 infer = "0.22"
 md-5 = "0.10"
 mime_guess = "2"
+notify = "7"
 png = "0.18"
 rustix = { version = "1", features = ["fs"] }
 smol = "2"
 tempfile = "3"
 unicode-width = "0.2"
 url = "2"
+xattr = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
