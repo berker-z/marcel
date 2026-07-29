@@ -9,6 +9,7 @@ pub mod file_ops;
 pub mod fs;
 mod history;
 mod icons;
+pub mod launch;
 mod operations;
 mod pdf_preview;
 mod places;

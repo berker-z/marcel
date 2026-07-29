@@ -15,8 +15,9 @@ filesystem mutations, including copy, move, Trash, restore, and permanent
 deletion. Use disposable data while evaluating it and keep backups of anything
 important.
 
-There is not yet an installable release package or stable compatibility
-promise. Development currently happens through the Nix flake.
+The Nix flake provides an installable package, application, and downstream
+overlay. Marcel does not yet publish stable release artifacts or promise
+configuration compatibility between alpha versions.
 
 ### Browsing and interaction
 
@@ -114,15 +115,22 @@ in-memory and limited to the current directory; it is not recursive search.
 
 ## Development
 
-Enter the reproducible development shell and run Marcel:
+Run the packaged application against a path:
+
+```sh
+nix run . -- ~/Downloads
+```
+
+Or enter the reproducible development shell:
 
 ```sh
 nix develop
 cargo run
 ```
 
-Marcel opens the directory it was launched from. Release mode is substantially
-faster for large directories and thumbnail-heavy views:
+Without an argument, Marcel opens the directory it was launched from. It also
+accepts absolute or relative local paths and `file://` URIs. Release mode is
+substantially faster for large directories and thumbnail-heavy views:
 
 ```sh
 cargo run --release
@@ -142,6 +150,51 @@ intentionally:
 nix flake update
 cargo update
 ```
+
+Build the installable package and desktop metadata with:
+
+```sh
+nix build
+```
+
+The package installs `marcel`, `marcel.desktop`, Poppler/GIO runtime tools, and
+a private RAR-capable 7-Zip backend. It advertises only `inode/directory`;
+archive double-click behavior remains owned by the user's archive viewer.
+
+### Use from another Nix flake
+
+Add Marcel as an input:
+
+```nix
+inputs.marcel = {
+  url = "github:berker-z/marcel";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+Apply its overlay and install the package:
+
+```nix
+{
+  nixpkgs.overlays = [inputs.marcel.overlays.default];
+  environment.systemPackages = [pkgs.marcel];
+}
+```
+
+For Home Manager, make Marcel the default directory handler declaratively:
+
+```nix
+{
+  xdg.mimeApps = {
+    enable = true;
+    associations.added."inode/directory" = ["marcel.desktop"];
+    defaultApplications."inode/directory" = ["marcel.desktop"];
+  };
+}
+```
+
+The desktop identifier is `marcel.desktop`. Marcel does not claim ZIP, 7z,
+RAR, tar, or other archive MIME types.
 
 Required checks:
 
@@ -172,9 +225,10 @@ default when a supported installed family is available.
 
 Marcel is not ready to replace a mature system file manager for every workflow:
 
-- Packaging, a desktop entry, application icons, `inode/directory`
-  registration, `org.freedesktop.FileManager1`, and single-instance behavior
-  are not implemented.
+- A branded application icon, `org.freedesktop.FileManager1`, single-instance
+  behavior, non-Nix release artifacts, and release automation are not
+  implemented. The Nix package currently uses the desktop's generic file
+  manager icon.
 - Native drag-and-drop and clipboard interoperability with browsers, desktop
   surfaces, and other file managers are not implemented. Dragging inside
   Marcel works.
@@ -214,8 +268,8 @@ The immediate alpha-to-daily-driver sequence is:
 5. Add cross-filesystem transfers, conflict decisions, and a documented
    symbolic-link policy.
 6. Add removable volumes, mounts, and common remote locations.
-7. Package Marcel through the flake and add desktop/default-file-manager
-   integration.
+7. Add the file-manager D-Bus surface, single-instance request routing, a
+   branded icon, and non-Nix release artifacts.
 8. Consolidate persistent settings, themes, sorting, grouping, zoom,
    breadcrumbs, and accessibility work.
 9. Add media playback and optional ebook previews after the file-manager

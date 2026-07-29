@@ -67,18 +67,19 @@ optional feature ideas.
 
 ## Desktop integration and distribution
 
-- Accept local paths and `file://` URIs on the command line so desktop launchers
+- [x] Accept local paths and `file://` URIs on the command line so desktop launchers
   can invoke `marcel %U`.
-- Add an installable application package to the flake:
+- [x] Add an installable application package to the flake:
   - `packages.default`
   - `apps.default`
   - an overlay for downstream flakes
   - build and runtime dependency declarations suitable for GPUI, Poppler, and
     future media preview tools
-- Install a freedesktop desktop entry and application icons.
-- Advertise `inode/directory` support and document setting `marcel.desktop` as
+- [x] Install a freedesktop desktop entry using the generic file-manager icon.
+  Add branded application icons before a stable release.
+- [x] Advertise `inode/directory` support and document setting `marcel.desktop` as
   the default directory handler.
-- Provide a Home Manager example or module for installing Marcel and setting
+- [x] Provide a Home Manager example for installing Marcel and setting
   its MIME association declaratively.
 - Implement `org.freedesktop.FileManager1` D-Bus support for:
   - `ShowItems`

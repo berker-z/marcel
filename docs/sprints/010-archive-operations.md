@@ -122,8 +122,9 @@ first slice does not recursively chase arbitrary nested archives.
   actions.
 - [x] Apply exact top-level operation results without replacing the active
   directory session.
-- [ ] Add an installable Nix package whose wrapper guarantees 7-Zip in its
-  closure, and make portable artifacts install static `7zzs` as private
+- [x] Add an installable Nix package whose wrapper guarantees RAR-capable
+  7-Zip in its closure as private `libexec/marcel/7zz`.
+- [ ] Make future portable artifacts install static `7zzs` as private
   `libexec/marcel/7zz`.
 - [ ] Manually verify progress, cancellation, ZIP interoperability, broad
   extraction, large directories, and absence of stale UI results.

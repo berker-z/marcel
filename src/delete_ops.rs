@@ -526,8 +526,13 @@ mod tests {
 
         let outcome = delete_paths(std::slice::from_ref(&target), progress.clone());
 
-        assert_eq!(outcome.completed, vec![target.clone()]);
-        assert!(outcome.failures.is_empty());
+        assert_eq!(
+            outcome.completed,
+            vec![target.clone()],
+            "{:#?}",
+            outcome.failures
+        );
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert!(!target.exists());
         assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
         let snapshot = progress.snapshot();
@@ -549,7 +554,7 @@ mod tests {
             Arc::new(TransferProgress::default()),
         );
 
-        assert!(outcome.failures.is_empty());
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert_eq!(fs::read(collision).unwrap(), b"keep");
     }
 
@@ -566,8 +571,8 @@ mod tests {
             Arc::new(TransferProgress::default()),
         );
 
-        assert_eq!(outcome.completed, [target]);
-        assert!(outcome.failures.is_empty());
+        assert_eq!(outcome.completed, [target], "{:#?}", outcome.failures);
+        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
     }
 
     #[test]
