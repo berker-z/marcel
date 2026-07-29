@@ -12,7 +12,10 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::trash_ops::{TrashRecord, restore_trash_records, retrash_records};
+use crate::{
+    archive_ops::{MAX_ARCHIVE_ENTRIES, create_zip_archive, extract_archive},
+    trash_ops::{TrashRecord, restore_trash_records, retrash_records},
+};
 
 pub const OPERATION_HISTORY_LIMIT: usize = 100;
 pub const COPY_UNDO_SNAPSHOT_LIMIT: usize = 100_000;
@@ -93,6 +96,16 @@ pub enum OperationRecord {
         source: PathBuf,
         destination: PathBuf,
         identity: FileIdentity,
+    },
+    ArchiveCreate {
+        sources: Vec<PathSnapshot>,
+        destination: PathBuf,
+        created: Vec<PathSnapshot>,
+    },
+    ArchiveExtract {
+        source: Vec<PathSnapshot>,
+        output: PathBuf,
+        created: Vec<PathSnapshot>,
     },
 }
 
@@ -225,6 +238,8 @@ impl OperationRecord {
                 .map(TrashRecord::original_path)
                 .unwrap_or_else(|| Path::new("")),
             Self::Rename { destination, .. } => destination,
+            Self::ArchiveCreate { destination, .. } => destination,
+            Self::ArchiveExtract { output, .. } => output,
         }
     }
 
@@ -277,6 +292,14 @@ impl OperationRecord {
             } => DirectoryChanges {
                 removed: vec![source.clone()],
                 upserted: vec![destination.clone()],
+            },
+            Self::ArchiveCreate { destination, .. } => DirectoryChanges {
+                upserted: vec![destination.clone()],
+                ..DirectoryChanges::default()
+            },
+            Self::ArchiveExtract { output, .. } => DirectoryChanges {
+                upserted: vec![output.clone()],
+                ..DirectoryChanges::default()
             },
         }
     }
@@ -486,6 +509,11 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
             records: retrash_records(records)?,
         }),
         OperationRecord::Rename { .. } => reverse_rename(operation),
+        OperationRecord::ArchiveCreate { created, .. }
+        | OperationRecord::ArchiveExtract { created, .. } => {
+            remove_snapshotted_tree(created)?;
+            Ok(operation.clone())
+        }
     }
 }
 
@@ -544,7 +572,89 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
             records: restore_trash_records(records)?,
         }),
         OperationRecord::Rename { .. } => reverse_rename(operation),
+        OperationRecord::ArchiveCreate {
+            sources,
+            destination,
+            ..
+        } => {
+            validate_snapshot_tree(sources)?;
+            create_zip_operation(
+                &top_level_paths(sources),
+                destination,
+                Arc::new(AtomicBool::new(false)),
+            )
+        }
+        OperationRecord::ArchiveExtract { source, .. } => {
+            validate_snapshot_tree(source)?;
+            let archive = top_level_paths(source)
+                .into_iter()
+                .next()
+                .context("Archive operation has no source")?;
+            extract_archive_operation(&archive, Arc::new(AtomicBool::new(false)))
+        }
     }
+}
+
+pub fn create_zip_operation(
+    sources: &[PathBuf],
+    destination: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<OperationRecord> {
+    let source_snapshots = snapshot_paths_cancellable(sources, &cancelled)?;
+    let outcome = create_zip_archive(sources, destination, cancelled)?;
+    let created = snapshot_tree(&outcome.published)?;
+    Ok(OperationRecord::ArchiveCreate {
+        sources: source_snapshots,
+        destination: outcome.published,
+        created,
+    })
+}
+
+pub fn extract_archive_operation(
+    archive: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<OperationRecord> {
+    if cancelled.load(Ordering::Acquire) {
+        bail!("Archive operation cancelled");
+    }
+    let source = snapshot_tree(archive)?;
+    let outcome = extract_archive(archive, cancelled)?;
+    let created = snapshot_tree(&outcome.published)?;
+    Ok(OperationRecord::ArchiveExtract {
+        source,
+        output: outcome.published,
+        created,
+    })
+}
+
+fn snapshot_paths_cancellable(
+    paths: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Result<Vec<PathSnapshot>> {
+    let mut snapshots = Vec::new();
+    let mut pending = paths.iter().rev().cloned().collect::<Vec<_>>();
+    while let Some(path) = pending.pop() {
+        if cancelled.load(Ordering::Acquire) {
+            bail!("Archive operation cancelled");
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("Could not inspect “{}”", path.display()))?;
+        let snapshot = snapshot_from_metadata(&path, &metadata)?;
+        let kind = snapshot.kind;
+        snapshots.push(snapshot);
+        if snapshots.len() > MAX_ARCHIVE_ENTRIES {
+            bail!("Selection contains more than {MAX_ARCHIVE_ENTRIES} entries");
+        }
+        if kind == SnapshotKind::Directory {
+            let mut children = fs::read_dir(&path)
+                .with_context(|| format!("Could not read “{}”", path.display()))?
+                .collect::<io::Result<Vec<_>>>()
+                .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
+            children.sort_by_key(|entry| entry.file_name());
+            pending.extend(children.into_iter().rev().map(|entry| entry.path()));
+        }
+    }
+    Ok(snapshots)
 }
 
 fn reverse_rename(operation: &OperationRecord) -> Result<OperationRecord> {
@@ -2078,5 +2188,45 @@ mod tests {
         let destination = destination_parent.join("source");
         assert_eq!(fs::read(destination.join("one")).unwrap(), b"1");
         assert_eq!(fs::read(destination.join("two")).unwrap(), b"2");
+    }
+
+    #[test]
+    fn archive_create_and_extract_support_identity_validated_undo_redo() {
+        if crate::archive_ops::SevenZipBackend::discover().is_err() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("report.txt");
+        let archive = root.path().join("report.zip");
+        fs::write(&source, b"archive history").unwrap();
+
+        let created = create_zip_operation(
+            std::slice::from_ref(&source),
+            &archive,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(archive.is_file());
+        let undone = undo_operation(&created).unwrap();
+        assert!(!archive.exists());
+        let recreated = redo_operation(&undone).unwrap();
+        assert!(archive.is_file());
+
+        fs::remove_file(&source).unwrap();
+        let extracted =
+            extract_archive_operation(&archive, Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"archive history");
+        let undone = undo_operation(&extracted).unwrap();
+        assert!(!source.exists());
+        let redone = redo_operation(&undone).unwrap();
+        assert_eq!(fs::read(redone.path()).unwrap(), b"archive history");
+
+        fs::write(redone.path(), b"changed").unwrap();
+        assert!(undo_operation(&redone).is_err());
+        assert_eq!(fs::read(redone.path()).unwrap(), b"changed");
+
+        // Keep the compiler and test honest that the recreated record remains
+        // a normal archive operation rather than a special test-only path.
+        assert!(matches!(recreated, OperationRecord::ArchiveCreate { .. }));
     }
 }

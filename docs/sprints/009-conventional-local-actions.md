@@ -1,7 +1,7 @@
 # Sprint 9: conventional local actions
 
-**Status:** Active — safe inline Rename is implemented; New File, Open in
-Terminal, and Properties remain.
+**Status:** Active — safe inline Rename and Open in Terminal are implemented;
+New File and Properties remain.
 
 ## Goal
 
@@ -83,7 +83,9 @@ Linux `RENAME_NOREPLACE`; an occupied destination is always refused.
 - [ ] Manually verify watcher reconciliation and selection reveal after Rename,
   Undo, and Redo.
 - [ ] Implement New File.
-- [ ] Implement Open in Terminal.
+- [x] Implement Open in Terminal through `xdg-terminal-exec`, `TERMINAL`, and
+  bounded terminal-emulator fallbacks without leaking the Nix development
+  shell's native-library search path.
 - [ ] Implement single- and multi-selection Properties.
 
 ## UI-fix handoff

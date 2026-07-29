@@ -53,6 +53,8 @@ promise. Development currently happens through the Nix flake.
   model.
 - Default application opening through GIO, with a desktop-portal fallback and
   an explicit portal-backed **Open With…** chooser.
+- **Open in Terminal** for the displayed directory, with default-terminal and
+  cross-desktop fallbacks.
 
 ### File operations
 
@@ -65,6 +67,9 @@ promise. Development currently happens through the Nix flake.
   exact-entry Restore, and identity-validating Trash Undo/Redo.
 - Confirmed permanent deletion through `Shift+Delete` or the item menu,
   including selected deletion inside Trash and **Empty Trash**.
+- ZIP creation for files, directories, and multi-selection, plus safe
+  broad-format **Extract** beside an archive through a supervised 7-Zip
+  backend. Both support cancellation and identity-validating Undo/Redo.
 - A bounded operation journal with centralized command state shared by
   shortcuts, menus, and toolbar controls.
 
@@ -129,8 +134,9 @@ even in Marcel's development profile so decode and rendering behavior remains
 representative; subsequent Marcel-only builds are incremental.
 
 The Nix shell supplies the current stable Rust toolchain from the locked
-`nixpkgs` and `rust-overlay` inputs, plus Poppler, FFmpeg, and native GPUI
-dependencies. Update the environment intentionally:
+`nixpkgs` and `rust-overlay` inputs, plus Poppler, FFmpeg, the RAR-enabled
+official 7-Zip backend, and native GPUI dependencies. Update the environment
+intentionally:
 
 ```sh
 nix flake update
@@ -145,18 +151,22 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
 
-Nord is the default semantic palette. Development-facing palette and icon-theme
-overrides are available:
+Nord is the default semantic palette. The Settings button beside the
+list/icon-view control opens a theme selector whose changes apply immediately.
+Marcel currently includes Nord, Gruvbox Dark, Tokyo Night, Catppuccin Mocha,
+Dracula, One Dark, Solarized Dark, Everforest Dark, Rosé Pine, Kanagawa Wave,
+System Dark, and System Light. Development-facing palette and icon-theme
+overrides are also available:
 
 ```sh
-MARCEL_THEME=dark cargo run
-MARCEL_THEME=light cargo run
+MARCEL_THEME=tokyo-night cargo run
+MARCEL_THEME=catppuccin-mocha cargo run
 MARCEL_ICON_THEME=breeze cargo run
 ```
 
 The Places footer currently exposes session-level switches for Iosevka, hidden
-files, and list/icon view. Iosevka is enabled by default when a supported
-installed family is available.
+files, and list/icon view, plus the Settings button. Iosevka is enabled by
+default when a supported installed family is available.
 
 ## Known limitations
 
@@ -170,8 +180,7 @@ Marcel is not ready to replace a mature system file manager for every workflow:
   Marcel works.
 - Cut/move is currently same-filesystem. Cross-filesystem moves and interactive
   conflict decisions are parked; occupied destinations are safely refused.
-- New File, Duplicate, Move To, Properties, Open in Terminal, ZIP creation, and
-  extraction are not implemented yet.
+- New File, Duplicate, Move To, and Properties are not implemented yet.
 - Removable-volume navigation, mount management, and remote locations are not
   implemented. Mounted-volume Trash behavior still needs its manual acceptance
   pass.
@@ -196,8 +205,8 @@ The immediate alpha-to-daily-driver sequence is:
 
 1. Complete destructive-operation, mounted-Trash, watcher, preview, and
    large-directory acceptance passes.
-2. Finish New File, Open in Terminal, and Properties, then add Duplicate and
-   Move To in their appropriate operation slices.
+2. Finish New File and Properties, then add Duplicate and Move To in their
+   appropriate operation slices.
 3. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
    from the application coordinator.
 4. Implement bilateral native desktop drag-and-drop and clipboard

@@ -1,4 +1,5 @@
 mod app;
+pub mod archive_ops;
 mod bookmarks;
 pub mod commands;
 mod delete_ops;
@@ -15,6 +16,8 @@ pub mod preview;
 pub mod selection;
 #[cfg(target_os = "linux")]
 mod system_open;
+#[cfg(target_os = "linux")]
+mod system_terminal;
 pub mod theme;
 mod thumbnails;
 mod trash_ops;

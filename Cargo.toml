@@ -17,7 +17,7 @@ md-5 = "0.10"
 mime_guess = "2"
 notify = "7"
 png = "0.18"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 smol = "2"
 tempfile = "3"
 trash = "5"

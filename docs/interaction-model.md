@@ -181,16 +181,28 @@ Single-item commands such as Rename are disabled for multi-selection.
 Properties shows one item's details for a single selection and an aggregate
 summary for multiple items.
 
+`Compress…` initially creates ZIP archives from the complete preserved
+selection. `Extract` is a single-item action for supported archives and always
+publishes beside the archive; Marcel does not expose `Extract To…`. `Open`,
+Enter, and double-click continue to use the configured MIME application rather
+than extracting implicitly.
+
 The context-menu shell exposes the intended item command set. `Open` uses the
 configured MIME default without prompting, while `Open With…` explicitly
 requests the desktop application chooser. Cut, Copy, and Paste are active
 through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
 Remaining planned commands are disabled and prefixed with `–`: Duplicate,
-Move To, Create Link, Compress, Copy Path, and Properties. Rename is active for
-exactly one ordinary filesystem selection and edits the name inline in both
-views. A planned command loses the prefix only when its implementation,
+Move To, Create Link, Copy Path, and Properties. Rename is active for exactly
+one ordinary filesystem selection and edits the name inline in both views.
+Compress is active for ordinary filesystem selections. Extract appears for one
+recognized archive and is muted only while another filesystem operation is
+active. A planned command loses the prefix only when its implementation,
 enabled-state rules, error handling, and any required undo record are ready.
+Implemented commands never gain that prefix when temporarily unavailable:
+they retain their ordinary label and use only the muted disabled style. Menu
+labels share the semantic small text size; shortcut hints use the extra-small
+size as secondary metadata.
 
 Trash is the bottom-most item in Places and aggregates valid top-level entries
 from the freedesktop home and mounted-volume Trash roots. Trashed directories
@@ -227,6 +239,12 @@ visibility, and directory utilities. Paste is disabled when the clipboard has
 no compatible file payload. Properties describes the displayed directory. Show
 Hidden Files is a checked toggle. New Folder, Undo, and Redo use the same
 command state as `Ctrl+Shift+N`, `Ctrl+Z`, and `Ctrl+Y`.
+
+Open in Terminal dispatches one shared command for the displayed ordinary
+filesystem directory. On Linux, Marcel first tries the proposed
+`xdg-terminal-exec --dir=…` interface, then the user's `TERMINAL`, then a
+bounded list of established terminal-emulator working-directory arguments.
+Every launch strips the Nix development shell's `LD_LIBRARY_PATH`.
 
 View mode belongs in the persistent Places footer rather than this context
 menu. Marcel exposes a list/grid switch there. Future sorting controls should

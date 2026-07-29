@@ -17,7 +17,7 @@ use gpui::{
     canvas, div, font, img, prelude::*, px, relative, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Root, Sizable, Theme, WindowExt,
+    ActiveTheme, Disableable, IndexPath, Root, Sizable, Theme, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     h_flex,
@@ -26,24 +26,27 @@ use gpui_component::{
     progress::Progress,
     resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
+    select::{Select, SelectEvent, SelectState},
     switch::Switch,
     text::TextView,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
+    archive_ops::{default_zip_name, is_supported_archive},
     bookmarks::{
         Bookmark, add as add_bookmark, default_path as default_bookmarks_path,
         load as load_bookmarks, remove as remove_bookmark_at, reorder as reorder_bookmark,
         save as save_bookmarks,
     },
     commands::{
-        ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CopySelection,
-        CutSelection, DeletePermanently, EmptyTrash, ExtendDown, ExtendLeft, ExtendPageDown,
-        ExtendPageUp, ExtendRight, ExtendToFirst, ExtendToLast, ExtendUp, GoBack, GoForward,
-        GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp, NewFolder, OpenWithSelection,
-        PasteFiles, RedoFileOperation, RenameSelection, RestoreSelection, SelectAll, SelectFirst,
-        SelectLast, SelectPageDown, SelectPageUp, TrashSelection, UndoFileOperation,
+        ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CompressSelection,
+        CopySelection, CutSelection, DeletePermanently, EmptyTrash, ExtendDown, ExtendLeft,
+        ExtendPageDown, ExtendPageUp, ExtendRight, ExtendToFirst, ExtendToLast, ExtendUp,
+        ExtractSelection, GoBack, GoForward, GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp,
+        NewFolder, OpenTerminal, OpenWithSelection, PasteFiles, RedoFileOperation, RenameSelection,
+        RestoreSelection, SelectAll, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
+        TrashSelection, UndoFileOperation,
     },
     delete_ops::{delete_paths, summarize_failures as summarize_delete_failures},
     directory_session::{
@@ -51,9 +54,9 @@ use crate::{
     },
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     file_ops::{
-        DirectoryChanges, OperationRecord, TransferMode, create_directory, redo_operation,
-        rename_entry, summarize_failures, transfer_paths_with_progress, undo_operation,
-        validate_entry_name,
+        DirectoryChanges, OperationRecord, TransferMode, create_directory, create_zip_operation,
+        extract_archive_operation, redo_operation, rename_entry, summarize_failures,
+        transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, format_size, merge_sorted_entries, stream_directory,
@@ -63,6 +66,7 @@ use crate::{
     operations::{FileClipboard, OperationController, OperationProgressKind},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
+    theme::{self, Palette},
     thumbnails,
     trash_ops::{
         TrashRecord, list_trash_records, purge_trash_records, restore_trash_records,
@@ -72,11 +76,13 @@ use crate::{
 
 const DIRECTORY_ROW_HEIGHT: f32 = 36.0;
 const GRID_TILE_WIDTH: f32 = 120.0;
-const GRID_TILE_HEIGHT: f32 = 164.0;
+const GRID_TILE_HEIGHT: f32 = 188.0;
 const GRID_GAP: f32 = 8.0;
 const GRID_SIDE_PADDING: f32 = 16.0;
-const GRID_LABEL_HEIGHT: f32 = 36.0;
-const GRID_LABEL_COLUMNS: usize = 28;
+const GRID_VISUAL_SIZE: f32 = 104.0;
+const GRID_ICON_SIZE: f32 = 80.0;
+const GRID_LABEL_HEIGHT: f32 = 64.0;
+const GRID_LABEL_COLUMNS: usize = 30;
 const GRID_ROW_HEIGHT: f32 = GRID_TILE_HEIGHT + GRID_GAP;
 const MAX_MEMORY_THUMBNAILS: usize = 512;
 const THUMBNAIL_WORKERS: usize = 2;
@@ -243,6 +249,7 @@ struct WrappedPreview {
 
 pub struct Marcel {
     browser_focus: FocusHandle,
+    palette: Palette,
     system_ui_font: SharedString,
     use_iosevka_ui: bool,
     iosevka_ui_font: Option<SharedString>,
@@ -353,6 +360,7 @@ impl Marcel {
 
         let mut this = Self {
             browser_focus: cx.focus_handle(),
+            palette: theme::active(),
             system_ui_font,
             use_iosevka_ui,
             iosevka_ui_font,
@@ -627,6 +635,7 @@ impl Marcel {
                 .border_color(colors.border)
                 .bg(colors.popover)
                 .text_color(colors.popover_foreground)
+                .text_sm()
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.bookmark_menu = None;
@@ -660,6 +669,8 @@ impl Marcel {
             match active.kind {
                 OperationProgressKind::Copy => "Copying",
                 OperationProgressKind::Move => "Moving",
+                OperationProgressKind::Compress => "Compressing",
+                OperationProgressKind::Extract => "Extracting",
                 OperationProgressKind::Delete => "Deleting permanently",
                 OperationProgressKind::EmptyTrash => "Emptying Trash",
             }
@@ -1173,6 +1184,12 @@ impl Marcel {
             BrowserCommand::NewFolder => {
                 !self.browsing_trash && !self.operations.is_busy() && self.directory.error.is_none()
             }
+            BrowserCommand::OpenTerminal => {
+                !self.browsing_trash
+                    && !self.directory.loading
+                    && self.directory.error.is_none()
+                    && self.directory.current_dir.is_dir()
+            }
             BrowserCommand::RenameSelection => {
                 !self.browsing_trash
                     && !self.operations.is_busy()
@@ -1185,6 +1202,31 @@ impl Marcel {
                         .and_then(|path| path.file_name())
                         .and_then(|name| name.to_str())
                         .is_some()
+            }
+            BrowserCommand::CompressSelection => {
+                !self.browsing_trash
+                    && !self.operations.is_busy()
+                    && self.directory.error.is_none()
+                    && !self.directory.selection.selected().is_empty()
+            }
+            BrowserCommand::ExtractSelection => {
+                !self.browsing_trash
+                    && !self.operations.is_busy()
+                    && self.directory.error.is_none()
+                    && self.directory.selection.selected().len() == 1
+                    && self
+                        .directory
+                        .selection
+                        .primary()
+                        .and_then(|path| {
+                            self.directory
+                                .entries
+                                .iter()
+                                .find(|entry| &entry.path == path)
+                        })
+                        .is_some_and(|entry| {
+                            entry.kind != EntryKind::Directory && is_supported_archive(&entry.path)
+                        })
             }
             BrowserCommand::TrashSelection => {
                 !self.browsing_trash
@@ -1315,7 +1357,10 @@ impl Marcel {
             BrowserCommand::DeletePermanently => self.open_permanent_delete_dialog(window, cx),
             BrowserCommand::EmptyTrash => self.open_empty_trash_dialog(window, cx),
             BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
+            BrowserCommand::OpenTerminal => self.open_terminal(window, cx),
             BrowserCommand::RenameSelection => self.begin_rename(window, cx),
+            BrowserCommand::CompressSelection => self.open_compress_dialog(window, cx),
+            BrowserCommand::ExtractSelection => self.start_extract_selection(window, cx),
             BrowserCommand::UndoFileOperation => self.start_undo(window, cx),
             BrowserCommand::RedoFileOperation => self.start_redo(window, cx),
         }
@@ -1630,6 +1675,158 @@ impl Marcel {
                         window.push_notification(
                             Notification::success(format!(
                                 "Created folder “{}”",
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy())
+                                    .unwrap_or_default()
+                            )),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                }
+                this.operations.finish_active();
+                cx.notify();
+            });
+        });
+        self.operations.set_task(operation_task);
+        cx.notify();
+    }
+
+    fn open_compress_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_menu = None;
+        let selected = self.directory.selection.selected();
+        let sources = self
+            .visible_paths()
+            .into_iter()
+            .filter(|path| selected.contains(path))
+            .collect::<Vec<_>>();
+        if sources.is_empty() {
+            return;
+        }
+        let single_is_directory = sources.len() == 1
+            && self
+                .directory
+                .entries
+                .iter()
+                .find(|entry| entry.path == sources[0])
+                .is_some_and(|entry| entry.kind == EntryKind::Directory);
+        let proposed_name = default_zip_name(&sources, single_is_directory);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(proposed_name.clone()));
+        let input_for_dialog = input.clone();
+        let view = cx.entity();
+
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input_for_ok = input_for_dialog.clone();
+            let view = view.clone();
+            let sources = sources.clone();
+            dialog
+                .title("Compress to ZIP")
+                .child(Input::new(&input_for_dialog))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Compress"))
+                .on_ok(move |_, window, cx| {
+                    let name = input_for_ok.read(cx).value().trim().to_string();
+                    if let Err(error) = validate_entry_name(&name) {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                        return false;
+                    }
+                    if !name.to_ascii_lowercase().ends_with(".zip") {
+                        window.push_notification(
+                            Notification::error("The archive name must end in .zip"),
+                            cx,
+                        );
+                        return false;
+                    }
+                    view.update(cx, |this, cx| {
+                        this.start_compress(sources.clone(), name.clone(), window, cx);
+                    });
+                    true
+                })
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn start_compress(
+        &mut self,
+        sources: Vec<PathBuf>,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = self.directory.current_dir.join(name);
+        let Some((cancel, _progress)) = self.operations.begin_archive(
+            OperationProgressKind::Compress,
+            sources.len(),
+            format!("to {}", destination.display()),
+        ) else {
+            return;
+        };
+        self.start_operation_progress_refresh(cx);
+        let task = cx.background_executor().spawn(smol::unblock(move || {
+            create_zip_operation(&sources, &destination, cancel)
+        }));
+        let operation_task = cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                match result {
+                    Ok(operation) => {
+                        let path = operation.path().to_path_buf();
+                        let changes = operation.forward_directory_changes();
+                        this.operations.record(operation);
+                        this.apply_directory_changes(changes, Some(path.clone()), cx);
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Created ZIP “{}”",
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy())
+                                    .unwrap_or_default()
+                            )),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                }
+                this.operations.finish_active();
+                cx.notify();
+            });
+        });
+        self.operations.set_task(operation_task);
+        cx.notify();
+    }
+
+    fn start_extract_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_menu = None;
+        let Some(archive) = self.directory.selection.primary().cloned() else {
+            return;
+        };
+        let Some((cancel, _progress)) = self.operations.begin_archive(
+            OperationProgressKind::Extract,
+            1,
+            format!("from {}", archive.display()),
+        ) else {
+            return;
+        };
+        self.start_operation_progress_refresh(cx);
+        let task = cx.background_executor().spawn(smol::unblock(move || {
+            extract_archive_operation(&archive, cancel)
+        }));
+        let operation_task = cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                match result {
+                    Ok(operation) => {
+                        let path = operation.path().to_path_buf();
+                        let changes = operation.forward_directory_changes();
+                        this.operations.record(operation);
+                        this.apply_directory_changes(changes, Some(path.clone()), cx);
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Extracted “{}”",
                                 path.file_name()
                                     .map(|name| name.to_string_lossy())
                                     .unwrap_or_default()
@@ -2555,6 +2752,10 @@ impl Marcel {
         self.execute_browser_command(BrowserCommand::NewFolder, window, cx);
     }
 
+    fn on_open_terminal(&mut self, _: &OpenTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::OpenTerminal, window, cx);
+    }
+
     fn on_rename_selection(
         &mut self,
         _: &RenameSelection,
@@ -2562,6 +2763,24 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         self.execute_browser_command(BrowserCommand::RenameSelection, window, cx);
+    }
+
+    fn on_compress_selection(
+        &mut self,
+        _: &CompressSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::CompressSelection, window, cx);
+    }
+
+    fn on_extract_selection(
+        &mut self,
+        _: &ExtractSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::ExtractSelection, window, cx);
     }
 
     fn on_undo_file_operation(
@@ -2815,8 +3034,71 @@ impl Marcel {
         cx.refresh_windows();
     }
 
+    fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let palettes = Palette::ALL
+            .iter()
+            .map(|palette| SharedString::from(palette.label()))
+            .collect::<Vec<_>>();
+        let selected_index = Palette::ALL
+            .iter()
+            .position(|palette| *palette == self.palette)
+            .unwrap_or_default();
+        let theme_select = cx.new(|cx| {
+            SelectState::new(
+                palettes,
+                Some(IndexPath::default().row(selected_index)),
+                window,
+                cx,
+            )
+        });
+        let view = cx.entity();
+        window
+            .subscribe(
+                &theme_select,
+                cx,
+                move |_, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(selected) = event;
+                    let Some(palette) = selected
+                        .as_deref()
+                        .and_then(|label| Palette::from_name(label.as_ref()))
+                    else {
+                        return;
+                    };
+                    view.update(cx, |this, cx| {
+                        this.palette = palette;
+                        theme::apply(palette, cx);
+                        cx.notify();
+                    });
+                },
+            )
+            .detach();
+
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title("Settings")
+                .w(px(420.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_sm().child("Appearance"))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_4()
+                                .child("Theme")
+                                .child(Select::new(&theme_select).w(px(240.0))),
+                        ),
+                )
+                .alert()
+                .button_props(DialogButtonProps::default().ok_text("Done"))
+        });
+    }
+
     fn places_sidebar_width(&self, window: &Window, cx: &Context<Self>) -> Pixels {
-        let font_size = cx.theme().font_size * 0.875;
+        let font_size = cx.theme().font_size;
         let font = font(cx.theme().font_family.clone());
         let max_text_width = self
             .places
@@ -3181,7 +3463,24 @@ impl Marcel {
         let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection);
         let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll);
         let new_folder_enabled = self.command_enabled(BrowserCommand::NewFolder);
+        let open_terminal_enabled = self.command_enabled(BrowserCommand::OpenTerminal);
         let rename_enabled = self.command_enabled(BrowserCommand::RenameSelection);
+        let compress_enabled = self.command_enabled(BrowserCommand::CompressSelection);
+        let extract_enabled = self.command_enabled(BrowserCommand::ExtractSelection);
+        let extract_visible = self.directory.selection.selected().len() == 1
+            && self
+                .directory
+                .selection
+                .primary()
+                .and_then(|path| {
+                    self.directory
+                        .entries
+                        .iter()
+                        .find(|entry| &entry.path == path)
+                })
+                .is_some_and(|entry| {
+                    entry.kind != EntryKind::Directory && is_supported_archive(&entry.path)
+                });
         let copy_enabled = self.command_enabled(BrowserCommand::CopySelection);
         let cut_enabled = self.command_enabled(BrowserCommand::CutSelection);
         let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles);
@@ -3197,7 +3496,9 @@ impl Marcel {
         let empty_trash_enabled = self.command_enabled(BrowserCommand::EmptyTrash);
         let window_size = window.bounds().size;
         let menu_height = match menu.target {
-            ContextMenuTarget::Entry => ENTRY_MENU_HEIGHT,
+            ContextMenuTarget::Entry => {
+                ENTRY_MENU_HEIGHT + if extract_visible { 28.0 } else { 0.0 }
+            }
             ContextMenuTarget::CurrentDirectory if self.browsing_trash => {
                 DIRECTORY_MENU_HEIGHT + 36.0
             }
@@ -3216,9 +3517,8 @@ impl Marcel {
                 .h(px(28.0))
                 .items_center()
                 .px_3()
-                .text_sm()
                 .text_color(colors.muted_foreground)
-                .child(label)
+                .child(format!("– {label}"))
         };
         let separator = || div().h(px(1.0)).mx_1().my_1().bg(colors.border);
 
@@ -3240,6 +3540,7 @@ impl Marcel {
                     .border_color(colors.border)
                     .bg(colors.popover)
                     .text_color(colors.popover_foreground)
+                    .text_sm()
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.dismiss_entry_menu(cx);
@@ -3274,7 +3575,7 @@ impl Marcel {
                                     .child("Ctrl+Shift+N"),
                             ),
                     )
-                    .child(planned("– New File"))
+                    .child(planned("New File"))
                     .child(
                         h_flex()
                             .id("directory-menu-paste")
@@ -3296,7 +3597,7 @@ impl Marcel {
                             .when(!paste_enabled, |this| {
                                 this.text_color(colors.muted_foreground)
                             })
-                            .child(if paste_enabled { "Paste" } else { "– Paste" })
+                            .child("Paste")
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -3326,7 +3627,7 @@ impl Marcel {
                             .when(!undo_enabled, |this| {
                                 this.text_color(colors.muted_foreground)
                             })
-                            .child(if undo_enabled { "Undo" } else { "– Undo" })
+                            .child("Undo")
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -3356,7 +3657,7 @@ impl Marcel {
                             .when(!redo_enabled, |this| {
                                 this.text_color(colors.muted_foreground)
                             })
-                            .child(if redo_enabled { "Redo" } else { "– Redo" })
+                            .child("Redo")
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -3427,7 +3728,29 @@ impl Marcel {
                             .when(self.directory.show_hidden, |this| this.child("✓")),
                     )
                     .child(separator())
-                    .child(planned("– Open in Terminal"))
+                    .child(
+                        h_flex()
+                            .id("directory-menu-open-terminal")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .when(open_terminal_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(colors.accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_menu = None;
+                                        this.execute_browser_command(
+                                            BrowserCommand::OpenTerminal,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(!open_terminal_enabled, |this| {
+                                this.text_color(colors.muted_foreground)
+                            })
+                            .child("Open in Terminal"),
+                    )
                     .child(
                         h_flex()
                             .id("directory-menu-copy-location")
@@ -3444,7 +3767,7 @@ impl Marcel {
                             }))
                             .child("Copy Location"),
                     )
-                    .child(planned("– Properties"))
+                    .child(planned("Properties"))
                     .when(self.browsing_trash, |this| {
                         this.child(separator()).child(
                             h_flex()
@@ -3467,11 +3790,7 @@ impl Marcel {
                                 .when(!empty_trash_enabled, |this| {
                                     this.text_color(colors.muted_foreground)
                                 })
-                                .child(if empty_trash_enabled {
-                                    "Empty Trash…"
-                                } else {
-                                    "– Empty Trash…"
-                                }),
+                                .child("Empty Trash…"),
                         )
                     })
                     .into_any_element(),
@@ -3491,6 +3810,7 @@ impl Marcel {
                 .border_color(colors.border)
                 .bg(colors.popover)
                 .text_color(colors.popover_foreground)
+                .text_sm()
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.dismiss_entry_menu(cx);
@@ -3564,7 +3884,7 @@ impl Marcel {
                         .when(!cut_enabled, |this| {
                             this.text_color(colors.muted_foreground)
                         })
-                        .child(if cut_enabled { "Cut" } else { "– Cut" })
+                        .child("Cut")
                         .child(div().flex_1())
                         .child(
                             div()
@@ -3593,7 +3913,7 @@ impl Marcel {
                         .when(!copy_enabled, |this| {
                             this.text_color(colors.muted_foreground)
                         })
-                        .child(if copy_enabled { "Copy" } else { "– Copy" })
+                        .child("Copy")
                         .child(div().flex_1())
                         .child(
                             div()
@@ -3623,7 +3943,7 @@ impl Marcel {
                         .when(!paste_enabled, |this| {
                             this.text_color(colors.muted_foreground)
                         })
-                        .child(if paste_enabled { "Paste" } else { "– Paste" })
+                        .child("Paste")
                         .child(div().flex_1())
                         .child(
                             div()
@@ -3632,7 +3952,7 @@ impl Marcel {
                                 .child("Ctrl+V"),
                         ),
                 )
-                .child(planned("– Duplicate"))
+                .child(planned("Duplicate"))
                 .child(separator())
                 .child(
                     h_flex()
@@ -3655,11 +3975,7 @@ impl Marcel {
                         .when(!rename_enabled, |this| {
                             this.text_color(colors.muted_foreground)
                         })
-                        .child(if rename_enabled {
-                            "Rename…"
-                        } else {
-                            "– Rename…"
-                        })
+                        .child("Rename…")
                         .child(div().flex_1())
                         .child(
                             div()
@@ -3668,7 +3984,7 @@ impl Marcel {
                                 .child("F2"),
                         ),
                 )
-                .child(planned("– Move To…"))
+                .child(planned("Move To…"))
                 .child(
                     h_flex()
                         .id("entry-menu-trash-or-restore")
@@ -3722,11 +4038,7 @@ impl Marcel {
                         .when(!permanent_delete_enabled, |this| {
                             this.text_color(colors.muted_foreground)
                         })
-                        .child(if permanent_delete_enabled {
-                            "Delete"
-                        } else {
-                            "– Delete"
-                        })
+                        .child("Delete")
                         .child(div().flex_1())
                         .child(
                             div()
@@ -3736,11 +4048,58 @@ impl Marcel {
                         ),
                 )
                 .child(separator())
-                .child(planned("– Create Link"))
-                .child(planned("– Compress…"))
-                .child(planned("– Copy Path"))
+                .child(planned("Create Link"))
+                .child(
+                    h_flex()
+                        .id("entry-menu-compress")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(compress_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.entry_menu = None;
+                                    this.execute_browser_command(
+                                        BrowserCommand::CompressSelection,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                        })
+                        .when(!compress_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child("Compress…"),
+                )
+                .when(extract_visible, |this| {
+                    this.child(
+                        h_flex()
+                            .id("entry-menu-extract")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .when(extract_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(colors.accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_menu = None;
+                                        this.execute_browser_command(
+                                            BrowserCommand::ExtractSelection,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(!extract_enabled, |this| {
+                                this.text_color(colors.muted_foreground)
+                            })
+                            .child("Extract"),
+                    )
+                })
+                .child(planned("Copy Path"))
                 .child(separator())
-                .child(planned("– Properties"))
+                .child(planned("Properties"))
                 .into_any_element(),
         )
     }
@@ -4237,6 +4596,30 @@ impl Marcel {
         }
     }
 
+    fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        {
+            let directory = self.directory.current_dir.clone();
+            let task = cx
+                .background_executor()
+                .spawn(crate::system_terminal::open_terminal(directory));
+            cx.spawn_in(window, async move |this, window| {
+                if let Err(error) = task.await {
+                    let _ = this.update_in(window, |_, window, cx| {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    });
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        window.push_notification(
+            Notification::error("Open in Terminal is currently available only on Linux"),
+            cx,
+        );
+    }
+
     fn render_place(&self, index: usize, place: Place, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
@@ -4310,7 +4693,7 @@ impl Marcel {
                 }
             }))
             .child(icon)
-            .child(div().flex_none().text_sm().child(place.label))
+            .child(div().flex_none().text_base().child(place.label))
             .when(!is_trash, |this| {
                 this.child(
                     canvas(
@@ -4450,7 +4833,7 @@ impl Marcel {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_sm()
+                            .text_base()
                             .child(bookmark.label()),
                     )
                     .child(
@@ -4734,7 +5117,7 @@ impl Marcel {
                                 Some(ThumbnailState::Ready(thumbnail)) => div()
                                     .flex()
                                     .flex_none()
-                                    .size(px(88.0))
+                                    .size(px(GRID_VISUAL_SIZE))
                                     .items_center()
                                     .justify_center()
                                     .overflow_hidden()
@@ -4750,12 +5133,12 @@ impl Marcel {
                                         div()
                                             .flex()
                                             .flex_none()
-                                            .size(px(88.0))
+                                            .size(px(GRID_VISUAL_SIZE))
                                             .items_center()
                                             .justify_center()
                                             .child(
                                                 img(icon_path)
-                                                    .size(px(56.0))
+                                                    .size(px(GRID_ICON_SIZE))
                                                     .object_fit(ObjectFit::Contain),
                                             )
                                             .into_any_element()
@@ -4763,7 +5146,7 @@ impl Marcel {
                                         div()
                                             .flex()
                                             .flex_none()
-                                            .size(px(88.0))
+                                            .size(px(GRID_VISUAL_SIZE))
                                             .items_center()
                                             .justify_center()
                                             .text_3xl()
@@ -4788,9 +5171,10 @@ impl Marcel {
                                     .flex_none()
                                     .overflow_hidden()
                                     .whitespace_normal()
-                                    .line_clamp(2)
+                                    .line_clamp(3)
+                                    .line_height(relative(1.2))
                                     .text_center()
-                                    .text_xs()
+                                    .text_base()
                                     .child(display_name)
                                     .into_any_element()
                             };
@@ -5491,6 +5875,28 @@ impl Render for Marcel {
                     })
                     .child("▦"),
             );
+        // gpui-component's icon-only Button currently loses its SVG tint on
+        // Marcel's dark sidebar, as do the title-bar navigation glyphs. Keep
+        // this one tiny trigger Marcel-owned until the component preserves the
+        // semantic foreground supplied by the active theme.
+        let settings_button = div()
+            .id("open-settings")
+            .flex()
+            .flex_none()
+            .size(px(28.0))
+            .items_center()
+            .justify_center()
+            .rounded(cx.theme().radius)
+            .font_family(cx.theme().mono_font_family.clone())
+            .line_height(relative(1.0))
+            .text_lg()
+            .text_color(colors.sidebar_foreground)
+            .cursor_pointer()
+            .hover(|button| button.bg(colors.sidebar_accent))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_settings_dialog(window, cx);
+            }))
+            .child("⚙");
 
         let sidebar =
             div()
@@ -5625,7 +6031,13 @@ impl Render for Marcel {
                         .gap_3()
                         .child(font_switch)
                         .child(hidden_switch)
-                        .child(view_switch),
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .child(view_switch)
+                                .child(settings_button),
+                        ),
                 );
 
         let browser = div()
@@ -5663,7 +6075,10 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_delete_permanently))
             .on_action(cx.listener(Self::on_empty_trash))
             .on_action(cx.listener(Self::on_new_folder))
+            .on_action(cx.listener(Self::on_open_terminal))
             .on_action(cx.listener(Self::on_rename_selection))
+            .on_action(cx.listener(Self::on_compress_selection))
+            .on_action(cx.listener(Self::on_extract_selection))
             .on_action(cx.listener(Self::on_undo_file_operation))
             .on_action(cx.listener(Self::on_redo_file_operation))
             .on_mouse_down(
@@ -6144,6 +6559,18 @@ fn operation_history_message(operation: &OperationRecord, redo: bool) -> String 
                 .map(|name| name.to_string_lossy())
                 .unwrap_or_default();
             format!("Renamed to “{renamed}” again")
+        }
+        (OperationRecord::ArchiveCreate { .. }, false) => {
+            format!("Removed created ZIP “{name}”")
+        }
+        (OperationRecord::ArchiveCreate { .. }, true) => {
+            format!("Created ZIP “{name}” again")
+        }
+        (OperationRecord::ArchiveExtract { .. }, false) => {
+            format!("Removed extracted item “{name}”")
+        }
+        (OperationRecord::ArchiveExtract { .. }, true) => {
+            format!("Extracted “{name}” again")
         }
     }
 }

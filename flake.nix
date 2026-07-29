@@ -24,7 +24,14 @@
   in {
     devShells = forAllSystems (system: let
       overlays = [rust-overlay.overlays.default];
-      pkgs = import nixpkgs {inherit system overlays;};
+      pkgs = import nixpkgs {
+        inherit system overlays;
+        config.allowUnfreePredicate = package:
+          builtins.elem (nixpkgs.lib.getName package) [
+            "7zz"
+            "uasm"
+          ];
+      };
 
       rustToolchain = pkgs.rust-bin.stable.latest.default.override {
         extensions = [
@@ -62,6 +69,7 @@
             git
             pkg-config
             poppler-utils
+            _7zz-rar
           ])
           ++ runtimeLibraries;
 

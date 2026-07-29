@@ -36,7 +36,10 @@ actions!(
         DeletePermanently,
         EmptyTrash,
         NewFolder,
+        OpenTerminal,
         RenameSelection,
+        CompressSelection,
+        ExtractSelection,
         UndoFileOperation,
         RedoFileOperation,
     ]
@@ -75,7 +78,10 @@ pub enum BrowserCommand {
     DeletePermanently,
     EmptyTrash,
     NewFolder,
+    OpenTerminal,
     RenameSelection,
+    CompressSelection,
+    ExtractSelection,
     UndoFileOperation,
     RedoFileOperation,
 }

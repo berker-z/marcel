@@ -21,6 +21,8 @@ pub struct FileClipboard {
 pub enum OperationProgressKind {
     Copy,
     Move,
+    Compress,
+    Extract,
     Delete,
     EmptyTrash,
 }
@@ -147,6 +149,36 @@ impl OperationController {
             progress: progress.clone(),
         });
         Some(progress)
+    }
+
+    pub fn begin_archive(
+        &mut self,
+        kind: OperationProgressKind,
+        source_count: usize,
+        detail: String,
+    ) -> Option<(Arc<AtomicBool>, Arc<TransferProgress>)> {
+        if self.busy
+            || source_count == 0
+            || !matches!(
+                kind,
+                OperationProgressKind::Compress | OperationProgressKind::Extract
+            )
+        {
+            return None;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(TransferProgress::default());
+        progress.set_preparing(true);
+        self.busy = true;
+        self.cancel = Some(cancel.clone());
+        self.progress = Some(ActiveOperationProgress {
+            kind,
+            source_count,
+            detail,
+            cancellable: true,
+            progress: progress.clone(),
+        });
+        Some((cancel, progress))
     }
 
     pub fn finish_active(&mut self) {

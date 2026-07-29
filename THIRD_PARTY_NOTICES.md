@@ -96,6 +96,15 @@ adapted into Marcel itself.
     `319f90e0eab185a231eef5562215ba322e320286`. Marcel uses an inline GPUI
     editor, Linux `RENAME_NOREPLACE`, conservative identity-validating
     Undo/Redo, and never overwrites. No Yazi code was copied.
+  - Sprint 10's archive flow in `src/archive_ops.rs` conceptually adapts the
+    staging, one-versus-many top-level tidy behavior, compound-tar handling,
+    and `7zz`/`7z` fallback from
+    `yazi-plugin/preset/plugins/extract.lua` and
+    `yazi-plugin/preset/plugins/archive.lua` at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286`. Marcel adds preflight and
+    post-extraction validation, strict no-overwrite publication, bounded
+    subprocess diagnostics, process-group cancellation, identity-validating
+    Undo/Redo, and ZIP-only creation. No Yazi code was copied.
 
 Yazi is a primary architectural influence for asynchronous filesystem work,
 task scheduling, cancellation, previews, and responsiveness. Future direct or
@@ -153,3 +162,20 @@ project's public basic example.
   bounded page at a time for the PDF preview provider.
 - Integration: Poppler remains an external runtime utility supplied by the Nix
   development environment; its source is not copied or linked into Marcel.
+
+## 7-Zip
+
+- Project: <https://www.7-zip.org/>
+- Copyright: Copyright (C) 1999-2026 Igor Pavlov
+- License: GNU LGPL-2.1-or-later for the main program, with BSD-3-Clause,
+  BSD-2-Clause, and restricted UnRAR portions as detailed in 7-Zip's
+  `License.txt`.
+- Use in Marcel: official `7zz` provides ZIP creation and broad-format
+  extraction behind `src/archive_ops.rs`. It is a supervised external process,
+  not linked into Marcel.
+- Distribution: package-managed builds use their distribution's maintained
+  package. Portable artifacts bundle the official static executable as
+  `libexec/marcel/7zz`.
+- Notice requirement: artifacts that redistribute 7-Zip must ship its complete
+  `License.txt`, including the unRAR restriction, and the LGPL/BSD notices and
+  corresponding-source offer required by the selected distribution method.

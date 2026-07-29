@@ -19,9 +19,9 @@ item here belongs in that sprint.
   bottom-most Places entry.
 - Complete the permanent-delete and Empty Trash manual checks in
   [`Sprint 8`](sprints/008-permanent-deletion.md).
-- Complete New File, Open in Terminal, and Properties in
+- Complete New File and Properties in
   [`Sprint 9`](sprints/009-conventional-local-actions.md); safe inline Rename
-  is implemented.
+  and Open in Terminal are implemented.
 - Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
   operation-controller and directory-session extractions are complete.
 - Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
@@ -118,8 +118,11 @@ optional feature ideas.
 - Generalize filesystem locations into a virtual-location abstraction so
   trashed directories can be navigated without treating their backing paths as
   ordinary folders.
-- [ ] Implement New File, Open in Terminal, and directory Properties behind
-  their shared commands.
+- [ ] Implement New File and directory Properties behind their shared
+  commands.
+- [x] Implement Open in Terminal through the shared current-directory command,
+  preferring `xdg-terminal-exec`, then `TERMINAL`, then explicit
+  working-directory fallbacks.
 - [x] Complete the bounded safe-operation foundation and New Folder slice in
   [`Sprint 3`](sprints/003-safe-file-operations.md).
 - Create folders and files.
@@ -131,9 +134,16 @@ optional feature ideas.
   their safety and UX work is scheduled.
 - [x] Add a non-overlapping bottom-right progress/cancellation card for active
   copy and move operations, with item/byte accounting.
-- Add ZIP archive creation and extraction through the shared background
-  operation scheduler, with progress, cancellation, conflict handling, and
-  protection against unsafe archive paths.
+- [x] Add ZIP creation and broad-format extraction through the shared background
+  operation scheduler, with progress, cancellation, no-overwrite publication,
+  Undo, and protection against unsafe archive paths. MIME identifies archives
+  and their associated viewer; it does not provide a portable create/extract
+  operation. Put official `7zz` behind a Marcel-owned backend. Distribution
+  packages automatically supply it; portable artifacts bundle the static
+  executable at about 1.3 MiB compressed. Extraction has one explicit
+  `Extract` action and always publishes beside the archive; there is no
+  `Extract To…` action. See
+  [`Sprint 10`](sprints/010-archive-operations.md).
 - Research and document Marcel's symbolic-link policy before expanding write
   operations: compare Yazi and conventional GUI file managers for copying,
   moving, deleting, previewing, resolving broken links, following links during
@@ -199,11 +209,12 @@ optional feature ideas.
 
 ## Settings, themes, and typography
 
-- Build a basic settings UI using gpui-component controls rather than leaving
-  preferences as scattered sidebar toggles.
-- Add a theme selector backed by Marcel's semantic color tokens and support
-  installing or loading additional palettes without introducing hard-coded
-  component colors.
+- [x] Build the first gpui-component Settings modal and expose it beside the
+  list/icon-view control.
+- [x] Add a hot-reloading theme selector backed by Marcel's semantic color
+  tokens, with a curated built-in palette registry.
+- Support installing or loading additional palettes without introducing
+  hard-coded component colors.
 - Add a UI-font selector with system font discovery, an explicit default, and
   a bundled-font policy. Preserve the fast Iosevka toggle as a convenient
   preset until the selector replaces it.
@@ -222,6 +233,10 @@ optional feature ideas.
 
 ## Interaction and polish
 
+- [x] Give the Nord UI a darker outer shell and a lighter center browser
+  surface.
+- [x] Normalize Place, bookmark, and grid-item names to the base UI text size;
+  give grid names three lines and make their visuals fill more of each tile.
 - Persist pane sizes, view mode, sort mode, and other user preferences.
 - Add conventional context menus and properties.
 - Add configurable sorting, grouping, hidden-file display, and zoom.
@@ -229,7 +244,7 @@ optional feature ideas.
   Vim-dependent.
 - Add accessible names, focus treatment, and keyboard alternatives for every
   pointer interaction.
-- Add an in-app theme selector on top of the existing palette system.
+- [x] Add an in-app theme selector on top of the existing palette system.
 - [x] Make custom Marcel surfaces use the active theme radius and keep
   typography on semantic `rem`-based roles.
 - [x] Add a session-level system/Iosevka UI-font switch.
