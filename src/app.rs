@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     ops::Range,
@@ -11,10 +12,11 @@ use std::{
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity,
-    FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Styled, Subscription, Task, TextRun, Timer, UniformListScrollHandle, Window,
-    canvas, div, font, img, prelude::*, px, relative, uniform_list,
+    ExternalPaths, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
+    ScrollStrategy, SharedString, Styled, Subscription, Task, TextRun, Timer,
+    UniformListScrollHandle, Window, canvas, div, font, img, prelude::*, px, relative,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Root, Sizable, Theme, WindowExt,
@@ -110,6 +112,7 @@ const DIRECTORY_MENU_HEIGHT: f32 = 342.0;
 const ENTRY_MENU_MARGIN: f32 = 8.0;
 const BOOKMARK_MENU_WIDTH: f32 = 152.0;
 const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
+const MAX_EXTERNAL_DROP_PATHS: usize = 256;
 const IOSEVKA_UI_FONTS: [&str; 2] = ["Iosevka Nerd Font Mono", "Iosevka"];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1150,6 +1153,17 @@ impl Marcel {
         self.directory.current_dir = path;
         self.directory.pending_reveal = reveal;
         self.start_directory_load(true, cx);
+    }
+
+    pub fn open_external_location(
+        &mut self,
+        directory: PathBuf,
+        reveal: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_to_revealing(directory, reveal, true, cx);
+        self.focus_browser(window);
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
@@ -2361,6 +2375,24 @@ impl Marcel {
     ) {
         self.bookmark_insertion = None;
         self.start_transfer(paths, destination, TransferMode::Move, None, window, cx);
+    }
+
+    fn start_external_copy(
+        &mut self,
+        paths: &[PathBuf],
+        destination: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(paths) = accepted_external_drop_paths(paths, &destination) else {
+            window.push_notification(
+                Notification::error("Those files cannot be copied to this folder"),
+                cx,
+            );
+            return;
+        };
+        self.bookmark_insertion = None;
+        self.start_transfer(paths, destination, TransferMode::Copy, None, window, cx);
     }
 
     fn start_operation_progress_refresh(&mut self, cx: &mut Context<Self>) {
@@ -4947,6 +4979,7 @@ impl Marcel {
         };
         let operation_busy = self.operations.is_busy();
         let drop_path = place.path.clone();
+        let external_drop_path = place.path.clone();
         let navigate_path = place.path.clone();
         let can_drop_path = place.path.clone();
         let bounds_path = place.path.clone();
@@ -4991,13 +5024,15 @@ impl Marcel {
                     .text_color(colors.sidebar_accent_foreground)
             })
             .can_drop(move |value, _, _| {
-                !is_trash
-                    && !operation_busy
-                    && value
-                        .downcast_ref::<FileDrag>()
-                        .is_some_and(|drag| can_move_files_to(&drag.paths, &can_drop_path))
+                !is_trash && !operation_busy && can_drop_files_on(value, &can_drop_path)
             })
             .drag_over::<FileDrag>(move |style, _, _, _| {
+                style
+                    .bg(colors.sidebar_accent)
+                    .border_1()
+                    .border_color(colors.primary)
+            })
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
                 style
                     .bg(colors.sidebar_accent)
                     .border_1()
@@ -5006,6 +5041,11 @@ impl Marcel {
             .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
                 if !is_trash {
                     this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
+                }
+            }))
+            .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
+                if !is_trash {
+                    this.start_external_copy(drag.paths(), external_drop_path.clone(), window, cx);
                 }
             }))
             .child(icon)
@@ -5047,6 +5087,7 @@ impl Marcel {
         let insertion_here = self.bookmark_insertion == Some(BookmarkInsertion { index });
         let navigate_path = bookmark.path.clone();
         let drop_path = bookmark.path.clone();
+        let external_drop_path = bookmark.path.clone();
         let can_drop_path = bookmark.path.clone();
         let drag = BookmarkDrag {
             index,
@@ -5105,10 +5146,7 @@ impl Marcel {
                             .text_color(colors.sidebar_accent_foreground)
                     })
                     .can_drop(move |value, _, _| {
-                        !operation_busy
-                            && value
-                                .downcast_ref::<FileDrag>()
-                                .is_some_and(|drag| can_move_files_to(&drag.paths, &can_drop_path))
+                        !operation_busy && can_drop_files_on(value, &can_drop_path)
                     })
                     .drag_over::<FileDrag>(move |style, _, _, _| {
                         style
@@ -5116,8 +5154,22 @@ impl Marcel {
                             .border_1()
                             .border_color(colors.primary)
                     })
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style
+                            .bg(colors.sidebar_accent)
+                            .border_1()
+                            .border_color(colors.primary)
+                    })
                     .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
                         this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
+                    }))
+                    .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
+                        this.start_external_copy(
+                            drag.paths(),
+                            external_drop_path.clone(),
+                            window,
+                            cx,
+                        );
                     }))
                     .on_drag(drag, |drag, _, _, cx| {
                         let label = drag
@@ -5194,6 +5246,7 @@ impl Marcel {
                         let context_path = path.clone();
                         let bounds_path = path.clone();
                         let drop_path = path.clone();
+                        let external_drop_path = path.clone();
                         let can_drop_path = path.clone();
                         let selected = this.directory.selection.is_selected(&path);
                         let navigable = entry.navigable;
@@ -5261,7 +5314,8 @@ impl Marcel {
                                     .border_color(colors.list_active_border)
                             })
                             .when(dragging_enabled, |this| {
-                                this.on_drag(drag, |drag, _, _, cx| {
+                                this.on_drag(drag, |drag, _, window, cx| {
+                                    start_native_file_drag(drag, window);
                                     let count = drag.paths.len();
                                     let label = if count == 1 {
                                         drag.paths[0]
@@ -5282,19 +5336,27 @@ impl Marcel {
                             }))
                             .when(navigable, |this| {
                                 this.can_drop(move |value, _, _| {
-                                    !operation_busy
-                                        && value.downcast_ref::<FileDrag>().is_some_and(|drag| {
-                                            can_move_files_to(&drag.paths, &can_drop_path)
-                                        })
+                                    !operation_busy && can_drop_files_on(value, &can_drop_path)
                                 })
                                 .drag_over::<FileDrag>(move |style, _, _, _| {
                                     style.bg(colors.list_active).border_color(colors.primary)
                                 })
+                                .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                    style.bg(colors.list_active).border_color(colors.primary)
+                                })
+                                .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
+                                    this.start_drag_move(
+                                        drag.paths.to_vec(),
+                                        drop_path.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }))
                                 .on_drop(cx.listener(
-                                    move |this, drag: &FileDrag, window, cx| {
-                                        this.start_drag_move(
-                                            drag.paths.to_vec(),
-                                            drop_path.clone(),
+                                    move |this, drag: &ExternalPaths, window, cx| {
+                                        this.start_external_copy(
+                                            drag.paths(),
+                                            external_drop_path.clone(),
                                             window,
                                             cx,
                                         );
@@ -5408,6 +5470,7 @@ impl Marcel {
                             let context_path = path.clone();
                             let bounds_path = path.clone();
                             let drop_path = path.clone();
+                            let external_drop_path = path.clone();
                             let can_drop_path = path.clone();
                             let selected = this.directory.selection.is_selected(&path);
                             let navigable = entry.navigable;
@@ -5516,7 +5579,8 @@ impl Marcel {
                                             .border_color(colors.list_active_border)
                                     })
                                     .when(dragging_enabled, |this| {
-                                        this.on_drag(drag, |drag, _, _, cx| {
+                                        this.on_drag(drag, |drag, _, window, cx| {
+                                            start_native_file_drag(drag, window);
                                             let count = drag.paths.len();
                                             let label = if count == 1 {
                                                 drag.paths[0]
@@ -5542,26 +5606,34 @@ impl Marcel {
                                     .when(navigable, |this| {
                                         this.can_drop(move |value, _, _| {
                                             !operation_busy
-                                                && value.downcast_ref::<FileDrag>().is_some_and(
-                                                    |drag| {
-                                                        can_move_files_to(
-                                                            &drag.paths,
-                                                            &can_drop_path,
-                                                        )
-                                                    },
-                                                )
+                                                && can_drop_files_on(value, &can_drop_path)
                                         })
                                         .drag_over::<FileDrag>(move |style, _, _, _| {
                                             style
                                                 .bg(colors.list_active)
                                                 .border_color(colors.primary)
                                         })
+                                        .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                            style
+                                                .bg(colors.list_active)
+                                                .border_color(colors.primary)
+                                        })
+                                        .on_drop(cx.listener(
+                                            move |this, drag: &FileDrag, window, cx| {
+                                                this.start_drag_move(
+                                                    drag.paths.to_vec(),
+                                                    drop_path.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ))
                                         .on_drop(
                                             cx.listener(
-                                                move |this, drag: &FileDrag, window, cx| {
-                                                    this.start_drag_move(
-                                                        drag.paths.to_vec(),
-                                                        drop_path.clone(),
+                                                move |this, drag: &ExternalPaths, window, cx| {
+                                                    this.start_external_copy(
+                                                        drag.paths(),
+                                                        external_drop_path.clone(),
                                                         window,
                                                         cx,
                                                     );
@@ -5701,6 +5773,11 @@ impl Marcel {
             },
         };
         let directory_scroll = self.directory_scroll.clone();
+        let operation_busy = self.operations.is_busy();
+        let can_drop_path = self.directory.current_dir.clone();
+        let internal_drop_path = self.directory.current_dir.clone();
+        let external_drop_path = self.directory.current_dir.clone();
+        let browsing_trash = self.browsing_trash;
 
         div()
             .relative()
@@ -5708,6 +5785,28 @@ impl Marcel {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .can_drop(move |value, _, _| {
+                !browsing_trash && !operation_busy && can_drop_files_on(value, &can_drop_path)
+            })
+            .drag_over::<FileDrag>(move |style, _, _, _| style.bg(colors.list_hover.opacity(0.55)))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.bg(colors.list_hover.opacity(0.55))
+            })
+            .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
+                if !browsing_trash {
+                    this.start_drag_move(
+                        drag.paths.to_vec(),
+                        internal_drop_path.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }))
+            .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
+                if !browsing_trash {
+                    this.start_external_copy(drag.paths(), external_drop_path.clone(), window, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event, _, cx| this.begin_marquee(event, cx)),
@@ -6924,6 +7023,44 @@ fn can_move_files_to(paths: &[PathBuf], destination: &Path) -> bool {
         })
 }
 
+fn start_native_file_drag(drag: &FileDrag, window: &mut Window) {
+    if drag.paths.len() <= MAX_EXTERNAL_DROP_PATHS
+        && drag.paths.iter().all(|path| path.is_absolute())
+    {
+        let _ = window.start_file_drag(drag.paths.to_vec());
+    }
+}
+
+fn can_accept_external_drop(paths: &[PathBuf], destination: &Path) -> bool {
+    !paths.is_empty()
+        && paths.len() <= MAX_EXTERNAL_DROP_PATHS
+        && paths.iter().all(|path| path.is_absolute())
+        && can_move_files_to(paths, destination)
+}
+
+fn accepted_external_drop_paths(paths: &[PathBuf], destination: &Path) -> Option<Vec<PathBuf>> {
+    if !can_accept_external_drop(paths, destination) {
+        return None;
+    }
+    let mut seen = HashSet::with_capacity(paths.len());
+    Some(
+        paths
+            .iter()
+            .filter(|path| seen.insert((*path).clone()))
+            .cloned()
+            .collect(),
+    )
+}
+
+fn can_drop_files_on(value: &dyn Any, destination: &Path) -> bool {
+    value
+        .downcast_ref::<FileDrag>()
+        .is_some_and(|drag| can_move_files_to(&drag.paths, destination))
+        || value
+            .downcast_ref::<ExternalPaths>()
+            .is_some_and(|drag| can_accept_external_drop(drag.paths(), destination))
+}
+
 fn can_drop_on_entry_hit(
     hit: &EntryHitRegion,
     pointer: Point<Pixels>,
@@ -7308,6 +7445,48 @@ mod tests {
         assert!(can_move_files_to(
             &[PathBuf::from("/work/report.txt")],
             Path::new("/archive")
+        ));
+    }
+
+    #[test]
+    fn external_drop_is_bounded_absolute_and_deduplicated() {
+        let destination = Path::new("/archive");
+        let paths = [
+            PathBuf::from("/downloads/report.pdf"),
+            PathBuf::from("/downloads/report.pdf"),
+            PathBuf::from("/downloads/photos"),
+        ];
+        assert_eq!(
+            accepted_external_drop_paths(&paths, destination),
+            Some(vec![
+                PathBuf::from("/downloads/report.pdf"),
+                PathBuf::from("/downloads/photos"),
+            ])
+        );
+        assert!(!can_accept_external_drop(
+            &[PathBuf::from("relative.txt")],
+            destination,
+        ));
+        assert!(!can_accept_external_drop(&[], destination));
+        assert!(!can_accept_external_drop(
+            &vec![PathBuf::from("/downloads/item"); MAX_EXTERNAL_DROP_PATHS + 1],
+            destination,
+        ));
+    }
+
+    #[test]
+    fn external_drop_rejects_copying_into_source_or_same_parent() {
+        assert!(!can_accept_external_drop(
+            &[PathBuf::from("/work/photos")],
+            Path::new("/work/photos/edited"),
+        ));
+        assert!(!can_accept_external_drop(
+            &[PathBuf::from("/work/report.txt")],
+            Path::new("/work"),
+        ));
+        assert!(can_accept_external_drop(
+            &[PathBuf::from("/work/report.txt")],
+            Path::new("/archive"),
         ));
     }
 

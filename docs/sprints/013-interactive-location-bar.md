@@ -1,7 +1,8 @@
 # Sprint 13: interactive location bar
 
-**Status:** Implemented — automated acceptance is complete; final pointer and
-narrow-window visual acceptance remains.
+**Status:** Implemented — automated acceptance is complete and the user
+confirmed the normal breadcrumb/address interaction and slash presentation.
+Edge-case manual acceptance remains.
 
 ## Goal
 
@@ -43,6 +44,7 @@ editable location mode without creating a second navigation implementation.
 - [x] Reveal regular-file targets in their parent folder.
 - [x] Add unit coverage for breadcrumbs, compaction, path expansion, file
   targets, remote-URI refusal, and missing paths.
-- [ ] Manually verify pointer hover/click behavior, separator visibility,
-  keyboard focus, invalid-input presentation, and narrow-window compaction.
+- [x] Manually verify normal pointer interaction, slash visibility, and
+  keyboard address editing.
+- [ ] Manually verify invalid-input presentation and narrow-window compaction.
 - [ ] Manually verify paths containing spaces and non-ASCII characters.

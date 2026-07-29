@@ -136,9 +136,17 @@ The Yazi MIT license notice applies to the adaptations identified above:
 - Project: <https://github.com/zed-industries/zed>
 - GPUI license: Apache-2.0
 - Zed application license: primarily GPL-3.0-or-later
-- Current adaptations: The initial window bootstrap and declarative layout
-  follow the public Apache-2.0 GPUI examples; no Zed application code has been
-  copied.
+- Current adaptations:
+  - The initial window bootstrap and declarative layout follow the public
+    Apache-2.0 GPUI examples; no Zed application code has been copied.
+  - `vendor/gpui` carries GPUI 0.2.2 with a narrow Marcel extension to
+    `src/platform.rs`, `src/window.rs`, and the Linux Wayland window,
+    client, and clipboard modules. The extension exposes a native local-file
+    drag source using Wayland's existing data-device connection and
+    `text/uri-list` support. This is kept behind a Marcel-used GPUI method so
+    it can be removed when an equivalent primitive is available upstream.
+    The complete Apache-2.0 license is retained at
+    `vendor/gpui/LICENSE-APACHE`.
 
 ## gpui-component
 

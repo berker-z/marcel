@@ -7,12 +7,19 @@ item here belongs in that sprint.
 
 ## Current priorities
 
-- Marcel's local-filesystem core is now a credible alpha: browsing, previews,
-  selection, filtering, bookmarks, incremental watching, safe copy/move,
-  Trash/restore, and confirmed permanent deletion are implemented. The main
-  remaining gaps between that alpha and a daily-driver default file manager
-  are conventional file actions, desktop interoperability, mounted and remote
-  locations, packaging, and acceptance testing.
+- Marcel's local-filesystem core is now a usable personal MVP: browsing,
+  previews, selection, filtering, bookmarks, incremental watching, safe
+  copy/move, Trash/restore, permanent deletion, archives, packaging, D-Bus
+  activation, single-instance routing, and bilateral Wayland file
+  drag-and-drop are implemented.
+- Finish and land the bounded desktop interoperability contract in
+  [`Sprint 14`](sprints/014-desktop-interop-and-single-instance.md):
+  complete Properties/`ShowItemProperties`, exercise the generic service
+  opt-in, and run the release-only Nix checks. X11 outbound drag support is not
+  a blocker for the initial Wayland-focused personal release.
+- Cut a `0.1.0` personal MVP release after the current flake package builds and
+  installs from a clean revision. Keep becoming the default directory handler
+  a separate, explicit user step.
 - Complete the manual Trash/restore checks in
   [`Sprint 7`](sprints/007-trash-and-restore.md). The implementation uses the
   native freedesktop Trash, identity-validating undo/redo, and an aggregated
@@ -36,26 +43,47 @@ item here belongs in that sprint.
 - Finish Sprint 2 visual-browsing acceptance checks and thumbnail failure
   presentation.
 
+## MVP closure
+
+The remaining work required before calling Marcel's first personal-use release
+complete is intentionally small:
+
+1. Land Sprint 14; its updated flake package builds successfully without
+   taking MIME or generic FileManager1 ownership. Confirm the clean committed
+   revision installs and launches downstream.
+2. Implement one shared read-only Properties presentation and route both the
+   in-app action and D-Bus `ShowItemProperties` through it.
+3. Implement New File with the same bounded name validation and no-overwrite
+   behavior as New Folder.
+4. Run the outstanding destructive-operation smoke checks, especially
+   mounted-volume Trash behavior.
+5. Establish the `0.1.0` changelog/tag and run the release-only Nix build and
+   flake check.
+
+Everything else—X11 outbound drag, desktop clipboard integration, Duplicate,
+Move To, cross-filesystem conflict UI, remote locations, persistent settings,
+custom sorting, media playback, and deeper coordinator extraction—is valuable
+post-MVP work rather than a reason to hold the first personal release.
+
 ## Recommended delivery order
 
 This order favors daily-driver completeness over novelty while keeping new
 state machines out of Marcel's coordinator until they have clear ownership.
 
-1. Finish the Sprint 7 and Sprint 8 destructive-operation smoke tests and
-   record any discovered recovery or mounted-volume behavior.
-2. Complete conventional local actions: Rename first, followed by New File,
-   Open in Terminal, Properties, Duplicate, and Move To.
-3. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
+1. Close Sprint 14's remaining Properties and release-acceptance checks without
+   changing the user's default directory handler merely by installing Marcel.
+2. Add New File, then finish the Sprint 7 and Sprint 8 destructive-operation
+   smoke tests and record any discovered recovery or mounted-volume behavior.
+3. Cut the first personal-use release, then add Duplicate and Move To.
+4. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
    from `app.rs`, preserving current behavior and tests. Do not turn this into
    an abstract architecture rewrite.
-4. Implement bilateral native desktop drag-and-drop and desktop clipboard
+5. Finish X11 source support and manual acceptance for the implemented
+   bilateral native desktop drag-and-drop, then add desktop clipboard
    interoperability.
-5. Add cross-filesystem transfers, explicit conflict decisions, and the
+6. Add cross-filesystem transfers, explicit conflict decisions, and the
    documented symbolic-link policy.
-6. Add removable volumes, mounts, and common remote locations.
-7. Package Marcel through the flake, install its desktop metadata, implement
-   the required file-manager D-Bus surface, and document making it the default
-   directory handler.
+7. Add removable volumes, mounts, and common remote locations.
 8. Consolidate persistent settings, themes, fonts, sorting, grouping, zoom,
    and other UI refinements.
 9. Add media playback and optional ebook previews after the file-manager and
@@ -82,12 +110,19 @@ optional feature ideas.
   the default directory handler.
 - [x] Provide a Home Manager example for installing Marcel and setting
   its MIME association declaratively.
-- Implement `org.freedesktop.FileManager1` D-Bus support for:
-  - `ShowItems`
-  - `ShowFolders`
-  - `ShowItemProperties`
-- Decide whether Marcel should use a single running instance when desktop and
-  D-Bus requests arrive.
+- [x] Implement `org.freedesktop.FileManager1` navigation support for
+  `ShowItems` and `ShowFolders`.
+- [ ] Route `ShowItemProperties` through the planned shared read-only
+  Properties presentation.
+- [x] Use one primary Marcel process per graphical session. Later CLI, desktop,
+  and D-Bus requests must be routed to it without blocking GPUI's foreground
+  executor.
+- [x] Treat every D-Bus URI as untrusted input: accept only bounded local `file:`
+  URIs, validate requested filesystem types before acting, and never interpret
+  `ShowFolders` input as a request to open a regular file.
+- [x] Keep ownership of the generic `org.freedesktop.FileManager1` activation name
+  opt-in. Installing `pkgs.marcel` alone must not displace the user's current
+  generic file manager.
 - Add release automation and optionally a binary cache.
 - Submit Marcel to nixpkgs after the application has a stable release,
   complete metadata, icons, desktop integration, and reproducible packaging.
@@ -134,6 +169,17 @@ optional feature ideas.
   duplicate and move-to. Cross-filesystem
   cut/paste and interactive conflict decisions are explicitly parked until
   their safety and UX work is scheduled.
+- [x] Accept native local-file drops from desktop applications into Places,
+  bookmarks, folders, and the current browser directory, using safe copy
+  semantics.
+- [x] Confirm native file-drag source interoperability with browser/desktop
+  targets on Wayland.
+- [ ] Add and manually verify the corresponding X11 source path.
+- [ ] Upstream Marcel's outbound Wayland file-drag primitive to GPUI after
+  this desktop-interoperability slice lands: port the patch from GPUI 0.2.2 to
+  current Zed `main`, separate drag-source payload ownership from clipboard
+  state, add URI serialization tests and a minimal example, and submit a
+  Marcel-independent PR with its Wayland/copy-only scope documented.
 - [x] Add a non-overlapping bottom-right progress/cancellation card for active
   copy and move operations, with item/byte accounting.
 - [x] Add ZIP creation and broad-format extraction through the shared background
@@ -244,6 +290,11 @@ optional feature ideas.
 - Persist pane sizes, view mode, sort mode, and other user preferences.
 - Add conventional context menus and properties.
 - Add configurable sorting, grouping, hidden-file display, and zoom.
+- Improve marquee-selection edge-drag acceleration so scrolling ramps smoothly
+  with pointer distance while remaining controllable near the pane edge.
+- Add conventional middle-mouse autoscroll to both browser and preview panes,
+  with direction/speed feedback and predictable cancellation on click, Escape,
+  focus loss, or pane changes.
 - Add keyboard navigation and shortcuts without making Marcel modal or
   Vim-dependent.
 - Add accessible names, focus treatment, and keyboard alternatives for every

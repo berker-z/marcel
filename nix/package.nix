@@ -50,6 +50,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
+      ../vendor
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;
@@ -72,11 +73,12 @@ rustPlatform.buildRustPackage {
 
   desktopItems = [
     (makeDesktopItem {
-      name = "marcel";
+      name = "io.github.berker_z.Marcel";
       desktopName = "Marcel";
       genericName = "File Manager";
       comment = "Browse files with a fast, persistent preview pane";
       exec = "marcel %U";
+      dbusActivatable = true;
       icon = "system-file-manager";
       categories = [
         "System"
@@ -91,11 +93,28 @@ rustPlatform.buildRustPackage {
         "manager"
       ];
     })
+    (makeDesktopItem {
+      name = "marcel";
+      desktopName = "Marcel";
+      genericName = "File Manager";
+      comment = "Compatibility desktop identifier for Marcel";
+      exec = "marcel %U";
+      icon = "system-file-manager";
+      noDisplay = true;
+      mimeTypes = [ "inode/directory" ];
+    })
   ];
 
   postInstall = ''
     mkdir -p "$out/libexec/marcel"
     ln -s ${lib.getExe' _7zz-rar "7zz"} "$out/libexec/marcel/7zz"
+
+    mkdir -p "$out/share/dbus-1/services" "$out/share/dbus-1/interfaces"
+    substitute ${./io.github.berker_z.Marcel.service} \
+      "$out/share/dbus-1/services/io.github.berker_z.Marcel.service" \
+      --replace-fail @marcel@ "$out"
+    install -Dm644 ${./org.freedesktop.FileManager1.xml} \
+      "$out/share/dbus-1/interfaces/org.freedesktop.FileManager1.xml"
 
     wrapProgram "$out/bin/marcel" \
       --prefix PATH : ${

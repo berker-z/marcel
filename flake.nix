@@ -43,9 +43,13 @@
         let
           pkgs = mkPkgs system;
           marcel = pkgs.callPackage ./nix/package.nix { };
+          marcelFileManager1Service = pkgs.callPackage ./nix/file-manager1-service.nix {
+            inherit marcel;
+          };
         in
         {
           inherit marcel;
+          file-manager1-service = marcelFileManager1Service;
           default = marcel;
         }
       );
@@ -59,9 +63,17 @@
         default = self.apps.${system}.marcel;
       });
 
-      overlays.default = final: _previous: {
-        marcel = final.callPackage ./nix/package.nix { };
-      };
+      overlays.default =
+        final: _previous:
+        let
+          marcel = final.callPackage ./nix/package.nix { };
+        in
+        {
+          inherit marcel;
+          marcelFileManager1Service = final.callPackage ./nix/file-manager1-service.nix {
+            inherit marcel;
+          };
+        };
 
       checks = forAllSystems (system: {
         package = self.packages.${system}.marcel;

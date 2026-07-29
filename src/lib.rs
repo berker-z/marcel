@@ -3,6 +3,8 @@ pub mod archive_ops;
 mod bookmarks;
 pub mod commands;
 mod delete_ops;
+#[cfg(target_os = "linux")]
+pub mod desktop_integration;
 pub mod directory_session;
 mod directory_watcher;
 pub mod file_ops;

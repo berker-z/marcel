@@ -1,7 +1,8 @@
 # Sprint 12: Nix distribution and desktop launch
 
-**Status:** Implemented — automated acceptance is complete; installing it as
-the user's default directory handler remains a downstream configuration step.
+**Status:** Implemented — automated acceptance is complete and the package
+installs and launches in the user's real NixOS environment. Default-handler
+configuration remains intentionally deferred.
 
 ## Goal
 
@@ -44,9 +45,9 @@ single-instance routing, or `org.freedesktop.FileManager1`.
   archives.
 - [x] Document direct use, downstream flake wiring, and the Home Manager MIME
   association.
-- [ ] Install the package from the user's dotfiles and manually confirm
-  launcher, directory double-click, file-target opening, PDF preview, and
-  archive operations.
+- [x] Install the package from the user's dotfiles and confirm Marcel launches.
+- [ ] Manually confirm desktop launcher activation, directory and file-target
+  opening, PDF preview, and archive operations through the installed package.
 - [ ] Add branded scalable and raster application icons.
 - [ ] Add single-instance routing and `org.freedesktop.FileManager1`.
 - [ ] Publish versioned release artifacts and optional binary-cache output.

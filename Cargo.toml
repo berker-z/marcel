@@ -28,6 +28,13 @@ xattr = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 freedesktop-icons = "0.4"
+zbus = { version = "5.18", default-features = false, features = ["async-io"] }
+
+[patch.crates-io]
+# GPUI 0.2.2 handles native file drops into a window but does not expose a
+# native file-drag source. Marcel carries a narrow Apache-2.0 adaptation until
+# that platform primitive exists upstream.
+gpui = { path = "vendor/gpui" }
 
 [profile.dev]
 debug = 1
@@ -36,6 +43,16 @@ debug = 1
 # representative performance during normal `cargo run` development.
 [profile.dev.package."*"]
 opt-level = 3
+
+# rustc 1.97 currently ICEs while producing metadata for pulp 0.22 at
+# opt-level 3. Keep this isolated SIMD dependency optimized without triggering
+# that compiler bug.
+[profile.dev.package.pulp]
+opt-level = 2
+
+# GCC 15.2 also ICEs in freetype-sys' vendored TrueType sources at `-O3`.
+[profile.dev.package.freetype-sys]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

@@ -16,8 +16,9 @@ deletion. Use disposable data while evaluating it and keep backups of anything
 important.
 
 The Nix flake provides an installable package, application, and downstream
-overlay. Marcel does not yet publish stable release artifacts or promise
-configuration compatibility between alpha versions.
+overlay, and that package has been tested in a real NixOS configuration.
+Marcel does not yet publish stable release artifacts or promise configuration
+compatibility between alpha versions.
 
 ### Browsing and interaction
 
@@ -38,6 +39,9 @@ configuration compatibility between alpha versions.
   pointer reordering and safe removal.
 - Internal drag-and-drop moves onto browser folders, Places, and bookmarks,
   including edge auto-scroll and operation-specific drop feedback.
+- Native Wayland file drag-and-drop with browsers, desktops, and other file
+  managers. Incoming external files are copied through Marcel's bounded,
+  cancellable, no-overwrite transfer path.
 - Semantic icons from the active freedesktop icon theme and progressive image
   thumbnails backed by the standard freedesktop thumbnail cache.
 - Resizable browser and preview workspace with a fixed, content-sized Places
@@ -160,9 +164,12 @@ Build the installable package and desktop metadata with:
 nix build
 ```
 
-The package installs `marcel`, `marcel.desktop`, Poppler/GIO runtime tools, and
-a private RAR-capable 7-Zip backend. It advertises only `inode/directory`;
-archive double-click behavior remains owned by the user's archive viewer.
+The package installs `marcel`, the branded
+`io.github.berker_z.Marcel.desktop` entry, a hidden `marcel.desktop`
+compatibility alias, the branded D-Bus activation service, Poppler/GIO runtime
+tools, and a private RAR-capable 7-Zip backend. It advertises only
+`inode/directory`; archive double-click behavior remains owned by the user's
+archive viewer.
 
 ### Use from another Nix flake
 
@@ -184,20 +191,28 @@ Apply its overlay and install the package:
 }
 ```
 
+This installs Marcel without changing any MIME association or generic
+file-manager D-Bus ownership.
+
+The flake separately exposes `packages.<system>.file-manager1-service` for a
+downstream configuration that explicitly wants Marcel to own the generic
+`org.freedesktop.FileManager1` activation service.
+
 For Home Manager, make Marcel the default directory handler declaratively:
 
 ```nix
 {
   xdg.mimeApps = {
     enable = true;
-    associations.added."inode/directory" = ["marcel.desktop"];
-    defaultApplications."inode/directory" = ["marcel.desktop"];
+    associations.added."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
+    defaultApplications."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
   };
 }
 ```
 
-The desktop identifier is `marcel.desktop`. Marcel does not claim ZIP, 7z,
-RAR, tar, or other archive MIME types.
+The desktop identifier is `io.github.berker_z.Marcel.desktop`.
+`marcel.desktop` remains a hidden compatibility alias. Marcel does not claim
+ZIP, 7z, RAR, tar, or other archive MIME types.
 
 Required checks:
 
@@ -228,13 +243,14 @@ default when a supported installed family is available.
 
 Marcel is not ready to replace a mature system file manager for every workflow:
 
-- A branded application icon, `org.freedesktop.FileManager1`, single-instance
-  behavior, non-Nix release artifacts, and release automation are not
-  implemented. The Nix package currently uses the desktop's generic file
-  manager icon.
-- Native drag-and-drop and clipboard interoperability with browsers, desktop
-  surfaces, and other file managers are not implemented. Dragging inside
-  Marcel works.
+- A branded application icon, read-only Properties presentation,
+  non-Nix release artifacts, and release automation are not implemented.
+  Branded D-Bus activation, single-instance routing, and the FileManager1
+  navigation methods are implemented. Installing the ordinary package still
+  does not take ownership of the generic file-manager D-Bus service.
+- Native file drag-and-drop is implemented inbound on Wayland and X11 and
+  outbound on Wayland. X11 outbound support and desktop clipboard
+  interoperability remain open.
 - Cut/move is currently same-filesystem. Cross-filesystem moves and interactive
   conflict decisions are parked; occupied destinations are safely refused.
 - New File, Duplicate, Move To, and Properties are not implemented yet.
@@ -260,22 +276,24 @@ Marcel is not ready to replace a mature system file manager for every workflow:
 
 The immediate alpha-to-daily-driver sequence is:
 
-1. Complete destructive-operation, mounted-Trash, watcher, preview, and
+1. Finish Sprint 14 acceptance, the shared Properties surface, and X11 native
+   file-drag source without silently changing the system's default file
+   manager.
+2. Complete destructive-operation, mounted-Trash, watcher, preview, and
    large-directory acceptance passes.
-2. Finish New File and Properties, then add Duplicate and Move To in their
+3. Finish New File and Properties, then add Duplicate and Move To in their
    appropriate operation slices.
-3. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
+4. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
    from the application coordinator.
-4. Implement bilateral native desktop drag-and-drop and clipboard
-   interoperability.
-5. Add cross-filesystem transfers, conflict decisions, and a documented
+5. Finish native desktop drag-and-drop acceptance and implement desktop
+   clipboard interoperability.
+6. Add cross-filesystem transfers, conflict decisions, and a documented
    symbolic-link policy.
-6. Add removable volumes, mounts, and common remote locations.
-7. Add the file-manager D-Bus surface, single-instance request routing, a
-   branded icon, and non-Nix release artifacts.
-8. Consolidate persistent settings, themes, sorting, grouping, zoom, and
+7. Add removable volumes, mounts, and common remote locations.
+8. Add a branded icon and non-Nix release artifacts.
+9. Consolidate persistent settings, themes, sorting, grouping, zoom, and
    accessibility work.
-9. Add media playback and optional ebook previews after the file-manager
+10. Add media playback and optional ebook previews after the file-manager
    foundation is complete.
 
 The authoritative cross-sprint roadmap lives in the
@@ -283,8 +301,9 @@ The authoritative cross-sprint roadmap lives in the
 [interaction model](docs/interaction-model.md) defines selection, shortcuts,
 menus, reversibility, and destructive-operation behavior. Detailed
 implementation and acceptance history is recorded under
-[`docs/sprints/`](docs/sprints/); Marcel has progressed through eight numbered
-sprints rather than remaining at Sprint 1.
+[`docs/sprints/`](docs/sprints/); Marcel has progressed through thirteen
+implemented numbered sprints, with desktop interoperability in progress as
+Sprint 14.
 
 ## Acknowledgements and provenance
 

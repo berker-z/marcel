@@ -53,3 +53,8 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
+
+Do not run a full `nix build` or `nix flake check` after every routine update.
+Reserve those expensive package checks for release commits or when the user
+explicitly requests them. During ordinary development, use focused Nix
+evaluation checks only when a change touches flake or package definitions.
