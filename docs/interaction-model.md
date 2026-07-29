@@ -35,6 +35,7 @@ behavior exists.
 | `Ctrl+Up` | Go to the parent folder |
 | `Ctrl+Left` | Go backward in navigation history |
 | `Ctrl+Right` | Go forward in navigation history |
+| `Ctrl+L` | Edit the current location |
 | `Ctrl+A` | Select all items in the current directory |
 | `Ctrl+Shift+N` | Create a folder in the current directory |
 | `F2` | Rename the single selected item |

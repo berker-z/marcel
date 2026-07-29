@@ -31,7 +31,8 @@ item here belongs in that sprint.
 - Ask Berker to demonstrate the known PDF preview resize problem and describe
   the expected behavior before choosing a fix.
 - Add audio and video metadata previews with an explicit play action.
-- Add interactive breadcrumb navigation.
+- [x] Add interactive breadcrumb navigation and a `Ctrl+L` editable location
+  mode for paths and local file URIs.
 - Finish Sprint 2 visual-browsing acceptance checks and thumbnail failure
   presentation.
 
@@ -56,7 +57,7 @@ state machines out of Marcel's coordinator until they have clear ownership.
    the required file-manager D-Bus surface, and document making it the default
    directory handler.
 8. Consolidate persistent settings, themes, fonts, sorting, grouping, zoom,
-   breadcrumbs, and other UI refinements.
+   and other UI refinements.
 9. Add media playback and optional ebook previews after the file-manager and
    desktop-integration foundation is complete.
 
@@ -238,6 +239,8 @@ optional feature ideas.
   surface.
 - [x] Normalize Place, bookmark, and grid-item names to the base UI text size;
   give grid names three lines and make their visuals fill more of each tile.
+- [x] Replace the static path display with clickable breadcrumbs and an
+  editable, validation-reporting `Ctrl+L` location field.
 - Persist pane sizes, view mode, sort mode, and other user preferences.
 - Add conventional context menus and properties.
 - Add configurable sorting, grouping, hidden-file display, and zoom.

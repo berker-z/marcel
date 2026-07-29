@@ -31,6 +31,8 @@ configuration compatibility between alpha versions.
 - Conventional click, Control-click, Shift-click, keyboard, and empty-space
   marquee selection.
 - Back, forward, parent, Places, XDG user directories, and navigation history.
+- Clickable path breadcrumbs with compact narrow-window presentation and
+  `Ctrl+L` editing for paths and local `file://` URIs.
 - Window-wide type-to-filter fuzzy matching for the current directory.
 - Persistent bookmarks created by dragging folders into the sidebar, with
   pointer reordering and safe removal.
@@ -100,6 +102,7 @@ result.
 | `Enter` | Open the primary item |
 | `Ctrl+Up` | Open the parent directory |
 | `Ctrl+Left` / `Ctrl+Right` | Back / forward |
+| `Ctrl+L` | Edit the current location |
 | `Ctrl+A` | Select all |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
 | `Delete` | Move the selection to Trash |
@@ -247,8 +250,8 @@ Marcel is not ready to replace a mature system file manager for every workflow:
   implemented.
 - Settings are session-only. Pane sizes, view choice, typography, palette, and
   other preferences are not persisted.
-- Interactive breadcrumb segments, sorting, grouping, zoom, and complete
-  accessibility coverage remain roadmap work.
+- Sorting, grouping, zoom, and complete accessibility coverage remain roadmap
+  work.
 - PDF resizing has a known behavior problem that still needs a reproducible
   report and UX decision. Thumbnail failure/loading presentation and the full
   large-directory/manual fixture matrix also need polish.
@@ -270,8 +273,8 @@ The immediate alpha-to-daily-driver sequence is:
 6. Add removable volumes, mounts, and common remote locations.
 7. Add the file-manager D-Bus surface, single-instance request routing, a
    branded icon, and non-Nix release artifacts.
-8. Consolidate persistent settings, themes, sorting, grouping, zoom,
-   breadcrumbs, and accessibility work.
+8. Consolidate persistent settings, themes, sorting, grouping, zoom, and
+   accessibility work.
 9. Add media playback and optional ebook previews after the file-manager
    foundation is complete.
 

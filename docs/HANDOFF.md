@@ -8,37 +8,9 @@ Read `AGENTS.md` first and preserve the working tree.
 
 ## Repository state
 
-The current remote tip is:
-
-```text
-a064ff4 feat: add archive operations and live themes
-```
-
-That commit includes the archive slice, terminal action, menu normalization,
-visual hierarchy pass, larger grid typography/icons, the live theme selector,
-and the visible Settings glyph fix.
-
-The current uncommitted slice turns the flake into an installable Nix package
-for daily use. Its files are:
-
-```text
- M README.md
- M docs/HANDOFF.md
- M docs/TODO.md
- M docs/sprints/010-archive-operations.md
- M docs/sprints/011-visual-hierarchy-polish.md
- M flake.nix
- M src/app.rs
- M src/delete_ops.rs
- M src/lib.rs
- M src/main.rs
- M src/theme.rs
-?? docs/sprints/012-nix-distribution-and-desktop-launch.md
-?? nix/package.nix
-?? src/launch.rs
-```
-
-Do not discard these changes.
+`master` now includes the archive slice, live themes, visual hierarchy polish,
+context-menu hover fix, installable Nix package, and interactive location bar.
+The tree should be clean after the location-bar commit is pushed.
 
 ## Nix distribution slice
 
@@ -83,6 +55,26 @@ the parent when the target is a file.
 The parser has unit coverage for no arguments, relative paths, file URIs, and
 skipping unsupported URI schemes.
 
+## Interactive location bar
+
+The former static path display is now a conventional breadcrumb bar:
+
+- ancestor segments are hoverable gpui-component text buttons;
+- literal `/` separators remain visible under every theme;
+- narrow windows compact the middle into a clickable ellipsis;
+- clicking an ancestor uses the existing navigation/history path;
+- clicking the current segment or empty bar space enters location editing.
+
+`Ctrl+L` enters the gpui-component address input and selects the complete path.
+Enter accepts absolute paths, paths relative to the current directory, `~`
+expansion, and percent-decoded local `file:` URIs. Directory targets navigate
+normally; regular files open their parent and are revealed. Escape cancels.
+Invalid or unsupported targets leave the current directory untouched and keep
+the editor available with an error.
+
+Filesystem resolution runs on the background executor. Ticketing prevents a
+cancelled or superseded lookup from publishing stale navigation.
+
 ## Context-menu hover fix
 
 The bookmark, entry, and empty-space custom menus used `colors.accent` for
@@ -99,7 +91,7 @@ The required Rust quality gate passes:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
-128 passed; 0 failed
+133 passed; 0 failed
 ```
 
 The real x86-64 Nix package and its in-package test phase build successfully.
@@ -153,7 +145,9 @@ Do not add archive MIME associations.
   cache.
 
 The bounded contract and acceptance checks are in
-[`Sprint 12`](sprints/012-nix-distribution-and-desktop-launch.md).
+[`Sprint 12`](sprints/012-nix-distribution-and-desktop-launch.md). The
+interactive location-bar contract is in
+[`Sprint 13`](sprints/013-interactive-location-bar.md).
 
 ## Contributor constraints
 

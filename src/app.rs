@@ -21,7 +21,10 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState, Position, SelectToStart as InputSelectToStart},
+    input::{
+        Input, InputEvent, InputState, Position, SelectAll as InputSelectAll,
+        SelectToStart as InputSelectToStart,
+    },
     notification::Notification,
     progress::Progress,
     resizable::{h_resizable, resizable_panel},
@@ -63,6 +66,7 @@ use crate::{
         stream_directory_cancellable,
     },
     history::NavigationHistory,
+    launch::{LocationTarget, resolve_location},
     operations::{FileClipboard, OperationController, OperationProgressKind},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
@@ -178,6 +182,12 @@ struct BookmarkInsertion {
     index: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocationBreadcrumb {
+    label: String,
+    path: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy)]
 struct BookmarkMenu {
     index: usize,
@@ -250,12 +260,19 @@ struct WrappedPreview {
 pub struct Marcel {
     browser_focus: FocusHandle,
     palette: Palette,
+    home_dir: PathBuf,
     system_ui_font: SharedString,
     use_iosevka_ui: bool,
     iosevka_ui_font: Option<SharedString>,
     directory: DirectorySession,
     search_input: Entity<InputState>,
     _search_subscriptions: Vec<Subscription>,
+    location_input: Entity<InputState>,
+    _location_subscription: Subscription,
+    location_editing: bool,
+    location_resolving: bool,
+    location_error: Option<String>,
+    location_ticket: u64,
     rename_path: Option<PathBuf>,
     rename_input: Option<Entity<InputState>>,
     rename_subscription: Option<Subscription>,
@@ -348,6 +365,14 @@ impl Marcel {
                 this.on_search_input_event(input, event, window, cx);
             },
         );
+        let location_input = cx.new(|cx| InputState::new(window, cx).placeholder("Enter a path"));
+        let location_subscription = cx.subscribe_in(
+            &location_input,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                this.on_location_input_event(input, event, window, cx);
+            },
+        );
         let iosevka_ui_font = IOSEVKA_UI_FONTS
             .iter()
             .find(|family| available_fonts.iter().any(|name| name == **family))
@@ -361,12 +386,19 @@ impl Marcel {
         let mut this = Self {
             browser_focus: cx.focus_handle(),
             palette: theme::active(),
+            home_dir: home_dir.clone(),
             system_ui_font,
             use_iosevka_ui,
             iosevka_ui_font,
             directory: DirectorySession::new(start_dir.clone()),
             search_input,
             _search_subscriptions: vec![search_subscription],
+            location_input,
+            _location_subscription: location_subscription,
+            location_editing: false,
+            location_resolving: false,
+            location_error: None,
+            location_ticket: 0,
             rename_path: None,
             rename_input: None,
             rename_subscription: None,
@@ -1091,7 +1123,23 @@ impl Marcel {
     }
 
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {
+        self.navigate_to_revealing(path, None, add_to_history, cx);
+    }
+
+    fn navigate_to_revealing(
+        &mut self,
+        path: PathBuf,
+        reveal: Option<PathBuf>,
+        add_to_history: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !self.browsing_trash && path == self.directory.current_dir {
+            if let Some(reveal) = reveal {
+                self.set_filter_query(String::new(), cx);
+                self.directory.pending_reveal = Some(reveal);
+                self.select_pending_loaded_entry(cx);
+                cx.notify();
+            }
             return;
         }
         self.browsing_trash = false;
@@ -1100,7 +1148,7 @@ impl Marcel {
             self.history.push(&path);
         }
         self.directory.current_dir = path;
-        self.directory.pending_reveal = None;
+        self.directory.pending_reveal = reveal;
         self.start_directory_load(true, cx);
     }
 
@@ -3099,6 +3147,136 @@ impl Marcel {
         });
     }
 
+    fn render_location_bar(&self, max_breadcrumbs: usize, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors;
+        if self.location_editing {
+            let suffix = if self.location_resolving {
+                Some(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted_foreground)
+                        .child("…")
+                        .into_any_element(),
+                )
+            } else {
+                self.location_error.as_ref().map(|_| {
+                    div()
+                        .text_sm()
+                        .text_color(colors.danger)
+                        .child("!")
+                        .into_any_element()
+                })
+            };
+            return Input::new(&self.location_input)
+                .small()
+                .h_7()
+                .w_full()
+                .when(self.location_error.is_some(), |input| {
+                    input.border_color(colors.danger)
+                })
+                .when_some(suffix, |input, suffix| input.suffix(suffix))
+                .into_any_element();
+        }
+
+        let view = cx.entity();
+        let breadcrumbs = if self.browsing_trash {
+            vec![LocationBreadcrumb {
+                label: "Trash".to_string(),
+                path: None,
+            }]
+        } else {
+            compact_location_breadcrumbs(
+                location_breadcrumbs(&self.directory.current_dir),
+                max_breadcrumbs,
+            )
+        };
+        let last_index = breadcrumbs.len().saturating_sub(1);
+        let mut items = Vec::with_capacity(breadcrumbs.len().saturating_mul(2));
+        for (index, breadcrumb) in breadcrumbs.into_iter().enumerate() {
+            if index > 0 {
+                items.push(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .text_color(colors.muted_foreground)
+                        .child("/")
+                        .into_any_element(),
+                );
+            }
+
+            let last = index == last_index;
+            let item = match breadcrumb.path {
+                Some(path) if !last => {
+                    let view = view.clone();
+                    Button::new(("location-breadcrumb", index))
+                        .xsmall()
+                        .compact()
+                        .ghost()
+                        .label(breadcrumb.label)
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            view.update(cx, |this, cx| {
+                                this.navigate_to(path.clone(), true, cx);
+                            });
+                        })
+                        .into_any_element()
+                }
+                Some(_) if last => div()
+                    .flex_none()
+                    .text_sm()
+                    .text_color(colors.foreground)
+                    .child(breadcrumb.label)
+                    .into_any_element(),
+                None if breadcrumb.label == "…" => {
+                    let view = view.clone();
+                    Button::new(("location-breadcrumb", index))
+                        .xsmall()
+                        .compact()
+                        .ghost()
+                        .label(breadcrumb.label)
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            view.update(cx, |this, cx| {
+                                this.begin_location_edit(window, cx);
+                            });
+                        })
+                        .into_any_element()
+                }
+                None => div()
+                    .flex_none()
+                    .text_sm()
+                    .text_color(colors.foreground)
+                    .child(breadcrumb.label)
+                    .into_any_element(),
+                Some(_) => unreachable!(),
+            };
+            items.push(item);
+        }
+        let edit_view = cx.entity();
+
+        div()
+            .id("location-breadcrumbs")
+            .flex_1()
+            .min_w_0()
+            .h_7()
+            .px_3()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .rounded(cx.theme().radius)
+            .bg(colors.background)
+            .border_1()
+            .border_color(colors.border)
+            .cursor_text()
+            .on_click(move |_, window, cx| {
+                edit_view.update(cx, |this, cx| {
+                    this.begin_location_edit(window, cx);
+                });
+            })
+            .child(h_flex().min_w_0().gap_1().overflow_hidden().children(items))
+            .into_any_element()
+    }
+
     fn places_sidebar_width(&self, window: &Window, cx: &Context<Self>) -> Pixels {
         let font_size = cx.theme().font_size;
         let font = font(cx.theme().font_family.clone());
@@ -3213,6 +3391,113 @@ impl Marcel {
         self.browser_focus.focus(window);
     }
 
+    fn on_location_input_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.location_error = None;
+                if self.location_resolving {
+                    self.location_ticket = self.location_ticket.wrapping_add(1);
+                    self.location_resolving = false;
+                }
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.submit_location(input, window, cx),
+            InputEvent::Blur => {
+                if self.location_editing && !self.location_resolving {
+                    self.location_ticket = self.location_ticket.wrapping_add(1);
+                    self.location_editing = false;
+                    self.location_error = None;
+                    cx.notify();
+                }
+            }
+            InputEvent::Focus => {}
+        }
+    }
+
+    fn begin_location_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.location_ticket = self.location_ticket.wrapping_add(1);
+        self.location_editing = true;
+        self.location_resolving = false;
+        self.location_error = None;
+        let value = if self.browsing_trash {
+            String::new()
+        } else {
+            self.directory.current_dir.display().to_string()
+        };
+        let input = self.location_input.clone();
+        input.update(cx, |input, cx| input.set_value(value, window, cx));
+        cx.notify();
+
+        cx.defer_in(window, move |_, window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            window.dispatch_action(Box::new(InputSelectAll), cx);
+        });
+    }
+
+    fn cancel_location_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.location_ticket = self.location_ticket.wrapping_add(1);
+        self.location_editing = false;
+        self.location_resolving = false;
+        self.location_error = None;
+        self.browser_focus.focus(window);
+        cx.notify();
+    }
+
+    fn submit_location(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.location_resolving {
+            return;
+        }
+
+        let value = input.read(cx).value().to_string();
+        let current_dir = self.directory.current_dir.clone();
+        let home_dir = self.home_dir.clone();
+        self.location_ticket = self.location_ticket.wrapping_add(1);
+        let ticket = self.location_ticket;
+        self.location_resolving = true;
+        self.location_error = None;
+        cx.notify();
+
+        let resolve_task = cx.background_executor().spawn(smol::unblock(move || {
+            resolve_location(&value, &current_dir, Some(&home_dir))
+        }));
+        cx.spawn_in(window, async move |this, window| {
+            let result = resolve_task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                if ticket != this.location_ticket || !this.location_editing {
+                    return;
+                }
+                this.location_resolving = false;
+                match result {
+                    Ok(LocationTarget { directory, reveal }) => {
+                        this.location_editing = false;
+                        this.location_error = None;
+                        this.navigate_to_revealing(directory, reveal, true, cx);
+                        this.browser_focus.focus(window);
+                    }
+                    Err(error) => {
+                        this.location_error = Some(error.clone());
+                        window.push_notification(Notification::error(error), cx);
+                        this.location_input
+                            .update(cx, |input, cx| input.focus(window, cx));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn on_window_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -3221,8 +3506,35 @@ impl Marcel {
     ) {
         let stroke = &event.keystroke;
         let search_focused = self.search_input.focus_handle(cx).is_focused(window);
+        let location_focused = self.location_input.focus_handle(cx).is_focused(window);
         let browser_focused = self.browser_focus.is_focused(window);
         let input_focused = window.has_focused_input(cx);
+
+        if location_focused {
+            if stroke.modifiers.control
+                && !stroke.modifiers.alt
+                && stroke.key.eq_ignore_ascii_case("l")
+            {
+                window.dispatch_action(Box::new(InputSelectAll), cx);
+                cx.stop_propagation();
+                return;
+            }
+            if stroke.key == "escape" {
+                self.cancel_location_edit(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if stroke.modifiers.control
+            && !stroke.modifiers.alt
+            && stroke.key.eq_ignore_ascii_case("l")
+            && (!input_focused || search_focused)
+        {
+            self.begin_location_edit(window, cx);
+            cx.stop_propagation();
+            return;
+        }
 
         // Type-to-filter is global browser chrome, not an input interceptor.
         // Dialog fields and future inline editors must retain every editing
@@ -6100,6 +6412,10 @@ impl Render for Marcel {
             .border_color(colors.border)
             .child(self.render_browser(cx));
 
+        let location_width = (window_width - f32::from(sidebar_width) - 296.0).max(180.0);
+        let max_breadcrumbs = ((location_width / 96.0).floor() as usize).clamp(3, 8);
+        let location_bar = self.render_location_bar(max_breadcrumbs, cx);
+
         // gpui-component's icon-only Button currently paints its bundled SVG
         // navigation glyphs invisibly against Marcel's themed title surface.
         // Keep these five tiny controls Marcel-owned until the component can
@@ -6266,29 +6582,7 @@ impl Render for Marcel {
                     .h_full()
                     .px_2()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_7()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .bg(colors.background)
-                            .border_1()
-                            .border_color(colors.border)
-                            .text_sm()
-                            .text_color(colors.muted_foreground)
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(if self.browsing_trash {
-                                "Trash".to_string()
-                            } else {
-                                self.directory.current_dir.display().to_string()
-                            }),
-                    )
+                    .child(location_bar)
                     .child(
                         Input::new(&self.search_input)
                             .small()
@@ -6505,6 +6799,48 @@ impl Render for Marcel {
             .when_some(dialog_layer, |this, layer| this.child(layer))
             .when_some(status_layer, |this, layer| this.child(layer))
     }
+}
+
+fn location_breadcrumbs(path: &Path) -> Vec<LocationBreadcrumb> {
+    let mut current = PathBuf::new();
+    let mut breadcrumbs = Vec::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let label = match component {
+            std::path::Component::RootDir => "/".to_string(),
+            std::path::Component::Prefix(prefix) => {
+                prefix.as_os_str().to_string_lossy().into_owned()
+            }
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => "..".to_string(),
+            std::path::Component::Normal(name) => name.to_string_lossy().into_owned(),
+        };
+        breadcrumbs.push(LocationBreadcrumb {
+            label,
+            path: Some(current.clone()),
+        });
+    }
+    breadcrumbs
+}
+
+fn compact_location_breadcrumbs(
+    breadcrumbs: Vec<LocationBreadcrumb>,
+    max_items: usize,
+) -> Vec<LocationBreadcrumb> {
+    if breadcrumbs.len() <= max_items || max_items < 3 {
+        return breadcrumbs;
+    }
+
+    let tail_count = max_items - 2;
+    let tail_start = breadcrumbs.len() - tail_count;
+    let mut compact = Vec::with_capacity(max_items);
+    compact.push(breadcrumbs[0].clone());
+    compact.push(LocationBreadcrumb {
+        label: "…".to_string(),
+        path: None,
+    });
+    compact.extend_from_slice(&breadcrumbs[tail_start..]);
+    compact
 }
 
 fn normalize_start_directory(path: PathBuf) -> PathBuf {
@@ -6865,6 +7201,64 @@ mod tests {
     fn start_path_falls_back_to_parent_for_files() {
         let path = PathBuf::from("/tmp/file.txt");
         assert_eq!(normalize_start_directory(path), PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn breadcrumbs_build_clickable_progressive_paths() {
+        assert_eq!(
+            location_breadcrumbs(Path::new("/home/test/Projects/marcel")),
+            vec![
+                LocationBreadcrumb {
+                    label: "/".to_string(),
+                    path: Some(PathBuf::from("/")),
+                },
+                LocationBreadcrumb {
+                    label: "home".to_string(),
+                    path: Some(PathBuf::from("/home")),
+                },
+                LocationBreadcrumb {
+                    label: "test".to_string(),
+                    path: Some(PathBuf::from("/home/test")),
+                },
+                LocationBreadcrumb {
+                    label: "Projects".to_string(),
+                    path: Some(PathBuf::from("/home/test/Projects")),
+                },
+                LocationBreadcrumb {
+                    label: "marcel".to_string(),
+                    path: Some(PathBuf::from("/home/test/Projects/marcel")),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn narrow_breadcrumbs_keep_root_and_the_deepest_segments() {
+        let compact = compact_location_breadcrumbs(
+            location_breadcrumbs(Path::new("/home/test/Projects/marcel/src")),
+            4,
+        );
+        assert_eq!(
+            compact,
+            vec![
+                LocationBreadcrumb {
+                    label: "/".to_string(),
+                    path: Some(PathBuf::from("/")),
+                },
+                LocationBreadcrumb {
+                    label: "…".to_string(),
+                    path: None,
+                },
+                LocationBreadcrumb {
+                    label: "marcel".to_string(),
+                    path: Some(PathBuf::from("/home/test/Projects/marcel")),
+                },
+                LocationBreadcrumb {
+                    label: "src".to_string(),
+                    path: Some(PathBuf::from("/home/test/Projects/marcel/src")),
+                },
+            ]
+        );
     }
 
     #[test]
