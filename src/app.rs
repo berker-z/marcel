@@ -17,7 +17,7 @@ use gpui::{
     prelude::*, px, relative, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Sizable, Theme, WindowExt,
+    ActiveTheme, Disableable, Root, Sizable, Theme, WindowExt,
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -3662,6 +3662,12 @@ impl Render for Marcel {
 
         let pane_view = cx.entity();
         let entry_menu = self.render_entry_menu(window, cx);
+        // gpui-component 0.5.1's Root stores dialog and notification state but
+        // does not attach those layers in Root::render. Mount its public layer
+        // renderers here so WindowExt dialogs/notifications are actually
+        // visible while retaining the component implementations.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
         div()
             .relative()
             .flex()
@@ -3697,6 +3703,8 @@ impl Render for Marcel {
                 ),
             )
             .when_some(entry_menu, |this, menu| this.child(menu))
+            .when_some(dialog_layer, |this, layer| this.child(layer))
+            .when_some(notification_layer, |this, layer| this.child(layer))
     }
 }
 

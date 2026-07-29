@@ -23,6 +23,14 @@ bounded undo/redo history when it is genuinely reversible.
 - [x] Unit tests cover validation, occupied destinations, identity conflicts,
   non-empty undo refusal, history branching, and the history bound.
 
+## Implementation notes
+
+- gpui-component 0.5.1's `Root` stores dialog and notification state but does
+  not attach its public dialog/notification layers in `Root::render`. Marcel
+  mounts `Root::render_dialog_layer` and `Root::render_notification_layer` in
+  its top-level render tree as a compatibility bridge. The dialog,
+  notification, input, and buttons remain gpui-component implementations.
+
 ## Safety contract
 
 The initial create record stores the destination and the filesystem identity
