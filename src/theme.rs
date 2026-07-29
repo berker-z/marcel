@@ -530,6 +530,7 @@ mod tests {
             if let Some(colors) = colors_for(palette) {
                 assert_ne!(colors.sidebar, colors.background, "{}", palette.label());
                 assert_ne!(colors.list_hover, colors.background, "{}", palette.label());
+                assert_ne!(colors.list_active, colors.popover, "{}", palette.label());
             }
         }
     }

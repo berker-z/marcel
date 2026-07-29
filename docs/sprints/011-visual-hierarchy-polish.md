@@ -45,6 +45,8 @@ filesystem behavior.
 - [x] Hot-apply dropdown changes to all windows while preserving the active
   fonts, font sizes, and radii.
 - [x] Keep `MARCEL_THEME` compatible and expand it to every built-in palette.
+- [x] Give enabled bookmark, entry, and empty-space context-menu rows a
+  theme-aware hover tint that remains visible over the popover surface.
 - [ ] Manually verify every built-in theme and live switching while the modal
   remains open.
 - [ ] Manually verify the result in list and grid views at the reference window

@@ -610,6 +610,8 @@ impl Marcel {
         let menu = self.bookmark_menu?;
         self.bookmarks.get(menu.index)?;
         let colors = cx.theme().colors;
+        // Popovers and `accent` share the raised surface in Marcel palettes.
+        // The active-list tint stays visible over that surface on every theme.
         let radius = cx.theme().radius;
         let window_size = window.bounds().size;
         let left = f32::from(menu.position.x)
@@ -648,7 +650,7 @@ impl Marcel {
                         .px_3()
                         .rounded(radius)
                         .cursor_pointer()
-                        .hover(|this| this.bg(colors.accent))
+                        .hover(|this| this.bg(colors.list_active))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.remove_bookmark(index, window, cx);
                         }))
@@ -3459,6 +3461,8 @@ impl Marcel {
     fn render_entry_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.entry_menu?;
         let colors = cx.theme().colors;
+        // Popovers and `accent` share the raised surface in Marcel palettes.
+        // Use the translucent primary tint for an unambiguous menu hover.
         let radius = cx.theme().radius;
         let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection);
         let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll);
@@ -3553,7 +3557,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(new_folder_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
@@ -3584,7 +3588,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(paste_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
@@ -3614,7 +3618,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(undo_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
@@ -3644,7 +3648,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(redo_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
@@ -3675,7 +3679,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(select_all_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
@@ -3704,7 +3708,7 @@ impl Marcel {
                             .px_3()
                             .rounded(radius)
                             .cursor_pointer()
-                            .hover(|this| this.bg(colors.accent))
+                            .hover(|this| this.bg(colors.list_active))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_directory_load(false, cx);
                             }))
@@ -3718,7 +3722,7 @@ impl Marcel {
                             .px_3()
                             .rounded(radius)
                             .cursor_pointer()
-                            .hover(|this| this.bg(colors.accent))
+                            .hover(|this| this.bg(colors.list_active))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.entry_menu = None;
                                 this.set_show_hidden(!this.directory.show_hidden, cx);
@@ -3736,7 +3740,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(open_terminal_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
@@ -3758,7 +3762,7 @@ impl Marcel {
                             .px_3()
                             .rounded(radius)
                             .cursor_pointer()
-                            .hover(|this| this.bg(colors.accent))
+                            .hover(|this| this.bg(colors.list_active))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     this.directory.current_dir.display().to_string(),
@@ -3777,7 +3781,7 @@ impl Marcel {
                                 .rounded(radius)
                                 .when(empty_trash_enabled, |this| {
                                     this.cursor_pointer()
-                                        .hover(|this| this.bg(colors.accent))
+                                        .hover(|this| this.bg(colors.list_active))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.entry_menu = None;
                                             this.execute_browser_command(
@@ -3822,7 +3826,7 @@ impl Marcel {
                         .px_3()
                         .rounded(radius)
                         .cursor_pointer()
-                        .hover(|this| this.bg(colors.accent))
+                        .hover(|this| this.bg(colors.list_active))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.entry_menu = None;
                             this.execute_browser_command(
@@ -3848,7 +3852,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(open_with_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(
@@ -3872,7 +3876,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(cut_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.execute_browser_command(
                                         BrowserCommand::CutSelection,
@@ -3901,7 +3905,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(copy_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.execute_browser_command(
                                         BrowserCommand::CopySelection,
@@ -3930,7 +3934,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(paste_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(
@@ -3962,7 +3966,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(rename_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(
@@ -3993,7 +3997,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(trash_menu_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(trash_menu_command, window, cx);
@@ -4025,7 +4029,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(permanent_delete_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(
@@ -4057,7 +4061,7 @@ impl Marcel {
                         .rounded(radius)
                         .when(compress_enabled, |this| {
                             this.cursor_pointer()
-                                .hover(|this| this.bg(colors.accent))
+                                .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(
@@ -4081,7 +4085,7 @@ impl Marcel {
                             .rounded(radius)
                             .when(extract_enabled, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(colors.accent))
+                                    .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
                                         this.execute_browser_command(
