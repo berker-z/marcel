@@ -74,6 +74,32 @@ item here belongs in that sprint.
 - Add recursive filename and content search without blocking navigation.
 - Support removable volumes, mounts, and common remote locations.
 
+## Bookmarks and drag interactions
+
+- Add a persistent Bookmarks section directly below Places, separated visually
+  from the automatically discovered XDG locations.
+- Allow dragging a folder from the browser into the Bookmarks section to create
+  a bookmark without moving or modifying the folder itself.
+- Add a bookmark context menu with Remove Bookmark. Removing a bookmark must
+  never delete, trash, or otherwise mutate its target directory.
+- Allow pointer reordering within Bookmarks, with an unambiguous insertion
+  indicator and persisted order.
+- Support dragging a bookmark out of the section as another discoverable way to
+  remove it, while requiring a safe threshold so ordinary navigation clicks
+  cannot remove bookmarks accidentally.
+- Define one reusable Marcel drag-session model covering payload identity,
+  allowed actions, drop-target negotiation, insertion indicators, cancellation,
+  edge scrolling, and keyboard/accessibility alternatives.
+- Use bookmark creation and reordering as the first non-filesystem proving
+  ground for that drag infrastructure before enabling drag-to-copy or
+  drag-to-move.
+- Later, allow selected filesystem items to be dropped onto bookmark and Places
+  destinations using the same safe file-operation scheduler, conflict UI,
+  progress reporting, and undo journal as keyboard/menu moves.
+- Clearly distinguish reordering a bookmark, bookmarking a folder, and moving
+  filesystem contents; the cursor and drop indicator must expose which action
+  will occur before release.
+
 ## Preview quality
 
 - [x] Add a lightweight preview for a selected folder's immediate children.
