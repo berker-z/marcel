@@ -4,7 +4,7 @@ use std::{
     io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -76,6 +76,67 @@ pub struct TransferOutcome {
     pub operation: Option<OperationRecord>,
     pub completed: Vec<PathBuf>,
     pub failures: Vec<TransferFailure>,
+}
+
+#[derive(Debug, Default)]
+pub struct TransferProgress {
+    preparing: AtomicBool,
+    total_items: AtomicU64,
+    completed_items: AtomicU64,
+    total_bytes: AtomicU64,
+    completed_bytes: AtomicU64,
+    current_path: Mutex<Option<PathBuf>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferProgressSnapshot {
+    pub preparing: bool,
+    pub total_items: u64,
+    pub completed_items: u64,
+    pub total_bytes: u64,
+    pub completed_bytes: u64,
+    pub current_path: Option<PathBuf>,
+}
+
+impl TransferProgress {
+    pub fn snapshot(&self) -> TransferProgressSnapshot {
+        TransferProgressSnapshot {
+            preparing: self.preparing.load(Ordering::Relaxed),
+            total_items: self.total_items.load(Ordering::Relaxed),
+            completed_items: self.completed_items.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes.load(Ordering::Relaxed),
+            completed_bytes: self.completed_bytes.load(Ordering::Relaxed),
+            current_path: self
+                .current_path
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        }
+    }
+
+    fn set_preparing(&self, preparing: bool) {
+        self.preparing.store(preparing, Ordering::Relaxed);
+    }
+
+    fn add_total(&self, items: u64, bytes: u64) {
+        self.total_items.fetch_add(items, Ordering::Relaxed);
+        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn set_current_path(&self, path: Option<PathBuf>) {
+        *self
+            .current_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+    }
+
+    fn complete_item(&self) {
+        self.completed_items.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn complete_bytes(&self, bytes: u64) {
+        self.completed_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
 }
 
 impl OperationRecord {
@@ -328,6 +389,26 @@ pub fn transfer_paths(
     mode: TransferMode,
     cancelled: Arc<AtomicBool>,
 ) -> TransferOutcome {
+    transfer_paths_impl(sources, destination, mode, cancelled, None)
+}
+
+pub fn transfer_paths_with_progress(
+    sources: &[PathBuf],
+    destination: &Path,
+    mode: TransferMode,
+    cancelled: Arc<AtomicBool>,
+    progress: Arc<TransferProgress>,
+) -> TransferOutcome {
+    transfer_paths_impl(sources, destination, mode, cancelled, Some(progress))
+}
+
+fn transfer_paths_impl(
+    sources: &[PathBuf],
+    destination: &Path,
+    mode: TransferMode,
+    cancelled: Arc<AtomicBool>,
+    progress: Option<Arc<TransferProgress>>,
+) -> TransferOutcome {
     // Conceptually follows Yazi's per-item scheduled transfer outcomes,
     // cooperative cancellation, partial-success accounting, and rename-first
     // move path. No Yazi code is copied:
@@ -338,6 +419,22 @@ pub fn transfer_paths(
     let mut copied_sources = Vec::new();
     let mut copied_created = Vec::new();
     let mut moved = Vec::new();
+
+    if let Some(progress) = &progress {
+        progress.set_preparing(true);
+        match mode {
+            TransferMode::Copy => {
+                for source in sources {
+                    measure_entry(source, &cancelled, progress);
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+            }
+            TransferMode::Move => progress.add_total(sources.len() as u64, 0),
+        }
+        progress.set_preparing(false);
+    }
 
     for source in sources {
         if cancelled.load(Ordering::Acquire) {
@@ -356,12 +453,22 @@ pub fn transfer_paths(
             continue;
         };
         let target = destination.join(name);
+        if let Some(progress) = &progress {
+            progress.set_current_path(Some(source.clone()));
+        }
         let result = match mode {
-            TransferMode::Copy => copy_one(source, &target, &cancelled).map(|(source, created)| {
-                copied_sources.extend(source);
-                copied_created.extend(created);
+            TransferMode::Copy => copy_one(source, &target, &cancelled, progress.as_deref()).map(
+                |(source, created)| {
+                    copied_sources.extend(source);
+                    copied_created.extend(created);
+                },
+            ),
+            TransferMode::Move => move_one(source, &target).map(|record| {
+                moved.push(record);
+                if let Some(progress) = &progress {
+                    progress.complete_item();
+                }
             }),
-            TransferMode::Move => move_one(source, &target).map(|record| moved.push(record)),
         };
 
         match result {
@@ -383,10 +490,38 @@ pub fn transfer_paths(
         _ => None,
     };
 
+    if let Some(progress) = &progress {
+        progress.set_current_path(None);
+    }
     TransferOutcome {
         operation,
         completed,
         failures,
+    }
+}
+
+fn measure_entry(path: &Path, cancelled: &AtomicBool, progress: &TransferProgress) {
+    if cancelled.load(Ordering::Acquire) {
+        return;
+    }
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    let kind = metadata.file_type();
+    progress.add_total(1, if kind.is_file() { metadata.len() } else { 0 });
+    if !kind.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(entry) = entry {
+            measure_entry(&entry.path(), cancelled, progress);
+        }
     }
 }
 
@@ -406,6 +541,7 @@ fn copy_one(
     source: &Path,
     destination: &Path,
     cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
 ) -> Result<(Vec<PathSnapshot>, Vec<PathSnapshot>)> {
     ensure_unoccupied(destination)?;
     if source.is_dir() && destination.starts_with(source) {
@@ -416,7 +552,7 @@ fn copy_one(
     }
     let source_state = snapshot_tree(source)?;
     let staging = staging_path(destination)?;
-    if let Err(error) = copy_entry(source, &staging, cancelled) {
+    if let Err(error) = copy_entry(source, &staging, cancelled, progress) {
         cleanup_staging(&staging);
         return Err(error);
     }
@@ -433,13 +569,21 @@ fn copy_one(
     Ok((source_state, created_state))
 }
 
-fn copy_entry(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<()> {
+fn copy_entry(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
     if cancelled.load(Ordering::Acquire) {
         bail!("Operation cancelled");
     }
     let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("Could not inspect “{}”", source.display()))?;
     let kind = metadata.file_type();
+    if let Some(progress) = progress {
+        progress.set_current_path(Some(source.to_path_buf()));
+    }
 
     if kind.is_dir() {
         fs::create_dir(destination)
@@ -453,6 +597,7 @@ fn copy_entry(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Resu
                 &entry.path(),
                 &destination.join(entry.file_name()),
                 cancelled,
+                progress,
             )?;
         }
         fs::set_permissions(destination, metadata.permissions()).with_context(|| {
@@ -461,19 +606,28 @@ fn copy_entry(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Resu
                 destination.display()
             )
         })?;
+        if let Some(progress) = progress {
+            progress.complete_item();
+        }
     } else if kind.is_file() {
-        copy_file_cancellable(source, destination, cancelled)?;
+        copy_file_cancellable(source, destination, cancelled, progress)?;
         fs::set_permissions(destination, metadata.permissions()).with_context(|| {
             format!(
                 "Could not preserve permissions on “{}”",
                 destination.display()
             )
         })?;
+        if let Some(progress) = progress {
+            progress.complete_item();
+        }
     } else if kind.is_symlink() {
         let target = fs::read_link(source)
             .with_context(|| format!("Could not read link “{}”", source.display()))?;
         std::os::unix::fs::symlink(target, destination)
             .with_context(|| format!("Could not copy link “{}”", source.display()))?;
+        if let Some(progress) = progress {
+            progress.complete_item();
+        }
     } else {
         bail!(
             "Special files are not supported yet: “{}”",
@@ -483,7 +637,12 @@ fn copy_entry(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Resu
     Ok(())
 }
 
-fn copy_file_cancellable(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<()> {
+fn copy_file_cancellable(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
     let mut input =
         fs::File::open(source).with_context(|| format!("Could not open “{}”", source.display()))?;
     let mut output = fs::OpenOptions::new()
@@ -505,6 +664,9 @@ fn copy_file_cancellable(source: &Path, destination: &Path, cancelled: &AtomicBo
         output
             .write_all(&buffer[..read])
             .with_context(|| format!("Could not write “{}”", destination.display()))?;
+        if let Some(progress) = progress {
+            progress.complete_bytes(read as u64);
+        }
     }
     output
         .sync_all()
@@ -909,5 +1071,36 @@ mod tests {
         let outcome = transfer_paths(&[source], &destination, TransferMode::Copy, cancelled);
         assert!(outcome.operation.is_none());
         assert!(!destination.join("source.txt").exists());
+    }
+
+    #[test]
+    fn copy_reports_item_and_byte_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let destination = root.path().join("destination");
+        fs::write(&source, b"marcel").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let progress = Arc::new(TransferProgress::default());
+
+        let outcome = transfer_paths_with_progress(
+            &[source],
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            progress.clone(),
+        );
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(
+            progress.snapshot(),
+            TransferProgressSnapshot {
+                preparing: false,
+                total_items: 1,
+                completed_items: 1,
+                total_bytes: 6,
+                completed_bytes: 6,
+                current_path: None,
+            }
+        );
     }
 }

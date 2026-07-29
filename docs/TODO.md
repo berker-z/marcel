@@ -65,9 +65,12 @@ item here belongs in that sprint.
   [`Sprint 3`](sprints/003-safe-file-operations.md).
 - Create folders and files.
 - Rename files with a pointer-friendly inline interaction.
-- Finish desktop clipboard interoperability, cross-filesystem cut/paste,
-  progress UI, and queued transfers; then add duplicate, move-to, trash,
-  restore, and permanent deletion.
+- Finish desktop clipboard interoperability and queued transfers; then add
+  duplicate, move-to, trash, restore, and permanent deletion. Cross-filesystem
+  cut/paste and interactive conflict decisions are explicitly parked until
+  their safety and UX work is scheduled.
+- [x] Add a non-overlapping bottom-right progress/cancellation card for active
+  copy and move operations, with item/byte accounting.
 - Add ZIP archive creation and extraction through the shared background
   operation scheduler, with progress, cancellation, conflict handling, and
   protection against unsafe archive paths.
@@ -78,8 +81,8 @@ item here belongs in that sprint.
   tests and user-facing wording.
 - Add bounded in-memory undo and redo for every reversible file operation,
   including precise records for partially successful multi-file operations.
-- Show progress, cancellation, conflicts, and recoverable errors for file
-  operations.
+- Extend progress/cancellation beyond copy and move as more long-running
+  operation types land; add conflict decisions when that parked work resumes.
 - Watch directories and apply incremental filesystem changes without full
   reloads.
 - [x] Add instantaneous fuzzy filtering for the current directory with
@@ -102,8 +105,10 @@ item here belongs in that sprint.
   cannot remove bookmarks accidentally.
 - [x] Define the first reusable Marcel drag-session payload covering selection
   identity, bookmark candidates, typed drop targets, insertion indicators, and
-  cancellation through GPUI's active-drag lifecycle. Extend it with explicit
-  action negotiation, edge scrolling, and keyboard/accessibility alternatives.
+  cancellation through GPUI's active-drag lifecycle.
+- [x] Reuse the marquee edge-scroll acceleration and bounds for file drags in
+  both list and icon views. Extend drag sessions later with explicit action
+  negotiation and keyboard/accessibility alternatives.
 - [x] Use bookmark creation and reordering as the first non-filesystem proving
   ground for the shared drag payload and typed drop-target infrastructure.
 - [x] Allow selected filesystem items to be dropped onto browser folders,
@@ -171,6 +176,9 @@ item here belongs in that sprint.
 
 ## Engineering and release quality
 
+- Use [`external-review.md`](external-review.md) as design input for the
+  refactor-first watcher roadmap and copy-semantics work; it is not itself an
+  implementation specification.
 - Add repeatable large-directory and rapid-selection benchmarks.
 - Add representative preview fixtures without introducing unclear licensing.
 - Add crash recovery and structured diagnostics.

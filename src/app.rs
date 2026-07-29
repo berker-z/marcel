@@ -18,10 +18,12 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable, Root, Sizable, Theme, WindowExt,
+    button::{Button, ButtonVariants},
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
     notification::Notification,
+    progress::Progress,
     resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
     switch::Switch,
@@ -43,8 +45,8 @@ use crate::{
         SelectFirst, SelectLast, SelectPageDown, SelectPageUp, UndoFileOperation,
     },
     file_ops::{
-        OperationJournal, TransferMode, create_directory, redo_operation, summarize_failures,
-        transfer_paths, undo_operation, validate_entry_name,
+        OperationJournal, TransferMode, TransferProgress, create_directory, redo_operation,
+        summarize_failures, transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, FileEntry, format_size, merge_sorted_entries, stream_directory,
@@ -78,9 +80,9 @@ const MAX_PLACES_WIDTH: f32 = 320.0;
 const PREVIEW_TEXT_CHROME_WIDTH: f32 = 92.0;
 const PREVIEW_WRAP_DEBOUNCE: Duration = Duration::from_millis(80);
 const MARQUEE_THRESHOLD: f32 = 4.0;
-const MARQUEE_EDGE_ZONE: f32 = 36.0;
-const MARQUEE_MAX_SCROLL_STEP: f32 = 18.0;
-const MARQUEE_SCROLL_INTERVAL: Duration = Duration::from_millis(16);
+const POINTER_EDGE_SCROLL_ZONE: f32 = 36.0;
+const POINTER_EDGE_MAX_SCROLL_STEP: f32 = 18.0;
+const POINTER_EDGE_SCROLL_INTERVAL: Duration = Duration::from_millis(16);
 const ENTRY_MENU_WIDTH: f32 = 208.0;
 const ENTRY_MENU_HEIGHT: f32 = 430.0;
 const DIRECTORY_MENU_HEIGHT: f32 = 342.0;
@@ -150,8 +152,8 @@ struct FileClipboard {
 
 #[derive(Clone, Debug)]
 struct FileDrag {
-    paths: Vec<PathBuf>,
-    bookmark_candidates: Vec<PathBuf>,
+    paths: Arc<[PathBuf]>,
+    bookmark_candidates: Arc<[PathBuf]>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +176,13 @@ struct BookmarkMenu {
 struct DragPreview {
     label: String,
     detail: &'static str,
+}
+
+struct ActiveTransferProgress {
+    mode: TransferMode,
+    source_count: usize,
+    destination: PathBuf,
+    progress: Arc<TransferProgress>,
 }
 
 impl Render for DragPreview {
@@ -237,11 +246,15 @@ pub struct Marcel {
     operation_busy: bool,
     operation_cancel: Option<Arc<AtomicBool>>,
     operation_task: Option<Task<()>>,
+    operation_progress: Option<ActiveTransferProgress>,
+    operation_progress_task: Option<Task<()>>,
     select_after_directory_load: Option<PathBuf>,
     selection: SelectionModel,
     entry_menu: Option<EntryMenu>,
     marquee: Option<MarqueeGesture>,
     marquee_scroll_task: Option<Task<()>>,
+    file_drag_pointer: Option<Point<Pixels>>,
+    file_drag_scroll_task: Option<Task<()>>,
     browser_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     entry_hit_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
     entry_content_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
@@ -353,11 +366,15 @@ impl Marcel {
             operation_busy: false,
             operation_cancel: None,
             operation_task: None,
+            operation_progress: None,
+            operation_progress_task: None,
             select_after_directory_load: None,
             selection: SelectionModel::default(),
             entry_menu: None,
             marquee: None,
             marquee_scroll_task: None,
+            file_drag_pointer: None,
+            file_drag_scroll_task: None,
             browser_bounds: Rc::new(Cell::new(None)),
             entry_hit_bounds: Rc::new(RefCell::new(HashMap::new())),
             entry_content_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -634,29 +651,157 @@ impl Marcel {
         )
     }
 
-    fn file_drag_for(&self, path: &Path) -> FileDrag {
-        let paths = if self.selection.is_selected(path) {
-            let selected = self.selection.selected();
-            self.visible_paths()
-                .into_iter()
-                .filter(|candidate| selected.contains(candidate))
-                .collect::<Vec<_>>()
+    fn render_operation_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let active = self.operation_progress.as_ref()?;
+        let snapshot = active.progress.snapshot();
+        let cancelling = self
+            .operation_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire));
+        let colors = cx.theme().colors;
+        let title = if cancelling {
+            "Cancelling…"
         } else {
-            vec![path.to_path_buf()]
+            match active.mode {
+                TransferMode::Copy => "Copying",
+                TransferMode::Move => "Moving",
+            }
         };
-        let bookmark_candidates = paths
-            .iter()
-            .filter(|candidate| {
-                self.entries
-                    .iter()
-                    .find(|entry| &entry.path == *candidate)
-                    .is_some_and(|entry| entry.navigable)
-            })
-            .cloned()
-            .collect();
+        let percentage = if snapshot.total_bytes > 0 {
+            snapshot.completed_bytes as f32 / snapshot.total_bytes as f32 * 100.0
+        } else if snapshot.total_items > 0 {
+            snapshot.completed_items as f32 / snapshot.total_items as f32 * 100.0
+        } else {
+            0.0
+        };
+        let progress_text = if snapshot.preparing {
+            format!(
+                "Preparing {} item(s)",
+                snapshot.total_items.max(active.source_count as u64)
+            )
+        } else if snapshot.total_bytes > 0 {
+            format!(
+                "{} of {} items · {} of {}",
+                snapshot.completed_items,
+                snapshot.total_items,
+                format_size(Some(snapshot.completed_bytes)),
+                format_size(Some(snapshot.total_bytes))
+            )
+        } else {
+            format!(
+                "{} of {} items",
+                snapshot.completed_items, snapshot.total_items
+            )
+        };
+        let current_name = snapshot.current_path.as_ref().map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        });
+        let destination = format!("to {}", active.destination.display());
+        let view = cx.entity();
+        let cancel_button = Button::new("cancel-active-transfer")
+            .small()
+            .danger()
+            .label(if cancelling { "Cancelling" } else { "Cancel" })
+            .disabled(cancelling)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |this, cx| this.cancel_active_operation(cx));
+            });
+
+        Some(
+            div()
+                .w_80()
+                .max_w_full()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.popover)
+                .text_color(colors.popover_foreground)
+                .occlude()
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().text_sm().child(title))
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .text_xs()
+                                        .text_color(colors.muted_foreground)
+                                        .child(destination),
+                                ),
+                        )
+                        .child(cancel_button),
+                )
+                .child(Progress::new().h_1().value(percentage))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(colors.muted_foreground)
+                        .child(div().flex_none().child(progress_text))
+                        .when_some(current_name, |this, name| {
+                            this.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_right()
+                                    .child(name),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn selected_file_drag(&self) -> Option<FileDrag> {
+        let selected = self.selection.selected();
+        if selected.is_empty() {
+            return None;
+        }
+        let mut paths = Vec::with_capacity(selected.len());
+        let mut bookmark_candidates = Vec::new();
+        for index in &self.visible_entries {
+            let Some(entry) = self.entries.get(*index) else {
+                continue;
+            };
+            if selected.contains(&entry.path) {
+                paths.push(entry.path.clone());
+                if entry.navigable {
+                    bookmark_candidates.push(entry.path.clone());
+                }
+            }
+        }
+        Some(FileDrag {
+            paths: paths.into(),
+            bookmark_candidates: bookmark_candidates.into(),
+        })
+    }
+
+    fn single_file_drag(path: &Path, navigable: bool) -> FileDrag {
+        let bookmark_candidates = if navigable {
+            vec![path.to_path_buf()]
+        } else {
+            Vec::new()
+        };
         FileDrag {
-            paths,
-            bookmark_candidates,
+            paths: vec![path.to_path_buf()].into(),
+            bookmark_candidates: bookmark_candidates.into(),
         }
     }
 
@@ -689,13 +834,17 @@ impl Marcel {
     }
 
     fn update_file_drag_cursor(
-        &self,
+        &mut self,
         event: &DragMoveEvent<FileDrag>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let drag = event.drag(cx).clone();
         let pointer = event.event.position;
+        self.file_drag_pointer = Some(pointer);
+        if self.file_drag_scroll_task.is_none() {
+            self.start_file_drag_autoscroll(cx);
+        }
         let can_move_to =
             |path: &Path| !self.operation_busy && can_move_files_to(&drag.paths, path);
 
@@ -1300,6 +1449,33 @@ impl Marcel {
         self.start_transfer(paths, destination, TransferMode::Move, None, window, cx);
     }
 
+    fn start_operation_progress_refresh(&mut self, cx: &mut Context<Self>) {
+        self.operation_progress_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(80)).await;
+                let keep_running = this
+                    .update(cx, |this, cx| {
+                        let keep_running = this.operation_progress.is_some();
+                        if keep_running {
+                            cx.notify();
+                        }
+                        keep_running
+                    })
+                    .unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn cancel_active_operation(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = &self.operation_cancel {
+            cancel.store(true, Ordering::Release);
+            cx.notify();
+        }
+    }
+
     fn start_transfer(
         &mut self,
         sources: Vec<PathBuf>,
@@ -1316,8 +1492,16 @@ impl Marcel {
         self.operation_busy = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.operation_cancel = Some(cancel.clone());
+        let progress = Arc::new(TransferProgress::default());
+        self.operation_progress = Some(ActiveTransferProgress {
+            mode,
+            source_count: sources.len(),
+            destination: destination.clone(),
+            progress: progress.clone(),
+        });
+        self.start_operation_progress_refresh(cx);
         let task = cx.background_executor().spawn(smol::unblock(move || {
-            transfer_paths(&sources, &destination, mode, cancel)
+            transfer_paths_with_progress(&sources, &destination, mode, cancel, progress)
         }));
 
         self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
@@ -1325,6 +1509,8 @@ impl Marcel {
             let _ = this.update_in(window, |this, window, cx| {
                 this.operation_busy = false;
                 this.operation_cancel = None;
+                this.operation_progress = None;
+                this.operation_progress_task.take();
                 if let Some(operation) = outcome.operation {
                     this.operation_journal.record(operation);
                 }
@@ -2762,7 +2948,7 @@ impl Marcel {
         self.marquee_scroll_task.take();
         self.marquee_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(MARQUEE_SCROLL_INTERVAL).await;
+                Timer::after(POINTER_EDGE_SCROLL_INTERVAL).await;
                 let keep_running = this
                     .update(cx, |this, cx| this.tick_marquee_autoscroll(cx))
                     .unwrap_or(false);
@@ -2799,6 +2985,51 @@ impl Marcel {
 
         handle.set_offset(offset);
         self.apply_marquee_selection(false, cx);
+        true
+    }
+
+    fn start_file_drag_autoscroll(&mut self, cx: &mut Context<Self>) {
+        self.file_drag_scroll_task.take();
+        self.file_drag_scroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(POINTER_EDGE_SCROLL_INTERVAL).await;
+                let keep_running = this
+                    .update(cx, |this, cx| this.tick_file_drag_autoscroll(cx))
+                    .unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn tick_file_drag_autoscroll(&mut self, cx: &mut Context<Self>) -> bool {
+        if !cx.has_active_drag() {
+            self.file_drag_pointer = None;
+            return false;
+        }
+        let Some(bounds) = self.browser_bounds.get() else {
+            return false;
+        };
+        let Some(pointer) = self.file_drag_pointer else {
+            return false;
+        };
+        if pointer.x < bounds.left() || pointer.x > bounds.right() {
+            return true;
+        }
+
+        let delta = edge_scroll_delta(pointer.y, bounds);
+        if delta == px(0.0) {
+            return true;
+        }
+
+        let handle = self.directory_scroll.0.borrow().base_handle.clone();
+        let mut offset = handle.offset();
+        let old_offset = offset;
+        offset.y = (offset.y + delta).clamp(-handle.max_offset().height, px(0.0));
+        if offset != old_offset {
+            handle.set_offset(offset);
+        }
         true
     }
 
@@ -3165,7 +3396,7 @@ impl Marcel {
                     .border_color(colors.primary)
             })
             .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
-                this.start_drag_move(drag.paths.clone(), drop_path.clone(), window, cx);
+                this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
             }))
             .child(icon)
             .child(div().flex_none().text_sm().child(place.label))
@@ -3270,7 +3501,7 @@ impl Marcel {
                             .border_color(colors.primary)
                     })
                     .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
-                        this.start_drag_move(drag.paths.clone(), drop_path.clone(), window, cx);
+                        this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
                     }))
                     .on_drag(drag, |drag, _, _, cx| {
                         let label = drag
@@ -3327,6 +3558,14 @@ impl Marcel {
     fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
+        // A marquee originates on empty browser space, so no entry drag can
+        // begin until that gesture ends. Avoid rebuilding a potentially huge
+        // selected-file payload on every marquee repaint.
+        let selected_drag = self
+            .marquee
+            .is_none()
+            .then(|| self.selected_file_drag())
+            .flatten();
         uniform_list(
             "directory-entries",
             self.visible_entries.len(),
@@ -3341,8 +3580,14 @@ impl Marcel {
                         let drop_path = path.clone();
                         let can_drop_path = path.clone();
                         let selected = this.selection.is_selected(&path);
-                        let drag = this.file_drag_for(&path);
                         let navigable = entry.navigable;
+                        let drag = if selected {
+                            selected_drag
+                                .clone()
+                                .unwrap_or_else(|| Self::single_file_drag(&path, navigable))
+                        } else {
+                            Self::single_file_drag(&path, navigable)
+                        };
                         let operation_busy = this.operation_busy;
                         let entry_hit_bounds = this.entry_hit_bounds.clone();
                         let entry_content_bounds = this.entry_content_bounds.clone();
@@ -3412,7 +3657,7 @@ impl Marcel {
                                 .on_drop(cx.listener(
                                     move |this, drag: &FileDrag, window, cx| {
                                         this.start_drag_move(
-                                            drag.paths.clone(),
+                                            drag.paths.to_vec(),
                                             drop_path.clone(),
                                             window,
                                             cx,
@@ -3493,6 +3738,13 @@ impl Marcel {
     fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
+        // See the list-view note: marquee repaints do not need file-drag
+        // payloads, especially when the rectangle spans thousands of items.
+        let selected_drag = self
+            .marquee
+            .is_none()
+            .then(|| self.selected_file_drag())
+            .flatten();
         let columns = self.grid_columns();
         if columns != self.grid_layout_columns {
             self.grid_layout_columns = columns;
@@ -3527,8 +3779,14 @@ impl Marcel {
                             let drop_path = path.clone();
                             let can_drop_path = path.clone();
                             let selected = this.selection.is_selected(&path);
-                            let drag = this.file_drag_for(&path);
                             let navigable = entry.navigable;
+                            let drag = if selected {
+                                selected_drag
+                                    .clone()
+                                    .unwrap_or_else(|| Self::single_file_drag(&path, navigable))
+                            } else {
+                                Self::single_file_drag(&path, navigable)
+                            };
                             let operation_busy = this.operation_busy;
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
                             let entry_hit_bounds = this.entry_hit_bounds.clone();
@@ -3643,7 +3901,7 @@ impl Marcel {
                                             cx.listener(
                                                 move |this, drag: &FileDrag, window, cx| {
                                                     this.start_drag_move(
-                                                        drag.paths.clone(),
+                                                        drag.paths.to_vec(),
                                                         drop_path.clone(),
                                                         window,
                                                         cx,
@@ -4177,6 +4435,8 @@ impl Render for Marcel {
         self.bookmark_row_bounds.borrow_mut().clear();
         if !cx.has_active_drag() {
             self.bookmark_insertion = None;
+            self.file_drag_pointer = None;
+            self.file_drag_scroll_task.take();
         }
         let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
         let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
@@ -4802,7 +5062,8 @@ impl Render for Marcel {
         // stack until the component supports configurable placement.
         let notifications = Root::read(window, cx).notification.read(cx).notifications();
         let visible_from = notifications.len().saturating_sub(10);
-        let notification_layer = (!notifications.is_empty()).then(|| {
+        let operation_progress = self.render_operation_progress(cx);
+        let status_layer = (operation_progress.is_some() || !notifications.is_empty()).then(|| {
             div()
                 .absolute()
                 .right_4()
@@ -4810,6 +5071,7 @@ impl Render for Marcel {
                 .flex()
                 .flex_col()
                 .gap_3()
+                .when_some(operation_progress, |this, progress| this.child(progress))
                 .children(notifications.into_iter().skip(visible_from))
         });
         div()
@@ -4855,7 +5117,7 @@ impl Render for Marcel {
             .when_some(entry_menu, |this, menu| this.child(menu))
             .when_some(bookmark_menu, |this, menu| this.child(menu))
             .when_some(dialog_layer, |this, layer| this.child(layer))
-            .when_some(notification_layer, |this, layer| this.child(layer))
+            .when_some(status_layer, |this, layer| this.child(layer))
     }
 }
 
@@ -5116,15 +5378,16 @@ fn marquee_bounds(a: Point<Pixels>, b: Point<Pixels>) -> Bounds<Pixels> {
 }
 
 fn edge_scroll_delta(pointer_y: Pixels, viewport: Bounds<Pixels>) -> Pixels {
-    let zone = px(MARQUEE_EDGE_ZONE);
+    let zone = px(POINTER_EDGE_SCROLL_ZONE);
     if pointer_y < viewport.top() + zone {
-        let proximity =
-            (f32::from(viewport.top() + zone - pointer_y) / MARQUEE_EDGE_ZONE).clamp(0.0, 1.0);
-        px(MARQUEE_MAX_SCROLL_STEP * proximity)
+        let proximity = (f32::from(viewport.top() + zone - pointer_y) / POINTER_EDGE_SCROLL_ZONE)
+            .clamp(0.0, 1.0);
+        px(POINTER_EDGE_MAX_SCROLL_STEP * proximity)
     } else if pointer_y > viewport.bottom() - zone {
-        let proximity =
-            (f32::from(pointer_y - (viewport.bottom() - zone)) / MARQUEE_EDGE_ZONE).clamp(0.0, 1.0);
-        px(-MARQUEE_MAX_SCROLL_STEP * proximity)
+        let proximity = (f32::from(pointer_y - (viewport.bottom() - zone))
+            / POINTER_EDGE_SCROLL_ZONE)
+            .clamp(0.0, 1.0);
+        px(-POINTER_EDGE_MAX_SCROLL_STEP * proximity)
     } else {
         px(0.0)
     }

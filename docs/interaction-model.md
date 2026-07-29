@@ -90,6 +90,13 @@ links. Cut/paste currently supports same-filesystem moves; a cross-filesystem
 move reports an error until verified copy-then-remove is implemented. Escape
 requests cancellation of an active transfer.
 
+An active copy or move owns a persistent card in the bottom-right status
+stack. It shows preparation, current item, item/byte progress where available,
+and an explicit Cancel action. Toast notifications occupy the same vertical
+stack, so completion and error messages cannot visually overlap progress.
+Cross-filesystem moves and interactive destination-conflict decisions are
+deliberately parked; no-overwrite failure remains the safe behavior.
+
 ## Internal drag and bookmarks
 
 Dragging a browser item starts an internal filesystem payload. If the item is
@@ -114,9 +121,11 @@ Bookmarks are persistent user shortcuts below Places:
 
 The invalid-drop cursor appears only where the payload cannot be accepted.
 Valid move targets use the move cursor, while the Bookmarks section uses the
-link cursor when it would create shortcuts. Copy/link modifiers, hover-open,
-drag edge scrolling, and native desktop drag-and-drop are future extensions of
-the same payload/drop negotiation model.
+link cursor when it would create shortcuts. While marquee-selecting or dragging
+files within the directory browser, entering the shared top or bottom edge zone
+scrolls with proximity-based acceleration; ordinary hovering never scrolls.
+Copy/link modifiers, hover-open, and native desktop drag-and-drop are future
+extensions of the same payload/drop negotiation model.
 
 ## Context-menu selection
 

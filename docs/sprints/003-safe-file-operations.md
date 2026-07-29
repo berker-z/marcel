@@ -62,16 +62,27 @@ bounded undo/redo history when it is genuinely reversible.
 - [x] Unit tests cover recursive file/directory/link copies, occupied
   destinations, cancellation, modified-output conflicts, and move/copy
   undo/redo.
+- [x] Active copy and move operations expose a bottom-right progress card with
+  preparation state, current item, item/byte totals, and an explicit Cancel
+  button. The card and transient notifications share one layout stack and
+  cannot overlap.
+- [x] Progress is reported through a shared atomic snapshot: copy preparation
+  measures the source tree off-thread, byte counts advance per bounded copy
+  chunk, and same-filesystem moves advance per top-level item. GPUI polls at a
+  bounded interval rather than receiving an event for every chunk.
 
 ### Deliberate limits of this slice
 
 - The file clipboard is session-local. Desktop `text/uri-list` and
   `x-special/gnome-copied-files` interoperability remains required.
-- Cross-filesystem cut/paste needs a verified copy-then-remove path; Marcel
-  does not silently fall back to a riskier implementation.
-- The engine has a cancellation token and partial-success outcomes, but the
-  persistent progress surface, byte/item progress reporting, queued work, and
-  explicit Cancel control remain follow-up work.
+- Cross-filesystem cut/paste is deliberately parked until a verified
+  copy-then-remove design is scheduled; Marcel does not silently fall back to
+  a riskier implementation.
+- Destination-conflict decisions are deliberately parked. The current
+  no-overwrite failure remains the complete policy until that interaction is
+  designed.
+- Queued work and progress for undo/redo or future operation types remain
+  follow-up work.
 - Successful transfers currently refresh the displayed directory. Filesystem
   watching and Yazi-style incremental list events remain follow-up work.
 
@@ -100,15 +111,23 @@ bounded undo/redo history when it is genuinely reversible.
   `$XDG_CONFIG_HOME/marcel/bookmarks` (falling back to
   `~/.config/marcel/bookmarks`). Writes are serialized and atomically replace
   the settings file.
+- [x] File drags over the directory browser use the same bounded edge zone,
+  proximity acceleration, frame interval, and scroll limits as marquee
+  selection. Ordinary pointer hovering never scrolls.
+- [x] Selected-file drag payloads are built once per normal render and shared
+  by visible selected rows. Active marquee renders skip that payload entirely,
+  preventing repeated full-directory scans in very large folders. Single-row
+  payloads consume the row's existing directory flag directly, so rendering
+  near the end of a large directory does not scan from its beginning.
 
 ### Deliberate drag limits
 
 - Internal filesystem drags currently mean Move. Modifier-selected Copy and
   Link actions need explicit cursor/action negotiation before being enabled.
 - Cross-filesystem moves retain the existing safe failure behavior.
-- Hover-open folders, edge scrolling during file drags, dropping on empty
-  browser space, and native incoming/outgoing desktop drag-and-drop remain
-  follow-up work.
+- Hover-open folders, dropping on empty browser space, scrollable bookmark
+  overflow, and native incoming/outgoing desktop drag-and-drop remain follow-up
+  work.
 
 ## Yazi study notes
 
