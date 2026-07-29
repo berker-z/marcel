@@ -70,6 +70,15 @@ adapted into Marcel itself.
     through its own `DirectoryEvent` reducer and uses GPUI/background-executor
     lifetimes rather than Yazi's Tokio, VFS, and global event infrastructure.
     No Yazi code was copied.
+  - `src/trash_ops.rs` conceptually adapts Yazi's separation of background
+    Trash scheduling from its freedesktop Trash VFS at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286`. The audited sources are
+    `yazi-scheduler/src/file/file.rs`,
+    `yazi-fs/src/trash/freedesktop/trash.rs`, and
+    `yazi-fs/src/trash/freedesktop/trash_info.rs`. Like Yazi, Marcel delegates
+    platform placement to the MIT-licensed `trash` crate. Marcel adds its own
+    exact-entry discovery, identity-validating no-replace restore, operation
+    journal, and stricter missing-parent policy. No Yazi code was copied.
 
 Yazi is a primary architectural influence for asynchronous filesystem work,
 task scheduling, cancellation, previews, and responsiveness. Future direct or
@@ -110,7 +119,15 @@ The Yazi MIT license notice applies to the adaptations identified above:
 - Project: <https://github.com/longbridge/gpui-component>
 - License: Apache-2.0
 - Current adaptations: The application root initialization follows the
-  project's public basic example.
+project's public basic example.
+
+## trash
+
+- Project: <https://github.com/ArturKovacs/trash>
+- License: MIT
+- Use in Marcel: version 5.x implements native freedesktop Trash placement and
+  enumerates valid home and mounted-volume Trash roots. Marcel wraps it behind
+  `src/trash_ops.rs` rather than coupling UI code to the crate.
 
 ## Poppler
 

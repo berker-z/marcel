@@ -68,6 +68,7 @@ fn place_icon_candidates(label: &str) -> &'static [&'static str] {
         "Public" => &["folder-publicshare", "folder-public", "folder"],
         "Templates" => &["folder-templates", "folder"],
         "Videos" => &["folder-videos", "folder-video", "folder"],
+        "Trash" => &["user-trash", "user-trash-full", "folder"],
         _ => &["folder"],
     }
 }
@@ -174,6 +175,10 @@ mod tests {
         assert_eq!(
             place_icon_candidates("Pictures"),
             ["folder-pictures", "folder-images", "folder"]
+        );
+        assert_eq!(
+            place_icon_candidates("Trash"),
+            ["user-trash", "user-trash-full", "folder"]
         );
         assert_eq!(place_icon_candidates("Other"), ["folder"]);
     }

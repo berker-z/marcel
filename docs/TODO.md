@@ -7,8 +7,10 @@ item here belongs in that sprint.
 
 ## Current priorities
 
-- Complete the copy-fidelity fixtures and implementation in
-  [`Sprint 6`](sprints/006-copy-fidelity-and-scale.md), then begin Trash.
+- Complete the manual Trash/restore checks in
+  [`Sprint 7`](sprints/007-trash-and-restore.md). The implementation uses the
+  native freedesktop Trash, identity-validating undo/redo, and an aggregated
+  bottom-most Places entry.
 - Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
   operation-controller and directory-session extractions are complete.
 - Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
@@ -66,6 +68,11 @@ item here belongs in that sprint.
 - [x] Implement the session-local Copy, Cut, and Paste slice behind shared
   commands, no-overwrite transfers, cancellation, and identity-validating
   undo/redo.
+- [x] Implement Move to Trash, identity-validating Undo/Redo, explicit Restore,
+  and an aggregated system Trash entry at the bottom of Places.
+- Generalize filesystem locations into a virtual-location abstraction so
+  trashed directories can be navigated without treating their backing paths as
+  ordinary folders.
 - [ ] Implement New File, Open in Terminal, and directory Properties behind
   their shared commands.
 - [x] Complete the bounded safe-operation foundation and New Folder slice in
@@ -73,7 +80,7 @@ item here belongs in that sprint.
 - Create folders and files.
 - Rename files with a pointer-friendly inline interaction.
 - Finish desktop clipboard interoperability and queued transfers; then add
-  duplicate, move-to, trash, restore, and permanent deletion. Cross-filesystem
+  duplicate, move-to, and permanent deletion. Cross-filesystem
   cut/paste and interactive conflict decisions are explicitly parked until
   their safety and UX work is scheduled.
 - [x] Add a non-overlapping bottom-right progress/cancellation card for active

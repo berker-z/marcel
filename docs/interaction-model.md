@@ -178,11 +178,18 @@ summary for multiple items.
 The context-menu shell exposes the intended item command set. `Open` uses the
 configured MIME default without prompting, while `Open With…` explicitly
 requests the desktop application chooser. Cut, Copy, and Paste are active
-through the shared transfer commands. Remaining planned commands are disabled
-and prefixed with `–`: Duplicate, Rename, Move To, Move to Trash, Delete
-Permanently, Create Link, Compress, Copy Path, and Properties. A planned
-command loses the prefix only when its implementation, enabled-state rules,
-error handling, and any required undo record are ready.
+through the shared transfer commands. Move to Trash is active in ordinary
+filesystem locations; the same row becomes Restore in the system Trash view.
+Remaining planned commands are disabled and prefixed with `–`: Duplicate,
+Rename, Move To, Delete Permanently, Create Link, Compress, Copy Path, and
+Properties. A planned command loses the prefix only when its implementation,
+enabled-state rules, error handling, and any required undo record are ready.
+
+Trash is the bottom-most item in Places and aggregates valid top-level entries
+from the freedesktop home and mounted-volume Trash roots. Trashed directories
+are previewable but nested virtual Trash navigation is not part of the first
+slice. Internal drag is disabled in this view: manipulating a backing path
+directly would orphan its `.trashinfo` record.
 
 ## Current-directory context menu
 

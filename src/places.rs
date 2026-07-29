@@ -19,6 +19,13 @@ const USER_DIRS: [(&str, &str, &str); 8] = [
 pub struct Place {
     pub label: String,
     pub path: PathBuf,
+    pub kind: PlaceKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceKind {
+    Filesystem,
+    Trash,
 }
 
 impl Place {
@@ -26,7 +33,20 @@ impl Place {
         Self {
             label: "Home".to_string(),
             path,
+            kind: PlaceKind::Filesystem,
         }
+    }
+
+    pub fn trash() -> Self {
+        Self {
+            label: "Trash".to_string(),
+            path: PathBuf::from("trash:///"),
+            kind: PlaceKind::Trash,
+        }
+    }
+
+    pub fn is_trash(&self) -> bool {
+        self.kind == PlaceKind::Trash
     }
 }
 
@@ -59,10 +79,12 @@ fn build_places(home: &Path, config: Option<&str>, is_dir: impl Fn(&Path) -> boo
             places.push(Place {
                 label: label.to_string(),
                 path,
+                kind: PlaceKind::Filesystem,
             });
         }
     }
 
+    places.push(Place::trash());
     places
 }
 
@@ -139,11 +161,14 @@ mod tests {
                 Place {
                     label: "Documents".to_string(),
                     path: home.join("Documents"),
+                    kind: PlaceKind::Filesystem,
                 },
                 Place {
                     label: "Pictures".to_string(),
                     path: home.join("Pictures"),
+                    kind: PlaceKind::Filesystem,
                 },
+                Place::trash(),
             ]
         );
     }
@@ -166,15 +191,19 @@ mod tests {
                 Place {
                     label: "Documents".to_string(),
                     path: home.join("Work Notes"),
+                    kind: PlaceKind::Filesystem,
                 },
                 Place {
                     label: "Downloads".to_string(),
                     path: PathBuf::from("/data/downloads"),
+                    kind: PlaceKind::Filesystem,
                 },
                 Place {
                     label: "Pictures".to_string(),
                     path: home.join("Photos"),
+                    kind: PlaceKind::Filesystem,
                 },
+                Place::trash(),
             ]
         );
     }

@@ -20,6 +20,7 @@ png = "0.18"
 rustix = { version = "1", features = ["fs"] }
 smol = "2"
 tempfile = "3"
+trash = "5"
 unicode-width = "0.2"
 url = "2"
 xattr = "1"

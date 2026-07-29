@@ -101,6 +101,11 @@ impl DirectorySession {
     }
 
     pub fn begin_load(&mut self, clear_filter: bool) -> (u64, PathBuf) {
+        let generation = self.begin_virtual_load(clear_filter);
+        (generation, self.current_dir.clone())
+    }
+
+    pub fn begin_virtual_load(&mut self, clear_filter: bool) -> u64 {
         self.stop_watcher();
         self.generation = self.generation.wrapping_add(1);
         self.load_task.take();
@@ -111,7 +116,7 @@ impl DirectorySession {
         }
         self.error = None;
         self.loading = true;
-        (self.generation, self.current_dir.clone())
+        self.generation
     }
 
     pub fn set_watcher(&mut self, cancel: Arc<AtomicBool>, task: Task<()>) {

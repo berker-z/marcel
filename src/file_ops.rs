@@ -12,6 +12,8 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::trash_ops::{TrashRecord, restore_trash_records, retrash_records};
+
 pub const OPERATION_HISTORY_LIMIT: usize = 100;
 pub const COPY_UNDO_SNAPSHOT_LIMIT: usize = 100_000;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -80,6 +82,12 @@ pub enum OperationRecord {
     },
     Move {
         transfers: Vec<MoveRecord>,
+    },
+    Trash {
+        records: Vec<TrashRecord>,
+    },
+    Restore {
+        records: Vec<TrashRecord>,
     },
 }
 
@@ -200,6 +208,10 @@ impl OperationRecord {
             Self::Move { transfers } => transfers
                 .first()
                 .map(|transfer| transfer.destination.as_path())
+                .unwrap_or_else(|| Path::new("")),
+            Self::Trash { records } | Self::Restore { records } => records
+                .first()
+                .map(TrashRecord::original_path)
                 .unwrap_or_else(|| Path::new("")),
         }
     }
@@ -349,6 +361,12 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
             undone.reverse();
             Ok(OperationRecord::Move { transfers: undone })
         }
+        OperationRecord::Trash { records } => Ok(OperationRecord::Trash {
+            records: restore_trash_records(records)?,
+        }),
+        OperationRecord::Restore { records } => Ok(OperationRecord::Restore {
+            records: retrash_records(records)?,
+        }),
     }
 }
 
@@ -400,6 +418,12 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
                 .operation
                 .context("Redo did not produce a move operation")
         }
+        OperationRecord::Trash { records } => Ok(OperationRecord::Trash {
+            records: retrash_records(records)?,
+        }),
+        OperationRecord::Restore { records } => Ok(OperationRecord::Restore {
+            records: restore_trash_records(records)?,
+        }),
     }
 }
 

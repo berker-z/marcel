@@ -16,5 +16,6 @@ pub mod selection;
 mod system_open;
 pub mod theme;
 mod thumbnails;
+mod trash_ops;
 
 pub use app::Marcel;

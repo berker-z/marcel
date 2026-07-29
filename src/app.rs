@@ -41,19 +41,20 @@ use crate::{
         ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CopySelection,
         CutSelection, ExtendDown, ExtendLeft, ExtendPageDown, ExtendPageUp, ExtendRight,
         ExtendToFirst, ExtendToLast, ExtendUp, GoBack, GoForward, GoToParent, MoveDown, MoveLeft,
-        MoveRight, MoveUp, NewFolder, OpenWithSelection, PasteFiles, RedoFileOperation, SelectAll,
-        SelectFirst, SelectLast, SelectPageDown, SelectPageUp, UndoFileOperation,
+        MoveRight, MoveUp, NewFolder, OpenWithSelection, PasteFiles, RedoFileOperation,
+        RestoreSelection, SelectAll, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
+        TrashSelection, UndoFileOperation,
     },
     directory_session::{
         ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
     },
     directory_watcher::{DirectoryWatcherUpdate, watch_directory},
     file_ops::{
-        TransferMode, create_directory, redo_operation, summarize_failures,
+        OperationRecord, TransferMode, create_directory, redo_operation, summarize_failures,
         transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
-        DirectoryUpdate, FileEntry, format_size, merge_sorted_entries, stream_directory,
+        DirectoryUpdate, EntryKind, FileEntry, format_size, merge_sorted_entries, stream_directory,
         stream_directory_cancellable,
     },
     history::NavigationHistory,
@@ -61,6 +62,10 @@ use crate::{
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
     thumbnails,
+    trash_ops::{
+        TrashRecord, list_trash_records, restore_trash_records,
+        summarize_failures as summarize_trash_failures, trash_paths,
+    },
 };
 
 const DIRECTORY_ROW_HEIGHT: f32 = 36.0;
@@ -284,6 +289,8 @@ pub struct Marcel {
     place_icons: HashMap<PathBuf, PathBuf>,
     places_loading: bool,
     places_task: Option<Task<()>>,
+    browsing_trash: bool,
+    trash_records: HashMap<PathBuf, TrashRecord>,
     bookmarks: Vec<Bookmark>,
     bookmark_icons: HashMap<PathBuf, PathBuf>,
     bookmarks_path: PathBuf,
@@ -389,6 +396,8 @@ impl Marcel {
             place_icons: HashMap::new(),
             places_loading: true,
             places_task: None,
+            browsing_trash: false,
+            trash_records: HashMap::new(),
             bookmarks: Vec::new(),
             bookmark_icons: HashMap::new(),
             bookmarks_path: default_bookmarks_path(&home_dir),
@@ -853,6 +862,10 @@ impl Marcel {
     }
 
     fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
+        if self.browsing_trash {
+            self.start_trash_load(clear_filter, cx);
+            return;
+        }
         self.entry_menu = None;
         self.bookmark_menu = None;
         let (ticket, path) = self.directory.begin_load(clear_filter);
@@ -906,6 +919,69 @@ impl Marcel {
                     break;
                 }
             }
+        }));
+        cx.notify();
+    }
+
+    fn start_trash_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
+        self.browsing_trash = true;
+        self.entry_menu = None;
+        self.bookmark_menu = None;
+        let ticket = self.directory.begin_virtual_load(clear_filter);
+        self.thumbnail_workers.clear();
+        self.thumbnail_queue.clear();
+        self.thumbnail_pending.clear();
+        self.thumbnail_inflight.clear();
+        self.thumbnail_stale.clear();
+        while self.thumbnail_wake_receiver.try_recv().is_ok() {}
+        self.thumbnails.clear();
+        self.thumbnail_order.clear();
+        self.entry_content_bounds.borrow_mut().clear();
+        self.trash_records.clear();
+        self.clear_selection();
+
+        let load = cx.background_executor().spawn(smol::unblock(move || {
+            let records = list_trash_records()?;
+            let mut icons = crate::icons::IconProvider::discover();
+            let mut entries = Vec::with_capacity(records.len());
+            let mut by_backing = HashMap::with_capacity(records.len());
+            for record in records {
+                let Ok(mut entry) = FileEntry::from_path(record.backing_path(), &mut icons) else {
+                    continue;
+                };
+                entry.name = record
+                    .original_path()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| entry.name.clone());
+                // The first Trash slice presents top-level items. Directories
+                // remain previewable, but nested virtual navigation follows
+                // after the location abstraction is generalized.
+                entry.navigable = false;
+                by_backing.insert(entry.path.clone(), record);
+                entries.push(entry);
+            }
+            crate::fs::sort_entries(&mut entries);
+            anyhow::Ok((entries, by_backing))
+        }));
+
+        self.directory.load_task = Some(cx.spawn(async move |this, cx| {
+            let result = load.await;
+            let _ = this.update(cx, |this, cx| {
+                if ticket != this.directory.generation || !this.browsing_trash {
+                    return;
+                }
+                match result {
+                    Ok((entries, records)) => {
+                        this.trash_records = records;
+                        let reconcile = this.directory.merge_batch(entries);
+                        this.apply_selection_reconcile(reconcile, cx);
+                        this.directory.finish_load();
+                    }
+                    Err(error) => this.directory.fail_load(error.to_string()),
+                }
+                cx.notify();
+            });
         }));
         cx.notify();
     }
@@ -981,9 +1057,11 @@ impl Marcel {
     }
 
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {
-        if path == self.directory.current_dir {
+        if !self.browsing_trash && path == self.directory.current_dir {
             return;
         }
+        self.browsing_trash = false;
+        self.trash_records.clear();
         if add_to_history {
             self.history.push(&path);
         }
@@ -994,6 +1072,8 @@ impl Marcel {
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_back() {
+            self.browsing_trash = false;
+            self.trash_records.clear();
             self.directory.current_dir = path;
             self.directory.pending_reveal = None;
             self.start_directory_load(true, cx);
@@ -1002,6 +1082,8 @@ impl Marcel {
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_forward() {
+            self.browsing_trash = false;
+            self.trash_records.clear();
             self.directory.current_dir = path;
             self.directory.pending_reveal = None;
             self.start_directory_load(true, cx);
@@ -1009,6 +1091,9 @@ impl Marcel {
     }
 
     fn go_up(&mut self, cx: &mut Context<Self>) {
+        if self.browsing_trash {
+            return;
+        }
         if let Some(parent) = self.directory.current_dir.parent() {
             self.navigate_to(parent.to_path_buf(), true, cx);
         }
@@ -1016,10 +1101,26 @@ impl Marcel {
 
     fn command_enabled(&self, command: BrowserCommand) -> bool {
         match command {
-            BrowserCommand::GoToParent => self.directory.current_dir.parent().is_some(),
+            BrowserCommand::GoToParent => {
+                !self.browsing_trash && self.directory.current_dir.parent().is_some()
+            }
             BrowserCommand::GoBack => self.history.can_go_back(),
             BrowserCommand::GoForward => self.history.can_go_forward(),
-            BrowserCommand::ActivateSelection => self.directory.selection.primary().is_some(),
+            BrowserCommand::ActivateSelection => {
+                self.directory.selection.primary().is_some()
+                    && (!self.browsing_trash
+                        || self
+                            .directory
+                            .selection
+                            .primary()
+                            .and_then(|path| {
+                                self.directory
+                                    .entries
+                                    .iter()
+                                    .find(|entry| &entry.path == path)
+                            })
+                            .is_some_and(|entry| entry.kind != EntryKind::Directory))
+            }
             BrowserCommand::OpenWithSelection => self
                 .directory
                 .selection
@@ -1030,13 +1131,16 @@ impl Marcel {
                         .iter()
                         .find(|entry| &entry.path == path)
                 })
-                .is_some_and(|entry| !entry.navigable),
+                .is_some_and(|entry| !entry.navigable && entry.kind != EntryKind::Directory),
             BrowserCommand::ClearSelection => !self.directory.selection.selected().is_empty(),
             BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
-                !self.operations.is_busy() && !self.directory.selection.selected().is_empty()
+                !self.browsing_trash
+                    && !self.operations.is_busy()
+                    && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::PasteFiles => {
-                !self.operations.is_busy()
+                !self.browsing_trash
+                    && !self.operations.is_busy()
                     && self.directory.error.is_none()
                     && self
                         .operations
@@ -1044,7 +1148,23 @@ impl Marcel {
                         .is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
             BrowserCommand::NewFolder => {
-                !self.operations.is_busy() && self.directory.error.is_none()
+                !self.browsing_trash && !self.operations.is_busy() && self.directory.error.is_none()
+            }
+            BrowserCommand::TrashSelection => {
+                !self.browsing_trash
+                    && !self.operations.is_busy()
+                    && !self.directory.selection.selected().is_empty()
+            }
+            BrowserCommand::RestoreSelection => {
+                self.browsing_trash
+                    && !self.operations.is_busy()
+                    && !self.directory.selection.selected().is_empty()
+                    && self
+                        .directory
+                        .selection
+                        .selected()
+                        .iter()
+                        .all(|path| self.trash_records.contains_key(path))
             }
             BrowserCommand::UndoFileOperation => self.operations.can_undo(),
             BrowserCommand::RedoFileOperation => self.operations.can_redo(),
@@ -1136,6 +1256,8 @@ impl Marcel {
             BrowserCommand::CopySelection => self.stage_selection(TransferMode::Copy, window, cx),
             BrowserCommand::CutSelection => self.stage_selection(TransferMode::Move, window, cx),
             BrowserCommand::PasteFiles => self.start_paste(window, cx),
+            BrowserCommand::TrashSelection => self.start_trash_selection(window, cx),
+            BrowserCommand::RestoreSelection => self.start_restore_selection(window, cx),
             BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
             BrowserCommand::UndoFileOperation => self.start_undo(window, cx),
             BrowserCommand::RedoFileOperation => self.start_redo(window, cx),
@@ -1342,17 +1464,10 @@ impl Marcel {
                 match result {
                     Ok(undone) => {
                         let path = operation.path().to_path_buf();
+                        let message = operation_history_message(&operation, false);
                         this.operations.finish_undo(undone);
                         this.refresh_after_operation(&path, false, cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Undid creation of “{}”",
-                                path.file_name()
-                                    .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default()
-                            )),
-                            cx,
-                        );
+                        window.push_notification(Notification::success(message), cx);
                     }
                     Err(error) => {
                         this.operations.cancel_undo(operation);
@@ -1383,17 +1498,10 @@ impl Marcel {
                 match result {
                     Ok(redone) => {
                         let path = redone.path().to_path_buf();
+                        let message = operation_history_message(&redone, true);
                         this.operations.finish_redo(redone);
                         this.refresh_after_operation(&path, true, cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Recreated folder “{}”",
-                                path.file_name()
-                                    .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default()
-                            )),
-                            cx,
-                        );
+                        window.push_notification(Notification::success(message), cx);
                     }
                     Err(error) => {
                         this.operations.cancel_redo(operation);
@@ -1445,6 +1553,92 @@ impl Marcel {
             window,
             cx,
         );
+    }
+
+    fn start_trash_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.directory.selection.selected();
+        let paths = self
+            .visible_paths()
+            .into_iter()
+            .filter(|path| selected.contains(path))
+            .collect::<Vec<_>>();
+        if paths.is_empty() || !self.operations.begin_simple() {
+            return;
+        }
+        self.entry_menu = None;
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || trash_paths(&paths)));
+        let operation_task = cx.spawn_in(window, async move |this, window| {
+            let outcome = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                if !outcome.records.is_empty() {
+                    this.operations.record(OperationRecord::Trash {
+                        records: outcome.records,
+                    });
+                }
+                this.start_directory_load(false, cx);
+                if outcome.failures.is_empty() {
+                    window.push_notification(
+                        Notification::success(format!(
+                            "Moved {} item(s) to Trash",
+                            outcome.completed.len()
+                        )),
+                        cx,
+                    );
+                } else {
+                    let mut message = summarize_trash_failures(&outcome.failures);
+                    if outcome.undo_unavailable {
+                        message.push_str("; some successful items are not available to Undo");
+                    }
+                    window.push_notification(Notification::error(message), cx);
+                }
+                this.operations.finish_active();
+                cx.notify();
+            });
+        });
+        self.operations.set_task(operation_task);
+        cx.notify();
+    }
+
+    fn start_restore_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.directory.selection.selected();
+        let records = self
+            .visible_paths()
+            .into_iter()
+            .filter(|path| selected.contains(path))
+            .filter_map(|path| self.trash_records.get(&path).cloned())
+            .collect::<Vec<_>>();
+        if records.is_empty() || !self.operations.begin_simple() {
+            return;
+        }
+        self.entry_menu = None;
+        let count = records.len();
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || restore_trash_records(&records)));
+        let operation_task = cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                match result {
+                    Ok(records) => {
+                        this.operations.record(OperationRecord::Restore { records });
+                        this.start_trash_load(false, cx);
+                        window.push_notification(
+                            Notification::success(format!("Restored {count} item(s)")),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                }
+                this.operations.finish_active();
+                cx.notify();
+            });
+        });
+        self.operations.set_task(operation_task);
+        cx.notify();
     }
 
     fn start_drag_move(
@@ -1565,6 +1759,10 @@ impl Marcel {
     }
 
     fn refresh_after_operation(&mut self, path: &Path, select: bool, cx: &mut Context<Self>) {
+        if self.browsing_trash {
+            self.start_trash_load(false, cx);
+            return;
+        }
         if path.parent() != Some(self.directory.current_dir.as_path()) {
             return;
         }
@@ -1717,6 +1915,24 @@ impl Marcel {
 
     fn on_paste_files(&mut self, _: &PasteFiles, window: &mut Window, cx: &mut Context<Self>) {
         self.execute_browser_command(BrowserCommand::PasteFiles, window, cx);
+    }
+
+    fn on_trash_selection(
+        &mut self,
+        _: &TrashSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::TrashSelection, window, cx);
+    }
+
+    fn on_restore_selection(
+        &mut self,
+        _: &RestoreSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::RestoreSelection, window, cx);
     }
 
     fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -2345,6 +2561,12 @@ impl Marcel {
         let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles);
         let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
         let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
+        let trash_menu_command = if self.browsing_trash {
+            BrowserCommand::RestoreSelection
+        } else {
+            BrowserCommand::TrashSelection
+        };
+        let trash_menu_enabled = self.command_enabled(trash_menu_command);
         let window_size = window.bounds().size;
         let menu_height = match menu.target {
             ContextMenuTarget::Entry => ENTRY_MENU_HEIGHT,
@@ -2754,7 +2976,38 @@ impl Marcel {
                 .child(separator())
                 .child(planned("– Rename…"))
                 .child(planned("– Move To…"))
-                .child(planned("– Move to Trash"))
+                .child(
+                    h_flex()
+                        .id("entry-menu-trash-or-restore")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(trash_menu_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.entry_menu = None;
+                                    this.execute_browser_command(trash_menu_command, window, cx);
+                                }))
+                        })
+                        .when(!trash_menu_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child(if self.browsing_trash {
+                            "Restore"
+                        } else {
+                            "Move to Trash"
+                        })
+                        .child(div().flex_1())
+                        .when(!self.browsing_trash, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Delete"),
+                            )
+                        }),
+                )
                 .child(planned("– Delete Permanently…"))
                 .child(separator())
                 .child(planned("– Create Link"))
@@ -3261,9 +3514,15 @@ impl Marcel {
     fn render_place(&self, index: usize, place: Place, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
-        let active = self.directory.current_dir == place.path;
+        let is_trash = place.is_trash();
+        let active = if is_trash {
+            self.browsing_trash
+        } else {
+            !self.browsing_trash && self.directory.current_dir == place.path
+        };
         let operation_busy = self.operations.is_busy();
         let drop_path = place.path.clone();
+        let navigate_path = place.path.clone();
         let can_drop_path = place.path.clone();
         let bounds_path = place.path.clone();
         let place_drop_bounds = self.place_drop_bounds.clone();
@@ -3307,7 +3566,8 @@ impl Marcel {
                     .text_color(colors.sidebar_accent_foreground)
             })
             .can_drop(move |value, _, _| {
-                !operation_busy
+                !is_trash
+                    && !operation_busy
                     && value
                         .downcast_ref::<FileDrag>()
                         .is_some_and(|drag| can_move_files_to(&drag.paths, &can_drop_path))
@@ -3319,24 +3579,32 @@ impl Marcel {
                     .border_color(colors.primary)
             })
             .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
-                this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
+                if !is_trash {
+                    this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
+                }
             }))
             .child(icon)
             .child(div().flex_none().text_sm().child(place.label))
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        place_drop_bounds
-                            .borrow_mut()
-                            .insert(bounds_path.clone(), bounds);
-                    },
-                    |_, _, _, _| {},
+            .when(!is_trash, |this| {
+                this.child(
+                    canvas(
+                        move |bounds, _, _| {
+                            place_drop_bounds
+                                .borrow_mut()
+                                .insert(bounds_path.clone(), bounds);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
                 )
-                .absolute()
-                .inset_0(),
-            )
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.navigate_to(place.path.clone(), true, cx);
+                if is_trash {
+                    this.start_trash_load(true, cx);
+                } else {
+                    this.navigate_to(navigate_path.clone(), true, cx);
+                }
             }))
             .into_any_element()
     }
@@ -3512,6 +3780,7 @@ impl Marcel {
                             Self::single_file_drag(&path, navigable)
                         };
                         let operation_busy = this.operations.is_busy();
+                        let dragging_enabled = !this.browsing_trash;
                         let entry_hit_bounds = this.entry_hit_bounds.clone();
                         let entry_content_bounds = this.entry_content_bounds.clone();
                         let browser_bounds = this.browser_bounds.clone();
@@ -3549,19 +3818,21 @@ impl Marcel {
                                 this.bg(colors.list_active)
                                     .border_color(colors.list_active_border)
                             })
-                            .on_drag(drag, |drag, _, _, cx| {
-                                let count = drag.paths.len();
-                                let label = if count == 1 {
-                                    drag.paths[0]
-                                        .file_name()
-                                        .map(|name| name.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| drag.paths[0].display().to_string())
-                                } else {
-                                    format!("{count} selected items")
-                                };
-                                cx.new(|_| DragPreview {
-                                    label,
-                                    detail: "Move",
+                            .when(dragging_enabled, |this| {
+                                this.on_drag(drag, |drag, _, _, cx| {
+                                    let count = drag.paths.len();
+                                    let label = if count == 1 {
+                                        drag.paths[0]
+                                            .file_name()
+                                            .map(|name| name.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| drag.paths[0].display().to_string())
+                                    } else {
+                                        format!("{count} selected items")
+                                    };
+                                    cx.new(|_| DragPreview {
+                                        label,
+                                        detail: "Move",
+                                    })
                                 })
                             })
                             .on_drag_move::<FileDrag>(cx.listener(|this, event, window, cx| {
@@ -3713,6 +3984,7 @@ impl Marcel {
                                 Self::single_file_drag(&path, navigable)
                             };
                             let operation_busy = this.operations.is_busy();
+                            let dragging_enabled = !this.browsing_trash;
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
                             let entry_hit_bounds = this.entry_hit_bounds.clone();
                             let entry_content_bounds = this.entry_content_bounds.clone();
@@ -3783,21 +4055,23 @@ impl Marcel {
                                         this.bg(colors.list_active)
                                             .border_color(colors.list_active_border)
                                     })
-                                    .on_drag(drag, |drag, _, _, cx| {
-                                        let count = drag.paths.len();
-                                        let label = if count == 1 {
-                                            drag.paths[0]
-                                                .file_name()
-                                                .map(|name| name.to_string_lossy().into_owned())
-                                                .unwrap_or_else(|| {
-                                                    drag.paths[0].display().to_string()
-                                                })
-                                        } else {
-                                            format!("{count} selected items")
-                                        };
-                                        cx.new(|_| DragPreview {
-                                            label,
-                                            detail: "Move",
+                                    .when(dragging_enabled, |this| {
+                                        this.on_drag(drag, |drag, _, _, cx| {
+                                            let count = drag.paths.len();
+                                            let label = if count == 1 {
+                                                drag.paths[0]
+                                                    .file_name()
+                                                    .map(|name| name.to_string_lossy().into_owned())
+                                                    .unwrap_or_else(|| {
+                                                        drag.paths[0].display().to_string()
+                                                    })
+                                            } else {
+                                                format!("{count} selected items")
+                                            };
+                                            cx.new(|_| DragPreview {
+                                                label,
+                                                detail: "Move",
+                                            })
                                         })
                                     })
                                     .on_drag_move::<FileDrag>(cx.listener(
@@ -4636,6 +4910,8 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_copy_selection))
             .on_action(cx.listener(Self::on_cut_selection))
             .on_action(cx.listener(Self::on_paste_files))
+            .on_action(cx.listener(Self::on_trash_selection))
+            .on_action(cx.listener(Self::on_restore_selection))
             .on_action(cx.listener(Self::on_new_folder))
             .on_action(cx.listener(Self::on_undo_file_operation))
             .on_action(cx.listener(Self::on_redo_file_operation))
@@ -4733,18 +5009,26 @@ impl Render for Marcel {
                             .justify_center()
                             .rounded(cx.theme().radius)
                             .text_lg()
-                            .text_color(if self.directory.current_dir.parent().is_some() {
-                                colors.sidebar_foreground
-                            } else {
-                                colors.muted_foreground
-                            })
+                            .text_color(
+                                if !self.browsing_trash
+                                    && self.directory.current_dir.parent().is_some()
+                                {
+                                    colors.sidebar_foreground
+                                } else {
+                                    colors.muted_foreground
+                                },
+                            )
                             .child("↑")
-                            .when(self.directory.current_dir.parent().is_some(), |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|button| button.bg(colors.sidebar_accent))
-                                    .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
-                            }),
+                            .when(
+                                !self.browsing_trash
+                                    && self.directory.current_dir.parent().is_some(),
+                                |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|button| button.bg(colors.sidebar_accent))
+                                        .on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -4829,7 +5113,11 @@ impl Render for Marcel {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(self.directory.current_dir.display().to_string()),
+                            .child(if self.browsing_trash {
+                                "Trash".to_string()
+                            } else {
+                                self.directory.current_dir.display().to_string()
+                            }),
                     )
                     .child(
                         Input::new(&self.search_input)
@@ -5056,6 +5344,30 @@ fn normalize_start_directory(path: PathBuf) -> PathBuf {
         path.parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"))
+    }
+}
+
+fn operation_history_message(operation: &OperationRecord, redo: bool) -> String {
+    let name = operation
+        .path()
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    match (operation, redo) {
+        (OperationRecord::CreateDirectory { .. }, false) => {
+            format!("Undid creation of “{name}”")
+        }
+        (OperationRecord::CreateDirectory { .. }, true) => format!("Recreated folder “{name}”"),
+        (OperationRecord::Copy { .. }, false) => "Undid copy".to_string(),
+        (OperationRecord::Copy { .. }, true) => "Repeated copy".to_string(),
+        (OperationRecord::Move { .. }, false) => "Undid move".to_string(),
+        (OperationRecord::Move { .. }, true) => "Repeated move".to_string(),
+        (OperationRecord::Trash { .. }, false) => "Restored item(s) from Trash".to_string(),
+        (OperationRecord::Trash { .. }, true) => "Moved item(s) to Trash again".to_string(),
+        (OperationRecord::Restore { .. }, false) => {
+            "Moved restored item(s) back to Trash".to_string()
+        }
+        (OperationRecord::Restore { .. }, true) => "Restored item(s) again".to_string(),
     }
 }
 
