@@ -46,6 +46,9 @@ Control-modified navigation commands above take precedence in both.
 
 - Typing printable text anywhere in Marcel starts or extends the current
   directory filter and focuses the top-bar input.
+- An explicitly focused text field takes precedence over type-to-filter.
+  Dialog inputs and future inline editors receive their editing keys without
+  changing or focusing the directory filter.
 - `Ctrl+F` focuses the same input without changing its contents.
 - Matching is case-insensitive and fuzzy. Contiguous, word-boundary, and early
   matches rank ahead of scattered matches.

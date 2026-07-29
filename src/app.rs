@@ -1427,6 +1427,14 @@ impl Marcel {
         let stroke = &event.keystroke;
         let search_focused = self.search_input.focus_handle(cx).is_focused(window);
         let browser_focused = self.browser_focus.is_focused(window);
+        let input_focused = window.has_focused_input(cx);
+
+        // Type-to-filter is global browser chrome, not an input interceptor.
+        // Dialog fields and future inline editors must retain every editing
+        // key while they own focus.
+        if should_defer_global_filter_to_input(search_focused, input_focused) {
+            return;
+        }
 
         if stroke.modifiers.control && !stroke.modifiers.alt && stroke.key.eq_ignore_ascii_case("f")
         {
@@ -3729,6 +3737,10 @@ fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.') && name != "." && name != ".."
 }
 
+fn should_defer_global_filter_to_input(search_focused: bool, input_focused: bool) -> bool {
+    input_focused && !search_focused
+}
+
 fn elide_filename(name: &str, max_columns: usize) -> String {
     if UnicodeWidthStr::width(name) <= max_columns {
         return name.to_string();
@@ -4050,6 +4062,13 @@ mod tests {
         assert!(!is_hidden_name("visible.txt"));
         assert!(!is_hidden_name("."));
         assert!(!is_hidden_name(".."));
+    }
+
+    #[test]
+    fn global_filter_yields_to_non_search_editors() {
+        assert!(should_defer_global_filter_to_input(false, true));
+        assert!(!should_defer_global_filter_to_input(true, true));
+        assert!(!should_defer_global_filter_to_input(false, false));
     }
 
     #[test]

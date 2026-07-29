@@ -30,6 +30,9 @@ bounded undo/redo history when it is genuinely reversible.
   mounts `Root::render_dialog_layer` and `Root::render_notification_layer` in
   its top-level render tree as a compatibility bridge. The dialog,
   notification, input, and buttons remain gpui-component implementations.
+- Window-wide type-to-filter yields whenever a non-search input owns focus.
+  This applies to the New Folder dialog and establishes the routing contract
+  for future rename and New File editors.
 
 ## Safety contract
 
