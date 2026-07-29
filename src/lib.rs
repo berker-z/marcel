@@ -1,6 +1,7 @@
 mod app;
 mod bookmarks;
 pub mod commands;
+mod delete_ops;
 pub mod directory_session;
 mod directory_watcher;
 pub mod file_ops;

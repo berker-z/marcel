@@ -79,6 +79,14 @@ adapted into Marcel itself.
     platform placement to the MIT-licensed `trash` crate. Marcel adds its own
     exact-entry discovery, identity-validating no-replace restore, operation
     journal, and stricter missing-parent policy. No Yazi code was copied.
+  - `src/delete_ops.rs` conceptually adapts Yazi's leaf-before-directory,
+    no-symlink-follow delete traversal and per-entry scheduler outcomes from
+    `yazi-scheduler/src/file/file.rs`,
+    `yazi-scheduler/src/file/traverse.rs`, and
+    `yazi-fs/src/engine/traits.rs` at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286`. Marcel adds whole-selection
+    atomic quarantine, filesystem-identity revalidation, paired Trash metadata
+    cleanup, and its own progress interface. No Yazi code was copied.
 
 Yazi is a primary architectural influence for asynchronous filesystem work,
 task scheduling, cancellation, previews, and responsiveness. Future direct or

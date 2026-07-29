@@ -4,9 +4,12 @@ use std::{
     fs, io,
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context as _, Result, bail};
+
+use crate::{delete_ops::delete_trash_backings, file_ops::TransferProgress};
 
 // Conceptually adapted from Yazi's separation between its background file
 // scheduler and freedesktop Trash VFS:
@@ -61,6 +64,13 @@ pub struct TrashOutcome {
     pub undo_unavailable: bool,
 }
 
+pub fn path_overlaps_system_trash(path: &Path) -> Result<bool> {
+    let roots = trash::os_limited::trash_folders().context("Could not resolve the system Trash")?;
+    Ok(roots
+        .iter()
+        .any(|root| paths_overlap_trash_root(path, root)))
+}
+
 pub fn list_trash_records() -> Result<Vec<TrashRecord>> {
     let records = trash::os_limited::list()
         .context("Could not inspect the system Trash")?
@@ -68,6 +78,73 @@ pub fn list_trash_records() -> Result<Vec<TrashRecord>> {
         .filter_map(|item| record_from_item(item).ok())
         .collect();
     Ok(records)
+}
+
+pub fn purge_trash_records(
+    records: &[TrashRecord],
+    progress: Arc<TransferProgress>,
+) -> TrashOutcome {
+    for record in records {
+        if let Err(error) =
+            validate_identity(&record.info_path, &record.info_identity, "Trash metadata").and_then(
+                |()| {
+                    validate_identity(
+                        &record.backing_path,
+                        &record.payload_identity,
+                        "Trash payload",
+                    )
+                },
+            )
+        {
+            return TrashOutcome {
+                records: Vec::new(),
+                completed: Vec::new(),
+                failures: vec![TrashFailure {
+                    path: record.original_path.clone(),
+                    message: error.to_string(),
+                }],
+                undo_unavailable: false,
+            };
+        }
+    }
+
+    let backing_paths = records
+        .iter()
+        .map(|record| record.backing_path.clone())
+        .collect::<Vec<_>>();
+    let deleted = delete_trash_backings(&backing_paths, progress);
+    let mut completed = Vec::new();
+    let mut failures = deleted
+        .failures
+        .into_iter()
+        .map(|failure| TrashFailure {
+            path: map_backing_to_original(records, &failure.path),
+            message: failure.message,
+        })
+        .collect::<Vec<_>>();
+
+    for backing in deleted.completed {
+        let Some(record) = records.iter().find(|record| record.backing_path == backing) else {
+            continue;
+        };
+        completed.push(record.original_path.clone());
+        if let Err(error) = remove_matching_trash_info(record) {
+            failures.push(TrashFailure {
+                path: record.original_path.clone(),
+                message: format!(
+                    "Permanently deleted “{}”, but could not remove its Trash metadata: {error}",
+                    record.original_path.display()
+                ),
+            });
+        }
+    }
+
+    TrashOutcome {
+        records: Vec::new(),
+        completed,
+        failures,
+        undo_unavailable: false,
+    }
 }
 
 pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
@@ -444,6 +521,30 @@ fn paths_overlap_trash_root(path: &Path, trash_root: &Path) -> bool {
     path.starts_with(trash_root) || trash_root.starts_with(path)
 }
 
+fn remove_matching_trash_info(record: &TrashRecord) -> Result<()> {
+    validate_identity(&record.info_path, &record.info_identity, "Trash metadata")?;
+    fs::remove_file(&record.info_path).with_context(|| {
+        format!(
+            "Could not remove Trash metadata “{}”",
+            record.info_path.display()
+        )
+    })
+}
+
+fn map_backing_to_original(records: &[TrashRecord], path: &Path) -> PathBuf {
+    records
+        .iter()
+        .find_map(|record| {
+            let relative = path.strip_prefix(&record.backing_path).ok()?;
+            Some(if relative.as_os_str().is_empty() {
+                record.original_path.clone()
+            } else {
+                record.original_path.join(relative)
+            })
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +657,36 @@ mod tests {
 
         assert!(restore_trash_records(std::slice::from_ref(&record)).is_err());
         assert!(!original_parent.join("note.txt").exists());
+    }
+
+    #[test]
+    fn permanent_purge_removes_payload_and_matching_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_parent = temp.path().join("original");
+        fs::create_dir(&original_parent).unwrap();
+        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+
+        let outcome = purge_trash_records(
+            std::slice::from_ref(&record),
+            Arc::new(TransferProgress::default()),
+        );
+
+        assert_eq!(outcome.completed, [original_parent.join("note.txt")]);
+        assert!(outcome.failures.is_empty());
+        assert!(!record.backing_path.exists());
+        assert!(!record.info_path.exists());
+    }
+
+    #[test]
+    fn metadata_cleanup_refuses_a_replaced_trash_info_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_parent = temp.path().join("original");
+        fs::create_dir(&original_parent).unwrap();
+        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        fs::remove_file(&record.info_path).unwrap();
+        fs::write(&record.info_path, b"replacement").unwrap();
+
+        assert!(remove_matching_trash_info(&record).is_err());
+        assert_eq!(fs::read(&record.info_path).unwrap(), b"replacement");
     }
 }

@@ -17,10 +17,19 @@ pub struct FileClipboard {
     pub paths: Vec<PathBuf>,
 }
 
-pub struct ActiveTransferProgress {
-    pub mode: TransferMode,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationProgressKind {
+    Copy,
+    Move,
+    Delete,
+    EmptyTrash,
+}
+
+pub struct ActiveOperationProgress {
+    pub kind: OperationProgressKind,
     pub source_count: usize,
-    pub destination: PathBuf,
+    pub detail: String,
+    pub cancellable: bool,
     pub progress: Arc<TransferProgress>,
 }
 
@@ -31,7 +40,7 @@ pub struct OperationController {
     busy: bool,
     cancel: Option<Arc<AtomicBool>>,
     task: Option<Task<()>>,
-    progress: Option<ActiveTransferProgress>,
+    progress: Option<ActiveOperationProgress>,
     progress_task: Option<Task<()>>,
 }
 
@@ -106,13 +115,38 @@ impl OperationController {
         let progress = Arc::new(TransferProgress::default());
         self.busy = true;
         self.cancel = Some(cancel.clone());
-        self.progress = Some(ActiveTransferProgress {
-            mode,
+        self.progress = Some(ActiveOperationProgress {
+            kind: match mode {
+                TransferMode::Copy => OperationProgressKind::Copy,
+                TransferMode::Move => OperationProgressKind::Move,
+            },
             source_count,
-            destination,
+            detail: format!("to {}", destination.display()),
+            cancellable: true,
             progress: progress.clone(),
         });
         Some((cancel, progress))
+    }
+
+    pub fn begin_permanent_delete(
+        &mut self,
+        kind: OperationProgressKind,
+        source_count: usize,
+    ) -> Option<Arc<TransferProgress>> {
+        if self.busy || source_count == 0 {
+            return None;
+        }
+        let progress = Arc::new(TransferProgress::default());
+        self.busy = true;
+        self.cancel = None;
+        self.progress = Some(ActiveOperationProgress {
+            kind,
+            source_count,
+            detail: "This cannot be undone".to_string(),
+            cancellable: false,
+            progress: progress.clone(),
+        });
+        Some(progress)
     }
 
     pub fn finish_active(&mut self) {
@@ -137,7 +171,7 @@ impl OperationController {
             .is_some_and(|cancel| cancel.load(Ordering::Acquire))
     }
 
-    pub fn progress(&self) -> Option<&ActiveTransferProgress> {
+    pub fn progress(&self) -> Option<&ActiveOperationProgress> {
         self.progress.as_ref()
     }
 

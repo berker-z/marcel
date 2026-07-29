@@ -7,10 +7,18 @@ item here belongs in that sprint.
 
 ## Current priorities
 
+- Marcel's local-filesystem core is now a credible alpha: browsing, previews,
+  selection, filtering, bookmarks, incremental watching, safe copy/move,
+  Trash/restore, and confirmed permanent deletion are implemented. The main
+  remaining gaps between that alpha and a daily-driver default file manager
+  are conventional file actions, desktop interoperability, mounted and remote
+  locations, packaging, and acceptance testing.
 - Complete the manual Trash/restore checks in
   [`Sprint 7`](sprints/007-trash-and-restore.md). The implementation uses the
   native freedesktop Trash, identity-validating undo/redo, and an aggregated
   bottom-most Places entry.
+- Complete the permanent-delete and Empty Trash manual checks in
+  [`Sprint 8`](sprints/008-permanent-deletion.md).
 - Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
   operation-controller and directory-session extractions are complete.
 - Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
@@ -23,6 +31,36 @@ item here belongs in that sprint.
 - Add interactive breadcrumb navigation.
 - Finish Sprint 2 visual-browsing acceptance checks and thumbnail failure
   presentation.
+
+## Recommended delivery order
+
+This order favors daily-driver completeness over novelty while keeping new
+state machines out of Marcel's coordinator until they have clear ownership.
+
+1. Finish the Sprint 7 and Sprint 8 destructive-operation smoke tests and
+   record any discovered recovery or mounted-volume behavior.
+2. Complete conventional local actions: Rename first, followed by New File,
+   Open in Terminal, Properties, Duplicate, and Move To.
+3. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
+   from `app.rs`, preserving current behavior and tests. Do not turn this into
+   an abstract architecture rewrite.
+4. Implement bilateral native desktop drag-and-drop and desktop clipboard
+   interoperability.
+5. Add cross-filesystem transfers, explicit conflict decisions, and the
+   documented symbolic-link policy.
+6. Add removable volumes, mounts, and common remote locations.
+7. Package Marcel through the flake, install its desktop metadata, implement
+   the required file-manager D-Bus surface, and document making it the default
+   directory handler.
+8. Consolidate persistent settings, themes, fonts, sorting, grouping, zoom,
+   breadcrumbs, and other UI refinements.
+9. Add media playback and optional ebook previews after the file-manager and
+   desktop-integration foundation is complete.
+
+The known PDF resize problem, interrupted permanent-delete quarantine
+recovery, large-directory benchmarks, thumbnail failure presentation, and
+manual sprint acceptance checks remain cross-cutting quality work rather than
+optional feature ideas.
 
 ## Desktop integration and distribution
 
@@ -70,6 +108,10 @@ item here belongs in that sprint.
   undo/redo.
 - [x] Implement Move to Trash, identity-validating Undo/Redo, explicit Restore,
   and an aggregated system Trash entry at the bottom of Places.
+- [x] Implement confirmed permanent deletion through `Shift+Delete` and item
+  menus, plus paired Trash purge and Empty Trash. Keep it outside Undo history.
+- Add startup discovery and recovery guidance for interrupted
+  `.marcel-delete-*` quarantine remnants.
 - Generalize filesystem locations into a virtual-location abstraction so
   trashed directories can be navigated without treating their backing paths as
   ordinary folders.
@@ -80,7 +122,7 @@ item here belongs in that sprint.
 - Create folders and files.
 - Rename files with a pointer-friendly inline interaction.
 - Finish desktop clipboard interoperability and queued transfers; then add
-  duplicate, move-to, and permanent deletion. Cross-filesystem
+  duplicate and move-to. Cross-filesystem
   cut/paste and interactive conflict decisions are explicitly parked until
   their safety and UX work is scheduled.
 - [x] Add a non-overlapping bottom-right progress/cancellation card for active

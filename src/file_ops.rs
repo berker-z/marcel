@@ -168,27 +168,27 @@ impl TransferProgress {
         }
     }
 
-    fn set_preparing(&self, preparing: bool) {
+    pub(crate) fn set_preparing(&self, preparing: bool) {
         self.preparing.store(preparing, Ordering::Relaxed);
     }
 
-    fn add_total(&self, items: u64, bytes: u64) {
+    pub(crate) fn add_total(&self, items: u64, bytes: u64) {
         self.total_items.fetch_add(items, Ordering::Relaxed);
         self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    fn set_current_path(&self, path: Option<PathBuf>) {
+    pub(crate) fn set_current_path(&self, path: Option<PathBuf>) {
         *self
             .current_path
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
     }
 
-    fn complete_item(&self) {
+    pub(crate) fn complete_item(&self) {
         self.completed_items.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn complete_bytes(&self, bytes: u64) {
+    pub(crate) fn complete_bytes(&self, bytes: u64) {
         self.completed_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 }

@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable, Root, Sizable, Theme, WindowExt,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -39,12 +39,13 @@ use crate::{
     },
     commands::{
         ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CopySelection,
-        CutSelection, ExtendDown, ExtendLeft, ExtendPageDown, ExtendPageUp, ExtendRight,
-        ExtendToFirst, ExtendToLast, ExtendUp, GoBack, GoForward, GoToParent, MoveDown, MoveLeft,
-        MoveRight, MoveUp, NewFolder, OpenWithSelection, PasteFiles, RedoFileOperation,
-        RestoreSelection, SelectAll, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
-        TrashSelection, UndoFileOperation,
+        CutSelection, DeletePermanently, EmptyTrash, ExtendDown, ExtendLeft, ExtendPageDown,
+        ExtendPageUp, ExtendRight, ExtendToFirst, ExtendToLast, ExtendUp, GoBack, GoForward,
+        GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp, NewFolder, OpenWithSelection,
+        PasteFiles, RedoFileOperation, RestoreSelection, SelectAll, SelectFirst, SelectLast,
+        SelectPageDown, SelectPageUp, TrashSelection, UndoFileOperation,
     },
+    delete_ops::{delete_paths, summarize_failures as summarize_delete_failures},
     directory_session::{
         ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
     },
@@ -58,12 +59,12 @@ use crate::{
         stream_directory_cancellable,
     },
     history::NavigationHistory,
-    operations::{FileClipboard, OperationController},
+    operations::{FileClipboard, OperationController, OperationProgressKind},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
     thumbnails,
     trash_ops::{
-        TrashRecord, list_trash_records, restore_trash_records,
+        TrashRecord, list_trash_records, purge_trash_records, restore_trash_records,
         summarize_failures as summarize_trash_failures, trash_paths,
     },
 };
@@ -185,6 +186,11 @@ struct EntryHitRegion {
 struct DragPreview {
     label: String,
     detail: &'static str,
+}
+
+enum PermanentDeleteResult {
+    Files(crate::delete_ops::DeleteOutcome),
+    Trash(crate::trash_ops::TrashOutcome),
 }
 
 impl Render for DragPreview {
@@ -641,9 +647,11 @@ impl Marcel {
         let title = if cancelling {
             "Cancelling…"
         } else {
-            match active.mode {
-                TransferMode::Copy => "Copying",
-                TransferMode::Move => "Moving",
+            match active.kind {
+                OperationProgressKind::Copy => "Copying",
+                OperationProgressKind::Move => "Moving",
+                OperationProgressKind::Delete => "Deleting permanently",
+                OperationProgressKind::EmptyTrash => "Emptying Trash",
             }
         };
         let percentage = if snapshot.total_bytes > 0 {
@@ -677,7 +685,7 @@ impl Marcel {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         });
-        let destination = format!("to {}", active.destination.display());
+        let detail = active.detail.clone();
         let view = cx.entity();
         let cancel_button = Button::new("cancel-active-transfer")
             .small()
@@ -719,10 +727,10 @@ impl Marcel {
                                         .whitespace_nowrap()
                                         .text_xs()
                                         .text_color(colors.muted_foreground)
-                                        .child(destination),
+                                        .child(detail),
                                 ),
                         )
-                        .child(cancel_button),
+                        .when(active.cancellable, |this| this.child(cancel_button)),
                 )
                 .child(Progress::new().h_1().value(percentage))
                 .child(
@@ -1166,6 +1174,20 @@ impl Marcel {
                         .iter()
                         .all(|path| self.trash_records.contains_key(path))
             }
+            BrowserCommand::DeletePermanently => {
+                !self.operations.is_busy()
+                    && !self.directory.selection.selected().is_empty()
+                    && (!self.browsing_trash
+                        || self
+                            .directory
+                            .selection
+                            .selected()
+                            .iter()
+                            .all(|path| self.trash_records.contains_key(path)))
+            }
+            BrowserCommand::EmptyTrash => {
+                self.browsing_trash && !self.operations.is_busy() && !self.trash_records.is_empty()
+            }
             BrowserCommand::UndoFileOperation => self.operations.can_undo(),
             BrowserCommand::RedoFileOperation => self.operations.can_redo(),
             BrowserCommand::MoveUp
@@ -1258,6 +1280,8 @@ impl Marcel {
             BrowserCommand::PasteFiles => self.start_paste(window, cx),
             BrowserCommand::TrashSelection => self.start_trash_selection(window, cx),
             BrowserCommand::RestoreSelection => self.start_restore_selection(window, cx),
+            BrowserCommand::DeletePermanently => self.open_permanent_delete_dialog(window, cx),
+            BrowserCommand::EmptyTrash => self.open_empty_trash_dialog(window, cx),
             BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
             BrowserCommand::UndoFileOperation => self.start_undo(window, cx),
             BrowserCommand::RedoFileOperation => self.start_redo(window, cx),
@@ -1641,6 +1665,191 @@ impl Marcel {
         cx.notify();
     }
 
+    fn open_permanent_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_menu = None;
+        let selected = self.directory.selection.selected();
+        let paths = self
+            .visible_paths()
+            .into_iter()
+            .filter(|path| selected.contains(path))
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return;
+        }
+        let trash_records = self.browsing_trash.then(|| {
+            paths
+                .iter()
+                .filter_map(|path| self.trash_records.get(path).cloned())
+                .collect::<Vec<_>>()
+        });
+        if trash_records.as_ref().is_some_and(Vec::is_empty) {
+            return;
+        }
+        let count = paths.len();
+        let description = if count == 1 {
+            let name = paths[0]
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| paths[0].display().to_string());
+            format!("Permanently delete “{name}”?")
+        } else {
+            format!("Permanently delete {count} selected items?")
+        };
+        let view = cx.entity();
+        let danger = cx.theme().colors.danger;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let paths = paths.clone();
+            let trash_records = trash_records.clone();
+            dialog
+                .title("Delete Permanently")
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(description.clone())
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(danger)
+                                .child("This action cannot be undone."),
+                        ),
+                )
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete Permanently")
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.start_permanent_delete(
+                            paths.clone(),
+                            trash_records.clone(),
+                            OperationProgressKind::Delete,
+                            window,
+                            cx,
+                        );
+                    });
+                    true
+                })
+        });
+        cx.notify();
+    }
+
+    fn open_empty_trash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_menu = None;
+        let records = self.trash_records.values().cloned().collect::<Vec<_>>();
+        if records.is_empty() {
+            return;
+        }
+        let count = records.len();
+        let view = cx.entity();
+        let danger = cx.theme().colors.danger;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let records = records.clone();
+            dialog
+                .title("Empty Trash")
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(format!(
+                            "Permanently delete all {count} item(s) currently shown in Trash?"
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(danger)
+                                .child("This action cannot be undone."),
+                        ),
+                )
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Empty Trash")
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.start_permanent_delete(
+                            Vec::new(),
+                            Some(records.clone()),
+                            OperationProgressKind::EmptyTrash,
+                            window,
+                            cx,
+                        );
+                    });
+                    true
+                })
+        });
+        cx.notify();
+    }
+
+    fn start_permanent_delete(
+        &mut self,
+        paths: Vec<PathBuf>,
+        trash_records: Option<Vec<TrashRecord>>,
+        kind: OperationProgressKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let source_count = trash_records
+            .as_ref()
+            .map_or(paths.len(), |records| records.len());
+        let Some(progress) = self.operations.begin_permanent_delete(kind, source_count) else {
+            return;
+        };
+        self.start_operation_progress_refresh(cx);
+        let task_progress = progress.clone();
+        let task = cx.background_executor().spawn(smol::unblock(move || {
+            if let Some(records) = trash_records {
+                PermanentDeleteResult::Trash(purge_trash_records(&records, task_progress))
+            } else {
+                PermanentDeleteResult::Files(delete_paths(&paths, task_progress))
+            }
+        }));
+        let operation_task = cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                let (completed, failure) = match result {
+                    PermanentDeleteResult::Files(outcome) => {
+                        let failure = (!outcome.failures.is_empty())
+                            .then(|| summarize_delete_failures(&outcome.failures));
+                        (outcome.completed.len(), failure)
+                    }
+                    PermanentDeleteResult::Trash(outcome) => {
+                        let failure = (!outcome.failures.is_empty())
+                            .then(|| summarize_trash_failures(&outcome.failures));
+                        (outcome.completed.len(), failure)
+                    }
+                };
+                this.start_directory_load(false, cx);
+                if let Some(failure) = failure {
+                    let message = if completed > 0 {
+                        format!("Permanently deleted {completed} item(s); {failure}")
+                    } else {
+                        failure
+                    };
+                    window.push_notification(Notification::error(message), cx);
+                } else {
+                    let message = match kind {
+                        OperationProgressKind::EmptyTrash => "Trash emptied".to_string(),
+                        _ => format!("Permanently deleted {completed} item(s)"),
+                    };
+                    window.push_notification(Notification::success(message), cx);
+                }
+                this.operations.finish_active();
+                cx.notify();
+            });
+        });
+        self.operations.set_task(operation_task);
+        cx.notify();
+    }
+
     fn start_drag_move(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1933,6 +2142,19 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         self.execute_browser_command(BrowserCommand::RestoreSelection, window, cx);
+    }
+
+    fn on_delete_permanently(
+        &mut self,
+        _: &DeletePermanently,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::DeletePermanently, window, cx);
+    }
+
+    fn on_empty_trash(&mut self, _: &EmptyTrash, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::EmptyTrash, window, cx);
     }
 
     fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -2567,9 +2789,14 @@ impl Marcel {
             BrowserCommand::TrashSelection
         };
         let trash_menu_enabled = self.command_enabled(trash_menu_command);
+        let permanent_delete_enabled = self.command_enabled(BrowserCommand::DeletePermanently);
+        let empty_trash_enabled = self.command_enabled(BrowserCommand::EmptyTrash);
         let window_size = window.bounds().size;
         let menu_height = match menu.target {
             ContextMenuTarget::Entry => ENTRY_MENU_HEIGHT,
+            ContextMenuTarget::CurrentDirectory if self.browsing_trash => {
+                DIRECTORY_MENU_HEIGHT + 36.0
+            }
             ContextMenuTarget::CurrentDirectory => DIRECTORY_MENU_HEIGHT,
         };
         let left = f32::from(menu.position.x)
@@ -2814,6 +3041,35 @@ impl Marcel {
                             .child("Copy Location"),
                     )
                     .child(planned("– Properties"))
+                    .when(self.browsing_trash, |this| {
+                        this.child(separator()).child(
+                            h_flex()
+                                .id("directory-menu-empty-trash")
+                                .h(px(28.0))
+                                .px_3()
+                                .rounded(radius)
+                                .when(empty_trash_enabled, |this| {
+                                    this.cursor_pointer()
+                                        .hover(|this| this.bg(colors.accent))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.entry_menu = None;
+                                            this.execute_browser_command(
+                                                BrowserCommand::EmptyTrash,
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                })
+                                .when(!empty_trash_enabled, |this| {
+                                    this.text_color(colors.muted_foreground)
+                                })
+                                .child(if empty_trash_enabled {
+                                    "Empty Trash…"
+                                } else {
+                                    "– Empty Trash…"
+                                }),
+                        )
+                    })
                     .into_any_element(),
             );
         }
@@ -3008,7 +3264,40 @@ impl Marcel {
                             )
                         }),
                 )
-                .child(planned("– Delete Permanently…"))
+                .child(
+                    h_flex()
+                        .id("entry-menu-delete-permanently")
+                        .h(px(28.0))
+                        .px_3()
+                        .rounded(radius)
+                        .when(permanent_delete_enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(colors.accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.entry_menu = None;
+                                    this.execute_browser_command(
+                                        BrowserCommand::DeletePermanently,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                        })
+                        .when(!permanent_delete_enabled, |this| {
+                            this.text_color(colors.muted_foreground)
+                        })
+                        .child(if permanent_delete_enabled {
+                            "Delete"
+                        } else {
+                            "– Delete"
+                        })
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child("Shift+Delete"),
+                        ),
+                )
                 .child(separator())
                 .child(planned("– Create Link"))
                 .child(planned("– Compress…"))
@@ -4912,6 +5201,8 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_paste_files))
             .on_action(cx.listener(Self::on_trash_selection))
             .on_action(cx.listener(Self::on_restore_selection))
+            .on_action(cx.listener(Self::on_delete_permanently))
+            .on_action(cx.listener(Self::on_empty_trash))
             .on_action(cx.listener(Self::on_new_folder))
             .on_action(cx.listener(Self::on_undo_file_operation))
             .on_action(cx.listener(Self::on_redo_file_operation))

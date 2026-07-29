@@ -84,6 +84,12 @@ commands and menus do not depend on that implementation detail. Desktop
 `text/uri-list` and `x-special/gnome-copied-files` support remains required so
 transfers can interoperate with other file managers.
 
+Permanent deletion is a background, progress-reporting operation but is not
+cancellable after confirmation and preflight. Cancellation at that point would
+itself mean partial permanent deletion. Preflight stages the complete
+top-level selection atomically or rolls it all back before erasure begins; any
+later partial I/O failure is reported explicitly.
+
 Paste rejects occupied destinations instead of overwriting or silently
 inventing another name. Copy supports regular files, directories, and symbolic
 links. Cut/paste currently supports same-filesystem moves; a cross-filesystem
@@ -169,8 +175,8 @@ extensions of the same payload/drop negotiation model.
   shortcuts and other action surfaces.
 
 `Open` and `Open With…` act only on the primary item: for a context menu, that
-is the item that was right-clicked. Future batch commands such as Cut, Copy,
-Move, Trash, Delete, and Compress act on the complete preserved selection.
+is the item that was right-clicked. Batch commands such as Cut, Copy, Move,
+Trash, Delete, and Compress act on the complete preserved selection.
 Single-item commands such as Rename are disabled for multi-selection.
 Properties shows one item's details for a single selection and an aggregate
 summary for multiple items.
@@ -181,15 +187,22 @@ requests the desktop application chooser. Cut, Copy, and Paste are active
 through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
 Remaining planned commands are disabled and prefixed with `–`: Duplicate,
-Rename, Move To, Delete Permanently, Create Link, Compress, Copy Path, and
-Properties. A planned command loses the prefix only when its implementation,
-enabled-state rules, error handling, and any required undo record are ready.
+Rename, Move To, Create Link, Compress, Copy Path, and Properties. A planned
+command loses the prefix only when its implementation, enabled-state rules,
+error handling, and any required undo record are ready.
 
 Trash is the bottom-most item in Places and aggregates valid top-level entries
 from the freedesktop home and mounted-volume Trash roots. Trashed directories
 are previewable but nested virtual Trash navigation is not part of the first
 slice. Internal drag is disabled in this view: manipulating a backing path
 directly would orphan its `.trashinfo` record.
+
+The item-menu label `Delete` permanently deletes in ordinary and Trash
+locations and always opens the same explicit `Delete Permanently` confirmation
+used by `Shift+Delete`. It acts on the complete preserved selection, uses a
+semantic danger confirmation button, reports that it cannot be undone, and
+never creates an operation-journal entry. In the Trash view, the empty-space
+menu also exposes Empty Trash with the same confirmation contract.
 
 ## Current-directory context menu
 
