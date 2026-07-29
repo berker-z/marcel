@@ -244,12 +244,16 @@ impl Marcel {
             .iter()
             .find(|family| available_fonts.iter().any(|name| name == **family))
             .map(|family| SharedString::from(*family));
+        let use_iosevka_ui = iosevka_ui_font.is_some();
+        if let Some(font) = &iosevka_ui_font {
+            Theme::global_mut(cx).font_family = font.clone();
+        }
         let mono_font_size = cx.theme().mono_font_size;
 
         let mut this = Self {
             browser_focus: cx.focus_handle(),
             system_ui_font,
-            use_iosevka_ui: false,
+            use_iosevka_ui,
             iosevka_ui_font,
             current_dir: start_dir.clone(),
             entries: Vec::new(),
@@ -3212,6 +3216,8 @@ impl Render for Marcel {
         }
 
         let colors = cx.theme().colors;
+        let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
+        let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
         let window_width = f32::from(window.bounds().size.width);
         let sidebar_width = self.places_sidebar_width(window, cx);
         let workspace_width =
@@ -3390,7 +3396,7 @@ impl Render for Marcel {
 
         // gpui-component's icon-only Button currently paints its bundled SVG
         // navigation glyphs invisibly against Marcel's themed title surface.
-        // Keep these four tiny controls Marcel-owned until the component can
+        // Keep these five tiny controls Marcel-owned until the component can
         // preserve the supplied semantic foreground color.
         let topbar = h_flex()
             .flex_none()
@@ -3482,7 +3488,7 @@ impl Render for Marcel {
                     )
                     .child(
                         div()
-                            .id("refresh")
+                            .id("undo-file-operation")
                             .flex()
                             .flex_none()
                             .size(px(28.0))
@@ -3490,13 +3496,53 @@ impl Render for Marcel {
                             .justify_center()
                             .rounded(cx.theme().radius)
                             .text_lg()
-                            .text_color(colors.sidebar_foreground)
-                            .child("↻")
-                            .cursor_pointer()
-                            .hover(|button| button.bg(colors.sidebar_accent))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_directory_load(false, cx);
-                            })),
+                            .text_color(if undo_enabled {
+                                colors.sidebar_foreground
+                            } else {
+                                colors.muted_foreground
+                            })
+                            .child("↶")
+                            .when(undo_enabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|button| button.bg(colors.sidebar_accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.execute_browser_command(
+                                            BrowserCommand::UndoFileOperation,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("redo-file-operation")
+                            .flex()
+                            .flex_none()
+                            .size(px(28.0))
+                            .items_center()
+                            .justify_center()
+                            .rounded(cx.theme().radius)
+                            .text_lg()
+                            .text_color(if redo_enabled {
+                                colors.sidebar_foreground
+                            } else {
+                                colors.muted_foreground
+                            })
+                            .child("↷")
+                            .when(redo_enabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|button| button.bg(colors.sidebar_accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.execute_browser_command(
+                                            BrowserCommand::RedoFileOperation,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            }),
                     ),
             )
             .child(

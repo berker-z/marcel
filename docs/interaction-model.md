@@ -159,6 +159,10 @@ Marcel keeps two bounded in-memory stacks:
 Completing a new file operation clears the redo stack. Navigation and selection
 changes do not affect either stack.
 
+The top-left toolbar exposes Undo and Redo beside navigation. Their enabled
+states come from the same operation journal and busy state as `Ctrl+Z` and
+`Ctrl+Y`. Refresh remains in the current-directory context menu.
+
 History stores operation records, not file contents. Representative records
 include:
 

@@ -94,11 +94,12 @@ MARCEL_THEME=light cargo run
 This environment variable is a development-facing switch; an in-app theme
 selector can be added on top of the same theme API later.
 
-The Places sidebar includes a session-level `Iosevka Mono` switch. It changes
-the shared UI font immediately and returns to the active theme's original font
-when switched off. Marcel currently uses an installed `Iosevka Nerd Font Mono`
-or plain `Iosevka` family; distribution packaging will supply a small,
-OFL-licensed subset so the setting does not depend on a system font.
+The Places sidebar includes a session-level `Iosevka Mono` switch. It is enabled
+by default when a supported Iosevka family is installed, changes the shared UI
+font immediately, and returns to the active theme's original font when switched
+off. Marcel currently uses an installed `Iosevka Nerd Font Mono` or plain
+`Iosevka` family; distribution packaging will supply a small, OFL-licensed
+subset so the setting does not depend on a system font.
 
 On Linux, filesystem icons follow the configured GTK/freedesktop icon theme.
 Override it for development or comparison with:

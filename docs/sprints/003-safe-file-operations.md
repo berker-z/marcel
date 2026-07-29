@@ -20,6 +20,8 @@ bounded undo/redo history when it is genuinely reversible.
   Marcel created and remains empty.
 - [x] `Ctrl+Y` recreates it only when the destination remains unoccupied.
 - [x] Undo/redo and new writes are serialized.
+- [x] Top-left Undo and Redo buttons reflect the shared journal and busy state;
+  Refresh remains available from the current-directory menu.
 - [x] Unit tests cover validation, occupied destinations, identity conflicts,
   non-empty undo refusal, history branching, and the history bound.
 
@@ -33,6 +35,27 @@ bounded undo/redo history when it is genuinely reversible.
 - Window-wide type-to-filter yields whenever a non-search input owns focus.
   This applies to the New Folder dialog and establishes the routing contract
   for future rename and New File editors.
+
+## Yazi study notes
+
+Yazi commit `319f90e0eab185a231eef5562215ba322e320286` was reviewed before
+expanding Marcel's file-operation layer:
+
+- Yazi's create actor runs asynchronously, coordinates with its watcher,
+  creates through its VFS engine, publishes an incremental `FilesOp`, and
+  reveals the result.
+- Long copy, cut, delete, and trash operations flow through a dedicated
+  scheduler with worker pools, priorities, progress, cancellation tokens,
+  unique-destination handling, and a rename fast path for moves.
+- Yazi's source currently provides undo/redo snapshots for its text input
+  widget, not a general filesystem-operation undo journal.
+
+Marcel's current New Folder path is therefore not a direct Yazi adaptation. It
+shares the non-blocking principle but deliberately adds serialized,
+identity-validating filesystem undo and forbids overwrite. Before copy, move,
+trash, or recursive operations land, Marcel should adapt Yazi's scheduler,
+incremental-update, progress, and cancellation patterns behind Marcel-owned
+interfaces and record the exact adaptation in `THIRD_PARTY_NOTICES.md`.
 
 ## Safety contract
 
