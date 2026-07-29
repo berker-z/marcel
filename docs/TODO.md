@@ -55,8 +55,11 @@ item here belongs in that sprint.
   view-mode controls in the Places footer.
 - [x] Implement Show Hidden Files through the Places footer and
   current-directory menu.
-- [ ] Implement New Folder, New File, Paste, Open in Terminal, and directory
-  Properties behind their shared commands.
+- [x] Implement New Folder and its bounded, conflict-validating undo/redo path.
+- [ ] Implement New File, Paste, Open in Terminal, and directory Properties
+  behind their shared commands.
+- [x] Complete the bounded safe-operation foundation and New Folder slice in
+  [`Sprint 3`](sprints/003-safe-file-operations.md).
 - Create folders and files.
 - Rename files with a pointer-friendly inline interaction.
 - Copy, cut, paste, duplicate, move, trash, restore, and permanently delete.

@@ -17,8 +17,11 @@ use gpui::{
     prelude::*, px, relative, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Sizable, Theme, h_flex,
+    ActiveTheme, Disableable, Sizable, Theme, WindowExt,
+    dialog::DialogButtonProps,
+    h_flex,
     input::{Input, InputEvent, InputState},
+    notification::Notification,
     resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
     switch::Switch,
@@ -30,8 +33,12 @@ use crate::{
     commands::{
         ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, ExtendDown,
         ExtendLeft, ExtendPageDown, ExtendPageUp, ExtendRight, ExtendToFirst, ExtendToLast,
-        ExtendUp, GoBack, GoForward, GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp,
-        OpenWithSelection, SelectAll, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
+        ExtendUp, GoBack, GoForward, GoToParent, MoveDown, MoveLeft, MoveRight, MoveUp, NewFolder,
+        OpenWithSelection, RedoFileOperation, SelectAll, SelectFirst, SelectLast, SelectPageDown,
+        SelectPageUp, UndoFileOperation,
+    },
+    file_ops::{
+        OperationJournal, create_directory, redo_operation, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, FileEntry, format_size, merge_sorted_entries, stream_directory,
@@ -70,7 +77,7 @@ const MARQUEE_MAX_SCROLL_STEP: f32 = 18.0;
 const MARQUEE_SCROLL_INTERVAL: Duration = Duration::from_millis(16);
 const ENTRY_MENU_WIDTH: f32 = 208.0;
 const ENTRY_MENU_HEIGHT: f32 = 430.0;
-const DIRECTORY_MENU_HEIGHT: f32 = 286.0;
+const DIRECTORY_MENU_HEIGHT: f32 = 342.0;
 const ENTRY_MENU_MARGIN: f32 = 8.0;
 const IOSEVKA_UI_FONTS: [&str; 2] = ["Iosevka Nerd Font Mono", "Iosevka"];
 
@@ -152,6 +159,10 @@ pub struct Marcel {
     show_hidden: bool,
     search_input: Entity<InputState>,
     _search_subscriptions: Vec<Subscription>,
+    operation_journal: OperationJournal,
+    operation_busy: bool,
+    operation_task: Option<Task<()>>,
+    select_after_directory_load: Option<PathBuf>,
     selection: SelectionModel,
     entry_menu: Option<EntryMenu>,
     marquee: Option<MarqueeGesture>,
@@ -247,6 +258,10 @@ impl Marcel {
             show_hidden: true,
             search_input,
             _search_subscriptions: vec![search_subscription],
+            operation_journal: OperationJournal::default(),
+            operation_busy: false,
+            operation_task: None,
+            select_after_directory_load: None,
             selection: SelectionModel::default(),
             entry_menu: None,
             marquee: None,
@@ -377,9 +392,11 @@ impl Marcel {
                                     merge_sorted_entries(std::mem::take(&mut this.entries), batch);
                                 this.rebuild_visible_entries();
                                 this.reconcile_filter_selection(cx);
+                                this.select_pending_loaded_entry(cx);
                             }
                             DirectoryUpdate::Done => {
                                 this.directory_loading = false;
+                                this.select_after_directory_load = None;
                             }
                             DirectoryUpdate::Error(error) => {
                                 this.directory_loading = false;
@@ -399,6 +416,32 @@ impl Marcel {
         cx.notify();
     }
 
+    fn select_pending_loaded_entry(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.select_after_directory_load.as_ref() else {
+            return;
+        };
+        let visible = self.visible_entries.iter().any(|index| {
+            self.entries
+                .get(*index)
+                .is_some_and(|entry| &entry.path == path)
+        });
+        if !visible {
+            return;
+        }
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| &entry.path == path)
+            .cloned()
+        else {
+            return;
+        };
+
+        self.select_after_directory_load = None;
+        self.selection.select_only(entry.path.clone());
+        self.start_preview(entry, cx);
+    }
+
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {
         if path == self.current_dir {
             return;
@@ -407,12 +450,14 @@ impl Marcel {
             self.history.push(&path);
         }
         self.current_dir = path;
+        self.select_after_directory_load = None;
         self.start_directory_load(true, cx);
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_back() {
             self.current_dir = path;
+            self.select_after_directory_load = None;
             self.start_directory_load(true, cx);
         }
     }
@@ -420,6 +465,7 @@ impl Marcel {
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_forward() {
             self.current_dir = path;
+            self.select_after_directory_load = None;
             self.start_directory_load(true, cx);
         }
     }
@@ -442,6 +488,13 @@ impl Marcel {
                 .and_then(|path| self.entries.iter().find(|entry| &entry.path == path))
                 .is_some_and(|entry| !entry.navigable),
             BrowserCommand::ClearSelection => !self.selection.selected().is_empty(),
+            BrowserCommand::NewFolder => !self.operation_busy && self.directory_error.is_none(),
+            BrowserCommand::UndoFileOperation => {
+                !self.operation_busy && self.operation_journal.can_undo()
+            }
+            BrowserCommand::RedoFileOperation => {
+                !self.operation_busy && self.operation_journal.can_redo()
+            }
             BrowserCommand::MoveUp
             | BrowserCommand::MoveDown
             | BrowserCommand::MoveLeft
@@ -462,7 +515,12 @@ impl Marcel {
         }
     }
 
-    fn execute_browser_command(&mut self, command: BrowserCommand, cx: &mut Context<Self>) {
+    fn execute_browser_command(
+        &mut self,
+        command: BrowserCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.command_enabled(command) {
             return;
         }
@@ -522,6 +580,9 @@ impl Marcel {
             BrowserCommand::GoBack => self.go_back(cx),
             BrowserCommand::GoForward => self.go_forward(cx),
             BrowserCommand::SelectAll => self.select_all_entries(cx),
+            BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
+            BrowserCommand::UndoFileOperation => self.start_undo(window, cx),
+            BrowserCommand::RedoFileOperation => self.start_redo(window, cx),
         }
     }
 
@@ -616,86 +677,273 @@ impl Marcel {
         cx.notify();
     }
 
-    fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::MoveUp, cx);
+    fn open_new_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_menu = None;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
+        let input_for_dialog = input.clone();
+        let view = cx.entity();
+
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input_for_ok = input_for_dialog.clone();
+            let view = view.clone();
+            dialog
+                .title("New Folder")
+                .child(Input::new(&input_for_dialog))
+                .confirm()
+                .button_props(DialogButtonProps::default().ok_text("Create"))
+                .on_ok(move |_, window, cx| {
+                    let name = input_for_ok.read(cx).value().trim().to_string();
+                    if let Err(error) = validate_entry_name(&name) {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                        return false;
+                    }
+
+                    view.update(cx, |this, cx| {
+                        this.start_create_directory(name.clone(), window, cx);
+                    });
+                    true
+                })
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
-    fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::MoveDown, cx);
+    fn start_create_directory(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.operation_busy {
+            return;
+        }
+
+        self.operation_busy = true;
+        let parent = self.current_dir.clone();
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || create_directory(&parent, &name)));
+
+        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                this.operation_busy = false;
+                match result {
+                    Ok(operation) => {
+                        let path = operation.path().to_path_buf();
+                        this.operation_journal.record(operation);
+                        this.refresh_after_operation(&path, true, cx);
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Created folder “{}”",
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy())
+                                    .unwrap_or_default()
+                            )),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
-    fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::MoveLeft, cx);
+    fn start_undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operation_busy {
+            return;
+        }
+        let Some(operation) = self.operation_journal.begin_undo() else {
+            return;
+        };
+
+        self.operation_busy = true;
+        let operation_for_task = operation.clone();
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || undo_operation(&operation_for_task)));
+
+        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                this.operation_busy = false;
+                match result {
+                    Ok(()) => {
+                        let path = operation.path().to_path_buf();
+                        this.operation_journal.finish_undo(operation);
+                        this.refresh_after_operation(&path, false, cx);
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Undid creation of “{}”",
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy())
+                                    .unwrap_or_default()
+                            )),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        this.operation_journal.cancel_undo(operation);
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
-    fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::MoveRight, cx);
+    fn start_redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operation_busy {
+            return;
+        }
+        let Some(operation) = self.operation_journal.begin_redo() else {
+            return;
+        };
+
+        self.operation_busy = true;
+        let operation_for_task = operation.clone();
+        let task = cx
+            .background_executor()
+            .spawn(smol::unblock(move || redo_operation(&operation_for_task)));
+
+        self.operation_task = Some(cx.spawn_in(window, async move |this, window| {
+            let result = task.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                this.operation_busy = false;
+                match result {
+                    Ok(redone) => {
+                        let path = redone.path().to_path_buf();
+                        this.operation_journal.finish_redo(redone);
+                        this.refresh_after_operation(&path, true, cx);
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Recreated folder “{}”",
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy())
+                                    .unwrap_or_default()
+                            )),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        this.operation_journal.cancel_redo(operation);
+                        window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
-    fn on_extend_up(&mut self, _: &ExtendUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendUp, cx);
+    fn refresh_after_operation(&mut self, path: &Path, select: bool, cx: &mut Context<Self>) {
+        if path.parent() != Some(self.current_dir.as_path()) {
+            return;
+        }
+        self.select_after_directory_load = select.then(|| path.to_path_buf());
+        self.start_directory_load(false, cx);
     }
 
-    fn on_extend_down(&mut self, _: &ExtendDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendDown, cx);
+    fn on_move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::MoveUp, window, cx);
     }
 
-    fn on_extend_left(&mut self, _: &ExtendLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendLeft, cx);
+    fn on_move_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::MoveDown, window, cx);
     }
 
-    fn on_extend_right(&mut self, _: &ExtendRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendRight, cx);
+    fn on_move_left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::MoveLeft, window, cx);
     }
 
-    fn on_extend_to_first(&mut self, _: &ExtendToFirst, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendToFirst, cx);
+    fn on_move_right(&mut self, _: &MoveRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::MoveRight, window, cx);
     }
 
-    fn on_extend_to_last(&mut self, _: &ExtendToLast, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendToLast, cx);
+    fn on_extend_up(&mut self, _: &ExtendUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::ExtendUp, window, cx);
     }
 
-    fn on_extend_page_up(&mut self, _: &ExtendPageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendPageUp, cx);
+    fn on_extend_down(&mut self, _: &ExtendDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::ExtendDown, window, cx);
     }
 
-    fn on_extend_page_down(&mut self, _: &ExtendPageDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::ExtendPageDown, cx);
+    fn on_extend_left(&mut self, _: &ExtendLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::ExtendLeft, window, cx);
     }
 
-    fn on_select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::SelectFirst, cx);
+    fn on_extend_right(&mut self, _: &ExtendRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::ExtendRight, window, cx);
     }
 
-    fn on_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::SelectLast, cx);
+    fn on_extend_to_first(
+        &mut self,
+        _: &ExtendToFirst,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::ExtendToFirst, window, cx);
     }
 
-    fn on_select_page_up(&mut self, _: &SelectPageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::SelectPageUp, cx);
+    fn on_extend_to_last(&mut self, _: &ExtendToLast, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::ExtendToLast, window, cx);
     }
 
-    fn on_select_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::SelectPageDown, cx);
+    fn on_extend_page_up(&mut self, _: &ExtendPageUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::ExtendPageUp, window, cx);
+    }
+
+    fn on_extend_page_down(
+        &mut self,
+        _: &ExtendPageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::ExtendPageDown, window, cx);
+    }
+
+    fn on_select_first(&mut self, _: &SelectFirst, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::SelectFirst, window, cx);
+    }
+
+    fn on_select_last(&mut self, _: &SelectLast, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::SelectLast, window, cx);
+    }
+
+    fn on_select_page_up(&mut self, _: &SelectPageUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::SelectPageUp, window, cx);
+    }
+
+    fn on_select_page_down(
+        &mut self,
+        _: &SelectPageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::SelectPageDown, window, cx);
     }
 
     fn on_activate_selection(
         &mut self,
         _: &ActivateSelection,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.execute_browser_command(BrowserCommand::ActivateSelection, cx);
+        self.execute_browser_command(BrowserCommand::ActivateSelection, window, cx);
     }
 
     fn on_open_with_selection(
         &mut self,
         _: &OpenWithSelection,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.execute_browser_command(BrowserCommand::OpenWithSelection, cx);
+        self.execute_browser_command(BrowserCommand::OpenWithSelection, window, cx);
     }
 
     fn on_clear_selection(
@@ -705,26 +953,48 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         if self.filter_query.is_empty() {
-            self.execute_browser_command(BrowserCommand::ClearSelection, cx);
+            self.execute_browser_command(BrowserCommand::ClearSelection, window, cx);
         } else {
             self.clear_filter(window, cx);
         }
     }
 
-    fn on_go_to_parent(&mut self, _: &GoToParent, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::GoToParent, cx);
+    fn on_go_to_parent(&mut self, _: &GoToParent, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::GoToParent, window, cx);
     }
 
-    fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::GoBack, cx);
+    fn on_go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::GoBack, window, cx);
     }
 
-    fn on_go_forward(&mut self, _: &GoForward, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::GoForward, cx);
+    fn on_go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::GoForward, window, cx);
     }
 
-    fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute_browser_command(BrowserCommand::SelectAll, cx);
+    fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::SelectAll, window, cx);
+    }
+
+    fn on_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_browser_command(BrowserCommand::NewFolder, window, cx);
+    }
+
+    fn on_undo_file_operation(
+        &mut self,
+        _: &UndoFileOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::UndoFileOperation, window, cx);
+    }
+
+    fn on_redo_file_operation(
+        &mut self,
+        _: &RedoFileOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_browser_command(BrowserCommand::RedoFileOperation, window, cx);
     }
 
     fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
@@ -1168,11 +1438,11 @@ impl Marcel {
         if search_focused {
             match stroke.key.as_str() {
                 "up" => {
-                    self.execute_browser_command(BrowserCommand::MoveUp, cx);
+                    self.execute_browser_command(BrowserCommand::MoveUp, window, cx);
                     cx.stop_propagation();
                 }
                 "down" => {
-                    self.execute_browser_command(BrowserCommand::MoveDown, cx);
+                    self.execute_browser_command(BrowserCommand::MoveDown, window, cx);
                     cx.stop_propagation();
                 }
                 _ => {}
@@ -1201,12 +1471,12 @@ impl Marcel {
                     return;
                 }
                 "up" if !browser_focused => {
-                    self.execute_browser_command(BrowserCommand::MoveUp, cx);
+                    self.execute_browser_command(BrowserCommand::MoveUp, window, cx);
                     cx.stop_propagation();
                     return;
                 }
                 "down" if !browser_focused => {
-                    self.execute_browser_command(BrowserCommand::MoveDown, cx);
+                    self.execute_browser_command(BrowserCommand::MoveDown, window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1386,6 +1656,9 @@ impl Marcel {
         let radius = cx.theme().radius;
         let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection);
         let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll);
+        let new_folder_enabled = self.command_enabled(BrowserCommand::NewFolder);
+        let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
+        let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
         let window_size = window.bounds().size;
         let menu_height = match menu.target {
             ContextMenuTarget::Entry => ENTRY_MENU_HEIGHT,
@@ -1432,9 +1705,98 @@ impl Marcel {
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.dismiss_entry_menu(cx);
                     }))
-                    .child(planned("– New Folder"))
+                    .child(
+                        h_flex()
+                            .id("directory-menu-new-folder")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .when(new_folder_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(colors.accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_menu = None;
+                                        this.execute_browser_command(
+                                            BrowserCommand::NewFolder,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(!new_folder_enabled, |this| {
+                                this.text_color(colors.muted_foreground)
+                            })
+                            .child("New Folder")
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Ctrl+Shift+N"),
+                            ),
+                    )
                     .child(planned("– New File"))
                     .child(planned("– Paste"))
+                    .child(
+                        h_flex()
+                            .id("directory-menu-undo")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .when(undo_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(colors.accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_menu = None;
+                                        this.execute_browser_command(
+                                            BrowserCommand::UndoFileOperation,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(!undo_enabled, |this| {
+                                this.text_color(colors.muted_foreground)
+                            })
+                            .child(if undo_enabled { "Undo" } else { "– Undo" })
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Ctrl+Z"),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .id("directory-menu-redo")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .when(redo_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(colors.accent))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_menu = None;
+                                        this.execute_browser_command(
+                                            BrowserCommand::RedoFileOperation,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(!redo_enabled, |this| {
+                                this.text_color(colors.muted_foreground)
+                            })
+                            .child(if redo_enabled { "Redo" } else { "– Redo" })
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Ctrl+Y"),
+                            ),
+                    )
                     .child(separator())
                     .child(
                         h_flex()
@@ -1445,9 +1807,13 @@ impl Marcel {
                             .when(select_all_enabled, |this| {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.accent))
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_menu = None;
-                                        this.execute_browser_command(BrowserCommand::SelectAll, cx);
+                                        this.execute_browser_command(
+                                            BrowserCommand::SelectAll,
+                                            window,
+                                            cx,
+                                        );
                                     }))
                             })
                             .when(!select_all_enabled, |this| {
@@ -1540,9 +1906,13 @@ impl Marcel {
                         .rounded(radius)
                         .cursor_pointer()
                         .hover(|this| this.bg(colors.accent))
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.entry_menu = None;
-                            this.execute_browser_command(BrowserCommand::ActivateSelection, cx);
+                            this.execute_browser_command(
+                                BrowserCommand::ActivateSelection,
+                                window,
+                                cx,
+                            );
                         }))
                         .child("Open")
                         .child(div().flex_1())
@@ -1562,10 +1932,11 @@ impl Marcel {
                         .when(open_with_enabled, |this| {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.accent))
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.entry_menu = None;
                                     this.execute_browser_command(
                                         BrowserCommand::OpenWithSelection,
+                                        window,
                                         cx,
                                     );
                                 }))
@@ -2991,6 +3362,9 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_go_forward))
             .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_new_folder))
+            .on_action(cx.listener(Self::on_undo_file_operation))
+            .on_action(cx.listener(Self::on_redo_file_operation))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| this.browser_focus.focus(window)),

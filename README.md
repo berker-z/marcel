@@ -36,12 +36,16 @@ Marcel is a working Linux-first alpha. It currently provides:
 - Native folder and MIME icons resolved from the active freedesktop icon theme.
 - Responsive list and icon views with selection preserved between them.
 - Progressive image thumbnails backed by the standard freedesktop disk cache.
+- Safe New Folder creation through a component dialog, with serialized
+  background execution, conflict notifications, and bounded `Ctrl+Z` /
+  `Ctrl+Y` undo and redo.
 - A shared palette system for Marcel and gpui-component, with Nord as the
   default.
 
 Sprint 1 remains active. Audio/video metadata and play actions, interactive
 breadcrumbs, and the full stress/fixture acceptance pass are not implemented
-yet. General file operations are outside the first sprint.
+yet. Sprint 3 has begun the broader file-operation work with New Folder and its
+validated undo/redo foundation.
 
 ## Development
 
@@ -68,6 +72,11 @@ Matches update both list and icon views; Up/Down moves through them, Enter
 activates the primary match, Backspace edits the query, and Escape clears it.
 `Ctrl+F` focuses the filter field directly. This is an in-memory filter of the
 current directory, not recursive filesystem search.
+
+Right-click empty browser space and choose `New Folder`, or press
+`Ctrl+Shift+N`. Marcel never overwrites an occupied destination. `Ctrl+Z`
+removes the newly created directory only if it is still the same empty
+directory; `Ctrl+Y` recreates it only if the path is free.
 
 PDF pages are rendered by Poppler in cancellable background processes. The Nix
 development shell includes the required `pdfinfo` and `pdftoppm` utilities.

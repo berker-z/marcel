@@ -1,5 +1,6 @@
 mod app;
 pub mod commands;
+pub mod file_ops;
 pub mod fs;
 mod history;
 mod icons;

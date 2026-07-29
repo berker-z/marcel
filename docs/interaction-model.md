@@ -5,9 +5,10 @@ shortcuts, context menus, and future toolbar actions. Sprint documents decide
 when each command is implemented; this is the cross-sprint interaction
 contract.
 
-The navigation and selection shortcuts below are implemented. File-operation
-shortcuts remain a contract for the safe-operation sprint and are not active
-until their transaction and undo behavior exists.
+The navigation and selection shortcuts below are implemented. New Folder and
+its bounded undo/redo path are the first active file operations; the remaining
+file-operation shortcuts stay inactive until their transaction and undo
+behavior exists.
 
 ## Principles
 
@@ -36,6 +37,7 @@ until their transaction and undo behavior exists.
 | `Ctrl+Left` | Go backward in navigation history |
 | `Ctrl+Right` | Go forward in navigation history |
 | `Ctrl+A` | Select all items in the current directory |
+| `Ctrl+Shift+N` | Create a folder in the current directory |
 
 Plain left/right behavior may differ between list and icon views, but the
 Control-modified navigation commands above take precedence in both.
@@ -98,8 +100,8 @@ Single-item commands such as Rename are disabled for multi-selection.
 Properties shows one item's details for a single selection and an aggregate
 summary for multiple items.
 
-The first context-menu shell exposes the intended item command set while file
-operations are still read-only. `Open` uses the configured MIME default without
+The first context-menu shell exposes the intended item command set while item
+operations remain read-only. `Open` uses the configured MIME default without
 prompting, while `Open With…` explicitly requests the desktop application
 chooser. Planned commands are disabled and prefixed with `–`: Cut, Copy, Paste,
 Duplicate, Rename, Move To, Move to Trash, Delete Permanently, Create Link,
@@ -115,17 +117,20 @@ initial order is:
 1. New Folder
 2. New File
 3. Paste
-4. Select All
-5. Refresh
-6. Show Hidden Files
-7. Open in Terminal
-8. Copy Location
-9. Properties
+4. Undo
+5. Redo
+6. Select All
+7. Refresh
+8. Show Hidden Files
+9. Open in Terminal
+10. Copy Location
+11. Properties
 
 Separators group creation and clipboard actions, selection and refresh,
 visibility, and directory utilities. Paste is disabled when the clipboard has
 no compatible file payload. Properties describes the displayed directory. Show
-Hidden Files is a checked toggle.
+Hidden Files is a checked toggle. New Folder, Undo, and Redo use the same
+command state as `Ctrl+Shift+N`, `Ctrl+Z`, and `Ctrl+Y`.
 
 View mode belongs in the persistent Places footer rather than this context
 menu. Marcel exposes a list/grid switch there. Future sorting controls should
@@ -180,7 +185,9 @@ runs away from the UI thread.
 - Copy undo removes only the copies created by Marcel and only when validation
   confirms they are still those outputs. Recoverable Trash is preferred over
   permanent removal.
-- Create undo moves the created item to Trash when it is safe to do so.
+- Create undo removes only the exact directory Marcel created and only while it
+  remains empty. Later create variants may prefer Trash where that produces a
+  stronger recovery contract.
 - Trash undo restores from the recorded Trash entry to the original path after
   conflict checks.
 - Redo replays the validated forward operation and creates a fresh resulting

@@ -28,6 +28,9 @@ actions!(
         GoBack,
         GoForward,
         SelectAll,
+        NewFolder,
+        UndoFileOperation,
+        RedoFileOperation,
     ]
 );
 
@@ -56,6 +59,9 @@ pub enum BrowserCommand {
     GoBack,
     GoForward,
     SelectAll,
+    NewFolder,
+    UndoFileOperation,
+    RedoFileOperation,
 }
 
 pub fn init(cx: &mut App) {
@@ -83,5 +89,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-left", GoBack, context),
         KeyBinding::new("ctrl-right", GoForward, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
+        KeyBinding::new("ctrl-shift-n", NewFolder, context),
+        KeyBinding::new("ctrl-z", UndoFileOperation, context),
+        KeyBinding::new("ctrl-y", RedoFileOperation, context),
     ]);
 }
