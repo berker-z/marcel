@@ -7,19 +7,25 @@ item here belongs in that sprint.
 
 ## Current priorities
 
-- Marcel's local-filesystem core is now a usable personal MVP: browsing,
-  previews, selection, filtering, bookmarks, incremental watching, safe
-  copy/move, Trash/restore, permanent deletion, archives, packaging, D-Bus
-  activation, single-instance routing, and bilateral Wayland file
-  drag-and-drop are implemented.
-- Finish and land the bounded desktop interoperability contract in
-  [`Sprint 14`](sprints/014-desktop-interop-and-single-instance.md):
-  complete Properties/`ShowItemProperties`, exercise the generic service
-  opt-in, and run the release-only Nix checks. X11 outbound drag support is not
-  a blocker for the initial Wayland-focused personal release.
-- Cut a `0.1.0` personal MVP release after the current flake package builds and
-  installs from a clean revision. Keep becoming the default directory handler
-  a separate, explicit user step.
+- Marcel's local-filesystem core has reached the personal daily-driver
+  milestone: browsing, previews, selection, filtering, bookmarks, incremental
+  watching, safe copy/move, Trash/restore, permanent deletion, archives,
+  packaging, D-Bus activation, single-instance routing, and bilateral Wayland
+  file drag-and-drop are implemented.
+- Continue distribution hardening before adding more features: the free 7-Zip
+  baseline and private font/icon identity bundle are complete; add Marcel's
+  branded icon and AppStream metadata, audit every runtime subprocess/resource,
+  and test from a clean minimal desktop.
+- Make the public documentation match the product's maturity. Restructure the
+  README around the application rather than the current packaging path, add
+  polished visual media, and keep installation guidance platform-neutral even
+  while Nix remains the only shipped package.
+- Cut a tagged `0.1.0` personal MVP release from the hardened package. Keep
+  becoming the default directory handler a separate, explicit user step, then
+  prepare the independent nixpkgs package contribution.
+- Finish Sprint 14's shared Properties/`ShowItemProperties` surface after the
+  packaging milestone. X11 outbound drag support is not a blocker for the
+  initial Wayland-focused release.
 - Complete the manual Trash/restore checks in
   [`Sprint 7`](sprints/007-trash-and-restore.md). The implementation uses the
   native freedesktop Trash, identity-validating undo/redo, and an aggregated
@@ -43,50 +49,60 @@ item here belongs in that sprint.
 - Finish Sprint 2 visual-browsing acceptance checks and thumbnail failure
   presentation.
 
-## MVP closure
+## Daily-driver milestone and `v0.1.0` closure
 
-The remaining work required before calling Marcel's first personal-use release
-complete is intentionally small:
+The personal daily-driver milestone is complete. The remaining work before a
+tagged, publicly consumable `v0.1.0` is intentionally bounded:
 
-1. Land Sprint 14; its updated flake package builds successfully without
-   taking MIME or generic FileManager1 ownership. Confirm the clean committed
-   revision installs and launches downstream.
-2. Implement one shared read-only Properties presentation and route both the
+1. Harden the distribution closure: free archive baseline, packaged icon
+   fallback, branded icon/AppStream metadata, clean-environment launch checks,
+   and documented runtime dependencies.
+2. Tag `0.1.0`, build it from the tag on both declared architectures, and
+   verify that installing it takes neither MIME nor generic FileManager1
+   ownership.
+3. Implement one shared read-only Properties presentation and route both the
    in-app action and D-Bus `ShowItemProperties` through it.
-3. Implement New File with the same bounded name validation and no-overwrite
+4. Implement New File with the same bounded name validation and no-overwrite
    behavior as New Folder.
-4. Run the outstanding destructive-operation smoke checks, especially
+5. Run the outstanding destructive-operation smoke checks, especially
    mounted-volume Trash behavior.
-5. Establish the `0.1.0` changelog/tag and run the release-only Nix build and
-   flake check.
+6. Submit the tagged package to nixpkgs after its package recipe passes
+   `nixpkgs-review`.
 
 Everything else—X11 outbound drag, desktop clipboard integration, Duplicate,
-Move To, cross-filesystem conflict UI, remote locations, persistent settings,
-custom sorting, media playback, and deeper coordinator extraction—is valuable
-post-MVP work rather than a reason to hold the first personal release.
+Move To, cross-filesystem conflict UI, remote locations, broader preference
+persistence, custom sorting, media playback, and deeper coordinator
+extraction—is valuable post-MVP work rather than a reason to hold the first
+personal release.
 
 ## Recommended delivery order
 
 This order favors daily-driver completeness over novelty while keeping new
 state machines out of Marcel's coordinator until they have clear ownership.
 
-1. Close Sprint 14's remaining Properties and release-acceptance checks without
-   changing the user's default directory handler merely by installing Marcel.
-2. Add New File, then finish the Sprint 7 and Sprint 8 destructive-operation
+1. Complete [Sprint 16](sprints/016-public-release-presentation.md): public
+   documentation, branded artwork, AppStream metadata, and honest
+   platform-neutral installation structure.
+2. Complete the distribution-hardening checklist below and test the flake
+   install on a clean minimal NixOS environment.
+3. Cut `v0.1.0` and prepare the nixpkgs package.
+4. Close Sprint 14's remaining Properties surface without changing the user's
+   default directory handler merely by installing Marcel.
+5. Add New File, then finish the Sprint 7 and Sprint 8 destructive-operation
    smoke tests and record any discovered recovery or mounted-volume behavior.
-3. Cut the first personal-use release, then add Duplicate and Move To.
-4. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
+6. Add Duplicate and Move To.
+7. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
    from `app.rs`, preserving current behavior and tests. Do not turn this into
    an abstract architecture rewrite.
-5. Finish X11 source support and manual acceptance for the implemented
+8. Finish X11 source support and manual acceptance for the implemented
    bilateral native desktop drag-and-drop, then add desktop clipboard
    interoperability.
-6. Add cross-filesystem transfers, explicit conflict decisions, and the
+9. Add cross-filesystem transfers, explicit conflict decisions, and the
    documented symbolic-link policy.
-7. Add removable volumes, mounts, and common remote locations.
-8. Consolidate persistent settings, themes, fonts, sorting, grouping, zoom,
+10. Add removable volumes, mounts, and common remote locations.
+11. Consolidate broader settings, sorting, grouping, zoom,
    and other UI refinements.
-9. Add media playback and optional ebook previews after the file-manager and
+12. Add media playback and optional ebook previews after the file-manager and
    desktop-integration foundation is complete.
 
 The known PDF resize problem, interrupted permanent-delete quarantine
@@ -95,6 +111,10 @@ manual sprint acceptance checks remain cross-cutting quality work rather than
 optional feature ideas.
 
 ## Desktop integration and distribution
+
+The packaging contract, current dependency caveats, target formats, and
+`v0.1.0` gate are detailed in the
+[release and distribution plan](release.md).
 
 - [x] Accept local paths and `file://` URIs on the command line so desktop launchers
   can invoke `marcel %U`.
@@ -123,9 +143,49 @@ optional feature ideas.
 - [x] Keep ownership of the generic `org.freedesktop.FileManager1` activation name
   opt-in. Installing `pkgs.marcel` alone must not displace the user's current
   generic file manager.
-- Add release automation and optionally a binary cache.
-- Submit Marcel to nixpkgs after the application has a stable release,
-  complete metadata, icons, desktop integration, and reproducible packaging.
+- [x] Make the default package fully free and cacheable by switching its
+  private backend from `_7zz-rar` to `_7zz`; keep RAR/CBR actions disabled
+  unless an explicitly supplied capable backend is enabled.
+- [ ] Expose RAR decoding as an explicitly unfree opt-in package variant rather
+  than requiring users to assemble the backend and
+  `MARCEL_ENABLE_RAR=1` override themselves.
+- [ ] Add a distinct Marcel application icon in the freedesktop-required
+  scalable and raster sizes. Use it in the desktop entry, window metadata, and
+  AppStream metadata.
+- [ ] Install and validate `io.github.berker_z.Marcel.metainfo.xml`, including
+  release data, content rating, URLs, launchable desktop ID, and representative
+  screenshots.
+- [x] Bundle a private curated Nordzy fallback containing only Marcel's
+  semantic Places and MIME icons. Prefer only an explicit Marcel theme override
+  over Nordzy; use the ambient GTK theme afterward for missing-icon coverage.
+  Keep the bundle under approximately 250 KiB, preserve GPL-3.0 source SVGs and
+  notices, and verify precedence with automated layer-order coverage.
+- [x] Bundle private regular and semibold Iosevka subsets as Marcel's default
+  UI family. Target Latin, Greek, Cyrillic, punctuation, currency, arrows,
+  mathematical, box-drawing, and geometric ranges in under approximately
+  750 KiB total; use system font fallback for other scripts and let
+  `MARCEL_FONT_FAMILY` explicitly override both typography roles.
+- [ ] Audit and document the runtime closure: GIO, Poppler tools, 7-Zip,
+  Fontconfig/Freetype, graphics/Wayland/X11 libraries, D-Bus activation files,
+  icon lookup paths, thumbnail cache paths, and desktop portals.
+- [ ] Add clean-environment package smoke tests that launch Marcel, enumerate a
+  fixture directory, resolve baseline icons/fonts, render one PDF, extract one
+  free archive, and verify installed desktop/AppStream/D-Bus metadata.
+- [ ] Establish tagged release sources, changelog/release notes, deterministic
+  versioning, release checks on `x86_64-linux` and `aarch64-linux`, and optional
+  Cachix/GitHub release automation.
+- [ ] Submit `marcel` to nixpkgs as a tagged-source package with a free closure,
+  a maintainer, complete `meta`, and a package test. Run `nixfmt`,
+  `nixpkgs-review`, the package build/tests, and use the conventional
+  `marcel: init at 0.1.0` commit.
+- [ ] Treat Flatpak as a separate compatibility project, not a repackaging
+  checkbox: prototype host-filesystem access, portals, D-Bus activation,
+  external file DnD, Trash, subprocesses, and icon discovery inside the
+  sandbox. Do not advertise it until those semantics match the native package.
+- [ ] Re-evaluate Flathub only if Marcel is eligible under the then-current
+  submission policy. The current policy treats broad-scope file managers as
+  exceptional and disallows AI-assisted application content and AI-generated
+  submission work, so a compliant Flathub submission is currently blocked.
 - Treat becoming an `xdg-desktop-portal` file-picker backend as a separate
   project, not part of becoming the default file explorer.
 
@@ -261,11 +321,14 @@ optional feature ideas.
   list/icon-view control.
 - [x] Add a hot-reloading theme selector backed by Marcel's semantic color
   tokens, with a curated built-in palette registry.
+- [x] Expose theme, icon theme, and UI font through configured Nix packages
+  plus Home Manager/NixOS modules.
+- [x] Persist list/grid view and hidden-file visibility as versioned, atomic
+  interaction state under the XDG configuration directory.
 - Support installing or loading additional palettes without introducing
   hard-coded component colors.
-- Add a UI-font selector with system font discovery, an explicit default, and
-  a bundled-font policy. Preserve the fast Iosevka toggle as a convenient
-  preset until the selector replaces it.
+- Add a UI-font selector backed by the same single font-family setting as
+  `MARCEL_FONT_FAMILY`; keep bundled Marcel Iosevka as the explicit default.
 - Move Show Hidden, default view mode, typography, theme, preview behavior, and
   other durable preferences into a documented settings model.
 - Persist settings under the XDG config directory with versioned, atomic,
@@ -302,11 +365,12 @@ optional feature ideas.
 - [x] Add an in-app theme selector on top of the existing palette system.
 - [x] Make custom Marcel surfaces use the active theme radius and keep
   typography on semantic `rem`-based roles.
-- [x] Add a session-level system/Iosevka UI-font switch.
+- [x] Replace the session-level system/Iosevka switch with one font-family
+  variable shared by UI and monospace roles, defaulting to bundled Iosevka.
 - [x] Measure the active monospace font for virtualized preview wrapping and
   row height instead of assuming fixed character geometry.
-- Persist typography preferences and package a compact OFL-licensed Iosevka
-  face or subset for systems where the family is not installed.
+- Persist the typography preference currently exposed through
+  `MARCEL_FONT_FAMILY`.
 
 ## Engineering and release quality
 
@@ -320,3 +384,41 @@ optional feature ideas.
 - Establish release versioning, changelog, and compatibility policy.
 - Keep Yazi adaptations and other upstream reuse documented in
   `THIRD_PARTY_NOTICES.md`.
+
+## Documentation and public presentation
+
+- Restructure the root README into a product-first landing page:
+  - short identity statement and maturity/support badge;
+  - one representative hero image or short GIF before implementation detail;
+  - compact feature tour and safety expectations;
+  - platform-neutral installation table;
+  - configuration/state distinction;
+  - links to focused contributor, release, roadmap, and architecture docs.
+- Record and optimize a short deterministic GIF showing navigation, filtering,
+  preview, list/grid switching, and one safe file action. Avoid personal paths
+  or data, provide meaningful alt text, include a static fallback image, and
+  keep the repository/download cost reasonable.
+- Add a small curated screenshot set covering list view, grid thumbnails,
+  preview types, themes, and conventional context menus. Refresh it deliberately
+  for releases rather than allowing screenshots to drift silently.
+- Make installation documentation platform-neutral:
+  - show a support matrix with Nix marked available today;
+  - reserve stable sections for AppImage, Flatpak/Flathub, AUR, Debian/Ubuntu,
+    and Fedora/RPM without publishing commands for artifacts that do not exist;
+  - keep “make Marcel the default file manager” separate from installation;
+  - give every packaging route the same desktop-integration and archive-policy
+    contract.
+- Split user installation/configuration guidance from the maintainer-facing
+  release handbook. The root README should summarize; `docs/release.md` should
+  retain artifact, tag, CI, repository-submission, and licensing details.
+- Maintain [`docs/README.md`](README.md) as the internal documentation index
+  and current-milestone pointer.
+- Audit stale version pins, feature counts, sprint references, limitation
+  claims, and command examples before every tag.
+- Add a contributor quickstart covering the dev shell, Rust quality gate,
+  release-only Nix checks, fixture policy, and GPUI/upstream licensing rules.
+- Add automated Markdown-link checking and a lightweight documentation lint
+  once the public structure settles.
+- Preserve numbered sprint files as implementation history. Use explicit
+  statuses and the docs index for the current milestone rather than rewriting
+  old acceptance records to resemble a changelog.

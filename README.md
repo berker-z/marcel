@@ -42,8 +42,9 @@ compatibility between alpha versions.
 - Native Wayland file drag-and-drop with browsers, desktops, and other file
   managers. Incoming external files are copied through Marcel's bounded,
   cancellable, no-overwrite transfer path.
-- Semantic icons from the active freedesktop icon theme and progressive image
-  thumbnails backed by the standard freedesktop thumbnail cache.
+- A private Nordzy semantic-icon baseline, explicit theme overrides, ambient
+  GTK fallback for uncovered names, and progressive image thumbnails backed
+  by the standard freedesktop thumbnail cache.
 - Resizable browser and preview workspace with a fixed, content-sized Places
   sidebar.
 
@@ -120,9 +121,146 @@ Direct typing starts filtering regardless of whether the browser or preview
 currently has focus, but yields to dialogs and other text editors. Filtering is
 in-memory and limited to the current directory; it is not recursive search.
 
+## Installation
+
+### Nix flake (currently supported)
+
+Run Marcel without installing it:
+
+```sh
+nix run github:berker-z/marcel -- ~/Downloads
+```
+
+Install the current package into a user profile:
+
+```sh
+nix profile install github:berker-z/marcel
+```
+
+These commands currently follow `master`; pin a commit for reproducible
+personal use:
+
+```sh
+nix profile install github:berker-z/marcel/FULL_COMMIT_HASH
+```
+
+### Use from another Nix flake
+
+Add Marcel as an input:
+
+```nix
+inputs.marcel = {
+  url = "github:berker-z/marcel";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+Apply its overlay and install the package:
+
+```nix
+{
+  nixpkgs.overlays = [inputs.marcel.overlays.default];
+  environment.systemPackages = [pkgs.marcel];
+}
+```
+
+This installs Marcel without changing any MIME association or generic
+file-manager D-Bus ownership. Marcel's default package uses nixpkgs' free
+`_7zz` backend and does not require `allowUnfree`.
+
+### Declarative Marcel settings
+
+The flake exports Home Manager and NixOS modules for declarative visual
+configuration. With Home Manager:
+
+```nix
+{
+  imports = [inputs.marcel.homeManagerModules.default];
+
+  programs.marcel = {
+    enable = true;
+    settings = {
+      theme = "tokyo-night";
+      icon_theme = "Breeze";
+      ui_font = "IBM Plex Mono";
+    };
+  };
+}
+```
+
+Use `imports = [inputs.marcel.nixosModules.default]` for the same
+`programs.marcel` options in a NixOS module. Both modules install a configured
+wrapper while leaving MIME defaults and generic FileManager1 ownership alone.
+Set `icon_theme = null` to preserve Marcel's Nordzy-first icon resolution and
+`ui_font = null` to use bundled Iosevka; both are the defaults.
+
+View mode and Show Hidden are deliberately not Nix options. Marcel treats them
+as interaction state and remembers the last selected values in
+`$XDG_CONFIG_HOME/marcel/state.conf`, or `~/.config/marcel/state.conf` when
+`XDG_CONFIG_HOME` is unset. First-run defaults are grid view with hidden files
+visible.
+
+When using the overlay directly, the same wrapper is available without a
+module:
+
+```nix
+environment.systemPackages = [
+  (pkgs.marcel.withSettings {
+    theme = "gruvbox-dark";
+    icon_theme = null;
+    ui_font = null;
+  })
+];
+```
+
+The flake separately exposes `packages.<system>.file-manager1-service` for a
+downstream configuration that explicitly wants Marcel to own the generic
+`org.freedesktop.FileManager1` activation service.
+
+For Home Manager, make Marcel the default directory handler declaratively:
+
+```nix
+{
+  xdg.mimeApps = {
+    enable = true;
+    associations.added."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
+    defaultApplications."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
+  };
+}
+```
+
+The desktop identifier is `io.github.berker_z.Marcel.desktop`.
+`marcel.desktop` remains a hidden compatibility alias. Marcel does not claim
+ZIP, 7z, RAR, tar, or other archive MIME types.
+
+### Fonts and icons
+
+Marcel ships a private, compact Iosevka Mono subset and a curated private
+subset of twenty Nordzy semantic icons. Regular and semibold font faces plus
+the SVG icons and their licenses occupy approximately 804 KiB uncompressed,
+instead of depending on a complete Nerd Font or the approximately 89 MiB
+Nordzy package.
+
+The bundled resources provide Marcel's deliberate default appearance without
+installing a font or icon theme system-wide. An explicit Marcel icon-theme
+override replaces Nordzy; the ambient GTK theme does not. Instead, the GTK
+theme supplies icons missing from Marcel's curated bundle before the final
+generic-glyph fallback. Both the UI and monospace text roles use the private
+`Marcel Iosevka` family by default. Set `MARCEL_FONT_FAMILY` to the exact name
+of an installed family to override both roles. Marcel's own branded launcher
+icon remains a separate original asset that must be added before the first
+release.
+
+The pinned upstream versions, hashes, Unicode ranges, licenses, and
+reproducible generator live in [`assets/README.md`](assets/README.md) and
+[`scripts/build_identity_assets.py`](scripts/build_identity_assets.py).
+
+There are no nixpkgs or Flatpak/Flathub releases yet. Until the first tagged
+release, the repository flake is the supported installation route.
+
 ## Development
 
-Run the packaged application against a path:
+Run the local packaged application against a path:
 
 ```sh
 nix run . -- ~/Downloads
@@ -149,8 +287,8 @@ even in Marcel's development profile so decode and rendering behavior remains
 representative; subsequent Marcel-only builds are incremental.
 
 The Nix shell supplies the current stable Rust toolchain from the locked
-`nixpkgs` and `rust-overlay` inputs, plus Poppler, FFmpeg, the RAR-enabled
-official 7-Zip backend, and native GPUI dependencies. Update the environment
+`nixpkgs` and `rust-overlay` inputs, plus Poppler, FFmpeg, the free official
+7-Zip backend, and native GPUI dependencies. Update the environment
 intentionally:
 
 ```sh
@@ -167,52 +305,11 @@ nix build
 The package installs `marcel`, the branded
 `io.github.berker_z.Marcel.desktop` entry, a hidden `marcel.desktop`
 compatibility alias, the branded D-Bus activation service, Poppler/GIO runtime
-tools, and a private RAR-capable 7-Zip backend. It advertises only
-`inode/directory`; archive double-click behavior remains owned by the user's
-archive viewer.
-
-### Use from another Nix flake
-
-Add Marcel as an input:
-
-```nix
-inputs.marcel = {
-  url = "github:berker-z/marcel";
-  inputs.nixpkgs.follows = "nixpkgs";
-};
-```
-
-Apply its overlay and install the package:
-
-```nix
-{
-  nixpkgs.overlays = [inputs.marcel.overlays.default];
-  environment.systemPackages = [pkgs.marcel];
-}
-```
-
-This installs Marcel without changing any MIME association or generic
-file-manager D-Bus ownership.
-
-The flake separately exposes `packages.<system>.file-manager1-service` for a
-downstream configuration that explicitly wants Marcel to own the generic
-`org.freedesktop.FileManager1` activation service.
-
-For Home Manager, make Marcel the default directory handler declaratively:
-
-```nix
-{
-  xdg.mimeApps = {
-    enable = true;
-    associations.added."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
-    defaultApplications."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
-  };
-}
-```
-
-The desktop identifier is `io.github.berker_z.Marcel.desktop`.
-`marcel.desktop` remains a hidden compatibility alias. Marcel does not claim
-ZIP, 7z, RAR, tar, or other archive MIME types.
+tools, and a private free 7-Zip backend. RAR and CBR extraction are disabled in
+the default package because their decoder is non-free. Advanced users can opt
+in with both `MARCEL_7ZZ=/path/to/rar-capable-7zz` and
+`MARCEL_ENABLE_RAR=1`. Marcel advertises only `inode/directory`; archive
+double-click behavior remains owned by the user's archive viewer.
 
 Required checks:
 
@@ -233,11 +330,13 @@ overrides are also available:
 MARCEL_THEME=tokyo-night cargo run
 MARCEL_THEME=catppuccin-mocha cargo run
 MARCEL_ICON_THEME=breeze cargo run
+MARCEL_FONT_FAMILY="IBM Plex Mono" cargo run
 ```
 
-The Places footer currently exposes session-level switches for Iosevka, hidden
-files, and list/icon view, plus the Settings button. Iosevka is enabled by
-default when a supported installed family is available.
+The Places footer exposes Show Hidden, list/icon view, and the Settings button.
+Font selection has one source of truth rather than a session toggle: bundled
+Iosevka Mono unless `MARCEL_FONT_FAMILY` explicitly selects an installed
+family.
 
 ## Known limitations
 
@@ -264,8 +363,9 @@ Marcel is not ready to replace a mature system file manager for every workflow:
 - Recursive filename/content search is not implemented.
 - Audio/video metadata, explicit playback, and ebook previews are not
   implemented.
-- Settings are session-only. Pane sizes, view choice, typography, palette, and
-  other preferences are not persisted.
+- List/grid view and hidden-file visibility persist as interaction state.
+  Broader preference persistence—including pane sizes, sorting, and zoom—is
+  still roadmap work; visual identity is declaratively configurable on Nix.
 - Sorting, grouping, zoom, and complete accessibility coverage remain roadmap
   work.
 - PDF resizing has a known behavior problem that still needs a reproducible
@@ -274,36 +374,45 @@ Marcel is not ready to replace a mature system file manager for every workflow:
 
 ## Roadmap
 
-The immediate alpha-to-daily-driver sequence is:
+The personal daily-driver milestone is reached. The immediate
+daily-driver-to-`0.1.0` sequence is:
 
-1. Finish Sprint 14 acceptance, the shared Properties surface, and X11 native
-   file-drag source without silently changing the system's default file
+1. Polish the public README and documentation structure, add representative
+   screenshots/GIF media, and keep installation guidance honest about the
+   currently Nix-only distribution.
+2. Add the branded application icon and AppStream metadata, then run the clean
+   installed-package audit without silently changing the system's default file
    manager.
-2. Complete destructive-operation, mounted-Trash, watcher, preview, and
+3. Finish Sprint 14 acceptance and the shared Properties surface.
+4. Complete destructive-operation, mounted-Trash, watcher, preview, and
    large-directory acceptance passes.
-3. Finish New File and Properties, then add Duplicate and Move To in their
+5. Finish New File, then add Duplicate and Move To in their
    appropriate operation slices.
-4. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
+6. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
    from the application coordinator.
-5. Finish native desktop drag-and-drop acceptance and implement desktop
+7. Finish X11 outbound native drag acceptance and implement desktop
    clipboard interoperability.
-6. Add cross-filesystem transfers, conflict decisions, and a documented
+8. Add cross-filesystem transfers, conflict decisions, and a documented
    symbolic-link policy.
-7. Add removable volumes, mounts, and common remote locations.
-8. Add a branded icon and non-Nix release artifacts.
-9. Consolidate persistent settings, themes, sorting, grouping, zoom, and
+9. Add removable volumes, mounts, and common remote locations.
+10. Add non-Nix release artifacts.
+11. Consolidate broader persistent settings, sorting, grouping, zoom, and
    accessibility work.
-10. Add media playback and optional ebook previews after the file-manager
+12. Add media playback and optional ebook previews after the file-manager
    foundation is complete.
 
 The authoritative cross-sprint roadmap lives in the
 [product backlog](docs/TODO.md). The
+[release and distribution plan](docs/release.md) records packaging caveats,
+release automation, and the routes to nixpkgs and other Linux distributions.
+The
 [interaction model](docs/interaction-model.md) defines selection, shortcuts,
 menus, reversibility, and destructive-operation behavior. Detailed
 implementation and acceptance history is recorded under
-[`docs/sprints/`](docs/sprints/); Marcel has progressed through thirteen
-implemented numbered sprints, with desktop interoperability in progress as
-Sprint 14.
+[`docs/sprints/`](docs/sprints/). Marcel has progressed through fifteen
+numbered implementation sprints;
+[Sprint 16](docs/sprints/016-public-release-presentation.md) tracks the next
+public-presentation and release-metadata pass.
 
 ## Acknowledgements and provenance
 

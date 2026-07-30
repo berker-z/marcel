@@ -29,12 +29,6 @@
         import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
-          config.allowUnfreePredicate =
-            package:
-            builtins.elem (nixpkgs.lib.getName package) [
-              "7zz"
-              "uasm"
-            ];
         };
     in
     {
@@ -74,6 +68,22 @@
             inherit marcel;
           };
         };
+
+      homeManagerModules.default = import ./nix/settings-module.nix {
+        flake = self;
+        packageOption = [
+          "home"
+          "packages"
+        ];
+      };
+
+      nixosModules.default = import ./nix/settings-module.nix {
+        flake = self;
+        packageOption = [
+          "environment"
+          "systemPackages"
+        ];
+      };
 
       checks = forAllSystems (system: {
         package = self.packages.${system}.marcel;
@@ -121,7 +131,7 @@
               git
               pkg-config
               poppler-utils
-              _7zz-rar
+              _7zz
             ])
             ++ runtimeLibraries;
 

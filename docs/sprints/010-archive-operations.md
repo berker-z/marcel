@@ -45,9 +45,10 @@ official 7-Zip's standalone console program. Runtime discovery is:
 Distribution artifacts provide the backend instead of making the user's
 ambient `PATH` the product contract:
 
-- Nix uses nixpkgs' narrowly allowlisted `_7zz-rar` variant so actual RAR
-  extraction matches Marcel's format promise. Debian, RPM, and Arch packages
-  depend on their maintained full 7-Zip package and expose it to Marcel;
+- Nix uses nixpkgs' free `_7zz` variant. RAR and CBR actions stay unavailable
+  unless the user explicitly supplies a capable non-free backend and enables
+  `MARCEL_ENABLE_RAR`. Debian, RPM, and Arch packages should follow the same
+  free-by-default contract;
 - Flatpak builds 7-Zip as a module;
 - AppImage and portable tarball artifacts bundle only the architecture-specific
   static `7zzs` executable as private `libexec/marcel/7zz`, together with all
@@ -104,9 +105,9 @@ first slice does not recursively chase arbitrary nested archives.
 - [x] Add a Marcel-owned archive backend interface and supervised 7-Zip
   implementation.
 - [x] Implement and test the four-level runtime discovery order.
-- [x] Add the narrowly allowlisted RAR-enabled 7-Zip dependency to the Nix
-  development environment without relying on the developer machine's ambient
-  `PATH`.
+- [x] Replace the initial narrowly allowlisted RAR-enabled dependency with free
+  `_7zz` in the Nix development environment without relying on the developer
+  machine's ambient `PATH`.
 - [x] Record Yazi provenance and bundled 7-Zip licensing in
   `THIRD_PARTY_NOTICES.md`.
 - [x] List and preflight supported archives with bounded diagnostics.
@@ -122,8 +123,8 @@ first slice does not recursively chase arbitrary nested archives.
   actions.
 - [x] Apply exact top-level operation results without replacing the active
   directory session.
-- [x] Add an installable Nix package whose wrapper guarantees RAR-capable
-  7-Zip in its closure as private `libexec/marcel/7zz`.
+- [x] Add an installable Nix package whose wrapper guarantees free 7-Zip in its
+  closure as private `libexec/marcel/7zz`.
 - [ ] Make future portable artifacts install static `7zzs` as private
   `libexec/marcel/7zz`.
 - [ ] Manually verify progress, cancellation, ZIP interoperability, broad

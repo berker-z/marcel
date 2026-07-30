@@ -19,7 +19,7 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, IndexPath, Root, Sizable, Theme, WindowExt,
+    ActiveTheme, Disableable, IndexPath, Root, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     h_flex,
@@ -72,6 +72,7 @@ use crate::{
     operations::{FileClipboard, OperationController, OperationProgressKind},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
+    state::{self, BrowserState, BrowserView},
     theme::{self, Palette},
     thumbnails,
     trash_ops::{
@@ -113,8 +114,6 @@ const ENTRY_MENU_MARGIN: f32 = 8.0;
 const BOOKMARK_MENU_WIDTH: f32 = 152.0;
 const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
 const MAX_EXTERNAL_DROP_PATHS: usize = 256;
-const IOSEVKA_UI_FONTS: [&str; 2] = ["Iosevka Nerd Font Mono", "Iosevka"];
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ViewMode {
     #[default]
@@ -264,9 +263,6 @@ pub struct Marcel {
     browser_focus: FocusHandle,
     palette: Palette,
     home_dir: PathBuf,
-    system_ui_font: SharedString,
-    use_iosevka_ui: bool,
-    iosevka_ui_font: Option<SharedString>,
     directory: DirectorySession,
     search_input: Entity<InputState>,
     _search_subscriptions: Vec<Subscription>,
@@ -324,6 +320,8 @@ pub struct Marcel {
     preview_width: Rc<Cell<Pixels>>,
     preview_mono_cell_width: Rc<Cell<Pixels>>,
     preview_mono_line_height: Rc<Cell<Pixels>>,
+    state_save_sender: async_channel::Sender<BrowserState>,
+    _state_save_task: Task<()>,
     history: NavigationHistory,
     places: Vec<Place>,
     place_icons: HashMap<PathBuf, PathBuf>,
@@ -354,8 +352,6 @@ impl Marcel {
             async_channel::bounded(THUMBNAIL_WORKERS);
         let (pdf_page_wake_sender, pdf_page_wake_receiver) =
             async_channel::bounded(PDF_PAGE_WORKERS);
-        let system_ui_font = cx.theme().font_family.clone();
-        let available_fonts = cx.text_system().all_font_names();
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Filter current folder")
@@ -376,24 +372,28 @@ impl Marcel {
                 this.on_location_input_event(input, event, window, cx);
             },
         );
-        let iosevka_ui_font = IOSEVKA_UI_FONTS
-            .iter()
-            .find(|family| available_fonts.iter().any(|name| name == **family))
-            .map(|family| SharedString::from(*family));
-        let use_iosevka_ui = iosevka_ui_font.is_some();
-        if let Some(font) = &iosevka_ui_font {
-            Theme::global_mut(cx).font_family = font.clone();
-        }
         let mono_font_size = cx.theme().mono_font_size;
+        let state_path = state::default_path(&home_dir);
+        let browser_state = state::load(&state_path).unwrap_or_else(|error| {
+            eprintln!("Could not load Marcel browser state: {error:#}");
+            BrowserState::default()
+        });
+        let (state_save_sender, state_save_receiver) = async_channel::unbounded();
+        let state_save_task = cx.background_executor().spawn(async move {
+            while let Ok(browser_state) = state_save_receiver.recv().await {
+                if let Err(error) = state::save(&state_path, browser_state) {
+                    eprintln!("Could not save Marcel browser state: {error:#}");
+                }
+            }
+        });
+        let mut directory = DirectorySession::new(start_dir.clone());
+        directory.show_hidden = browser_state.show_hidden;
 
         let mut this = Self {
             browser_focus: cx.focus_handle(),
             palette: theme::active(),
             home_dir: home_dir.clone(),
-            system_ui_font,
-            use_iosevka_ui,
-            iosevka_ui_font,
-            directory: DirectorySession::new(start_dir.clone()),
+            directory,
             search_input,
             _search_subscriptions: vec![search_subscription],
             location_input,
@@ -415,7 +415,10 @@ impl Marcel {
             entry_hit_bounds: Rc::new(RefCell::new(HashMap::new())),
             entry_content_bounds: Rc::new(RefCell::new(HashMap::new())),
             directory_scroll: UniformListScrollHandle::new(),
-            view_mode: ViewMode::List,
+            view_mode: match browser_state.view {
+                BrowserView::List => ViewMode::List,
+                BrowserView::Grid => ViewMode::Grid,
+            },
             grid_layout_columns: 1,
             thumbnails: HashMap::new(),
             thumbnail_order: VecDeque::new(),
@@ -450,6 +453,8 @@ impl Marcel {
             preview_width: Rc::new(Cell::new(px(0.0))),
             preview_mono_cell_width: Rc::new(Cell::new(mono_font_size * 0.6)),
             preview_mono_line_height: Rc::new(Cell::new(mono_font_size * 1.5)),
+            state_save_sender,
+            _state_save_task: state_save_task,
             history: NavigationHistory::new(start_dir),
             places: vec![Place::home(home_dir.clone())],
             place_icons: HashMap::new(),
@@ -2888,6 +2893,7 @@ impl Marcel {
             return;
         }
         self.view_mode = mode;
+        self.persist_browser_state();
         self.marquee = None;
         self.marquee_scroll_task.take();
         self.entry_content_bounds.borrow_mut().clear();
@@ -3100,22 +3106,6 @@ impl Marcel {
         }
     }
 
-    fn set_iosevka_ui(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if enabled && self.iosevka_ui_font.is_none() {
-            return;
-        }
-
-        self.use_iosevka_ui = enabled;
-        Theme::global_mut(cx).font_family = if enabled {
-            self.iosevka_ui_font
-                .clone()
-                .unwrap_or_else(|| self.system_ui_font.clone())
-        } else {
-            self.system_ui_font.clone()
-        };
-        cx.refresh_windows();
-    }
-
     fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let palettes = Palette::ALL
             .iter()
@@ -3316,7 +3306,7 @@ impl Marcel {
             .places
             .iter()
             .map(|place| place.label.clone())
-            .chain(["Iosevka Mono".to_string(), "Finding places…".to_string()])
+            .chain(["Finding places…".to_string()])
             .map(|label| {
                 window
                     .text_system()
@@ -3338,8 +3328,8 @@ impl Marcel {
             .map(f32::from)
             .fold(0.0, f32::max);
 
-        // Outer padding + row padding + themed icon + gap. The footer switch
-        // needs approximately the same remaining width as a place icon.
+        // Outer padding + row padding + themed icon + gap. Footer controls need
+        // approximately the same remaining width as a place icon.
         px((max_text_width + 76.0).clamp(MIN_PLACES_WIDTH, MAX_PLACES_WIDTH))
     }
 
@@ -3378,6 +3368,7 @@ impl Marcel {
             return;
         };
 
+        self.persist_browser_state();
         self.apply_selection_reconcile(reconcile, cx);
         self.directory_scroll = UniformListScrollHandle::new();
         self.entry_hit_bounds.borrow_mut().clear();
@@ -3385,6 +3376,16 @@ impl Marcel {
         self.marquee = None;
         self.marquee_scroll_task.take();
         cx.notify();
+    }
+
+    fn persist_browser_state(&self) {
+        let _ = self.state_save_sender.try_send(BrowserState {
+            view: match self.view_mode {
+                ViewMode::List => BrowserView::List,
+                ViewMode::Grid => BrowserView::Grid,
+            },
+            show_hidden: self.directory.show_hidden,
+        });
     }
 
     fn on_search_input_event(
@@ -6216,22 +6217,6 @@ impl Render for Marcel {
             });
         let bookmarks_ready = !self.bookmarks_loading;
         let bookmark_region_bounds = self.bookmark_region_bounds.clone();
-        let font_view = cx.entity();
-        let font_switch = Switch::new("iosevka-ui-font")
-            .small()
-            .label("Iosevka Mono")
-            .checked(self.use_iosevka_ui)
-            .disabled(self.iosevka_ui_font.is_none())
-            .tooltip(if self.iosevka_ui_font.is_some() {
-                "Use Iosevka Mono for the interface"
-            } else {
-                "Iosevka is not installed"
-            })
-            .on_click(move |checked, _, cx| {
-                font_view.update(cx, |this, cx| {
-                    this.set_iosevka_ui(*checked, cx);
-                });
-            });
         let hidden_switch_view = cx.entity();
         let hidden_switch = Switch::new("show-hidden-files")
             .small()
@@ -6440,19 +6425,13 @@ impl Render for Marcel {
                         ),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(font_switch)
-                        .child(hidden_switch)
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_between()
-                                .child(view_switch)
-                                .child(settings_button),
-                        ),
+                    div().flex().flex_col().gap_3().child(hidden_switch).child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .child(view_switch)
+                            .child(settings_button),
+                    ),
                 );
 
         let browser = div()

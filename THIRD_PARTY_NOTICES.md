@@ -175,9 +175,9 @@ project's public basic example.
 
 - Project: <https://www.7-zip.org/>
 - Copyright: Copyright (C) 1999-2026 Igor Pavlov
-- License: GNU LGPL-2.1-or-later for the main program, with BSD-3-Clause,
-  BSD-2-Clause, and restricted UnRAR portions as detailed in 7-Zip's
-  `License.txt`.
+- License: GNU LGPL-2.1-or-later for the main program, with BSD-3-Clause and
+  BSD-2-Clause portions as detailed in 7-Zip's `License.txt`. Marcel's default
+  packages exclude the restricted UnRAR decoder.
 - Use in Marcel: official `7zz` provides ZIP creation and broad-format
   extraction behind `src/archive_ops.rs`. It is a supervised external process,
   not linked into Marcel.
@@ -185,5 +185,32 @@ project's public basic example.
   package. Portable artifacts bundle the official static executable as
   `libexec/marcel/7zz`.
 - Notice requirement: artifacts that redistribute 7-Zip must ship its complete
-  `License.txt`, including the unRAR restriction, and the LGPL/BSD notices and
-  corresponding-source offer required by the selected distribution method.
+  `License.txt`, the LGPL/BSD notices, and the corresponding-source offer
+  required by the selected distribution method. A future RAR-capable variant
+  must additionally preserve the restricted UnRAR notice.
+
+## Iosevka
+
+- Project: <https://github.com/be5invis/Iosevka>
+- Bundled version: 34.8.0
+- License: SIL Open Font License 1.1
+- Use in Marcel: `assets/fonts/MarcelIosevka-Regular.ttf` and
+  `assets/fonts/MarcelIosevka-SemiBold.ttf` are mechanically subset from the
+  official monospaced TTF release and renamed to the private `Marcel Iosevka`
+  family. They are loaded directly by GPUI and are not installed into the
+  user's system font registry.
+- Reproduction and notices: `scripts/build_identity_assets.py` pins the source
+  URL, archive hash, selected Unicode ranges, and transformation.
+  `assets/fonts/OFL-Iosevka.md` contains the complete upstream license.
+
+## Nordzy
+
+- Project: <https://github.com/alvatip/Nordzy-icon>
+- Bundled version: 1.8.7
+- License: GPL-3.0-only
+- Use in Marcel: `assets/icons/nordzy` contains twenty unmodified scalable
+  Places and MIME icons selected by semantic name. The files are a private
+  in-application fallback, not a registered or system-installed icon theme.
+- Reproduction and notices: `scripts/build_identity_assets.py` pins the source
+  archive and hash and records each source-to-destination mapping.
+  `assets/icons/nordzy/COPYING` contains the complete upstream license.

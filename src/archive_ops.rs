@@ -765,18 +765,21 @@ fn is_executable(path: &Path) -> bool {
 }
 
 pub fn is_supported_archive(path: &Path) -> bool {
+    is_supported_archive_with(path, rar_support_enabled())
+}
+
+fn is_supported_archive_with(path: &Path, rar_supported: bool) -> bool {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    [
+    let supported = [
         ".7z",
         ".apk",
         ".bz2",
         ".bzip2",
         ".cab",
         ".cb7",
-        ".cbr",
         ".cbz",
         ".cpio",
         ".deb",
@@ -787,7 +790,6 @@ pub fn is_supported_archive(path: &Path) -> bool {
         ".iso",
         ".jar",
         ".lzma",
-        ".rar",
         ".rpm",
         ".squashfs",
         ".tar",
@@ -806,9 +808,21 @@ pub fn is_supported_archive(path: &Path) -> bool {
         ".xz",
         ".zip",
         ".zst",
-    ]
-    .iter()
-    .any(|extension| name.ends_with(extension))
+    ];
+    supported.iter().any(|extension| name.ends_with(extension))
+        || (rar_supported
+            && [".rar", ".cbr"]
+                .iter()
+                .any(|extension| name.ends_with(extension)))
+}
+
+fn rar_support_enabled() -> bool {
+    env::var("MARCEL_ENABLE_RAR").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 pub fn default_zip_name(sources: &[PathBuf], single_is_directory: bool) -> String {
@@ -1123,6 +1137,10 @@ Folder = -
         );
         assert!(is_supported_archive(Path::new("BOOKS.CBZ")));
         assert!(!is_supported_archive(Path::new("notes.txt")));
+        assert!(!is_supported_archive_with(Path::new("books.cbr"), false));
+        assert!(!is_supported_archive_with(Path::new("archive.rar"), false));
+        assert!(is_supported_archive_with(Path::new("books.cbr"), true));
+        assert!(is_supported_archive_with(Path::new("archive.rar"), true));
     }
 
     #[test]

@@ -33,6 +33,7 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        marcel::identity::init(cx);
         marcel::theme::init(cx);
         marcel::commands::init(cx);
 

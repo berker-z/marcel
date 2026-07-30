@@ -11,12 +11,14 @@ pub mod file_ops;
 pub mod fs;
 mod history;
 mod icons;
+pub mod identity;
 pub mod launch;
 mod operations;
 mod pdf_preview;
 mod places;
 pub mod preview;
 pub mod selection;
+mod state;
 #[cfg(target_os = "linux")]
 mod system_open;
 #[cfg(target_os = "linux")]

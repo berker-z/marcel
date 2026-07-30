@@ -24,7 +24,7 @@ single-instance routing, or `org.freedesktop.FileManager1`.
 - `overlays.default` exposes `pkgs.marcel` to downstream flakes.
 - The package wrapper supplies GIO and Poppler tools plus GPUI's runtime
   libraries.
-- The package installs nixpkgs' RAR-capable `7zz` at the private discovery path
+- The package installs nixpkgs' free `7zz` at the private discovery path
   `$out/libexec/marcel/7zz`; archive behavior does not depend on ambient PATH.
 - `marcel.desktop` uses `Exec=marcel %U`, advertises `inode/directory`, and
   deliberately claims no archive MIME types. Until Marcel has branded artwork,
@@ -40,7 +40,7 @@ single-instance routing, or `org.freedesktop.FileManager1`.
   generated `result` link.
 - [x] Wrap every runtime dependency required for opening files and rendering
   PDF previews.
-- [x] Install private RAR-capable 7-Zip at Marcel's existing discovery path.
+- [x] Install private free 7-Zip at Marcel's existing discovery path.
 - [x] Install a freedesktop desktop entry for directories without claiming
   archives.
 - [x] Document direct use, downstream flake wiring, and the Home Manager MIME

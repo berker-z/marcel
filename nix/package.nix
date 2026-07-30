@@ -1,5 +1,6 @@
 {
   lib,
+  callPackage,
   rustPlatform,
   copyDesktopItems,
   makeDesktopItem,
@@ -21,7 +22,7 @@
   libxi,
   libxrandr,
   poppler-utils,
-  _7zz-rar,
+  _7zz,
 }:
 let
   runtimeLibraries = [
@@ -40,7 +41,7 @@ let
     libxrandr
   ];
 in
-rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage (finalAttrs: {
   pname = "marcel";
   version = "0.1.0";
 
@@ -49,6 +50,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ../Cargo.toml
       ../Cargo.lock
+      ../assets
       ../src
       ../vendor
     ];
@@ -107,7 +109,14 @@ rustPlatform.buildRustPackage {
 
   postInstall = ''
     mkdir -p "$out/libexec/marcel"
-    ln -s ${lib.getExe' _7zz-rar "7zz"} "$out/libexec/marcel/7zz"
+    ln -s ${lib.getExe' _7zz "7zz"} "$out/libexec/marcel/7zz"
+
+    mkdir -p "$out/share/marcel/icons" "$out/share/licenses/marcel"
+    cp -R ${../assets/icons/nordzy} "$out/share/marcel/icons/nordzy"
+    install -Dm644 ${../assets/fonts/OFL-Iosevka.md} \
+      "$out/share/licenses/marcel/OFL-Iosevka.md"
+    install -Dm644 ${../assets/icons/nordzy/COPYING} \
+      "$out/share/licenses/marcel/COPYING-Nordzy"
 
     mkdir -p "$out/share/dbus-1/services" "$out/share/dbus-1/interfaces"
     substitute ${./io.github.berker_z.Marcel.service} \
@@ -126,6 +135,13 @@ rustPlatform.buildRustPackage {
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries}
   '';
 
+  passthru.withSettings =
+    settings:
+    callPackage ./configured-package.nix {
+      marcel = finalAttrs.finalPackage;
+      inherit settings;
+    };
+
   meta = {
     description = "Fast, preview-first graphical file explorer";
     homepage = "https://github.com/berker-z/marcel";
@@ -133,4 +149,4 @@ rustPlatform.buildRustPackage {
     mainProgram = "marcel";
     platforms = lib.platforms.linux;
   };
-}
+})
