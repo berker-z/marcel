@@ -7,6 +7,7 @@ mod delete_ops;
 pub mod desktop_integration;
 pub mod directory_session;
 mod directory_watcher;
+mod drag_controller;
 pub mod file_ops;
 pub mod fs;
 mod history;
@@ -19,7 +20,9 @@ mod operations;
 mod pdf_preview;
 mod places;
 pub mod preview;
+mod preview_controller;
 pub mod selection;
+mod sidebar_controller;
 mod state;
 #[cfg(target_os = "linux")]
 mod system_open;
@@ -28,5 +31,6 @@ mod system_terminal;
 pub mod theme;
 mod thumbnails;
 mod trash_ops;
+mod window_ui_state;
 
 pub use app::Marcel;

@@ -1,12 +1,10 @@
 use std::{
     any::Any,
-    cell::{Cell, RefCell},
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
-    rc::Rc,
     sync::Arc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::AtomicBool,
     time::Duration,
 };
 
@@ -14,9 +12,8 @@ use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity,
     ExternalPaths, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
-    ScrollStrategy, SharedString, Styled, Subscription, Task, TextRun, Timer,
-    UniformListScrollHandle, Window, canvas, div, font, img, prelude::*, px, relative,
-    uniform_list,
+    ScrollStrategy, SharedString, Styled, TextRun, Timer, UniformListScrollHandle, Window, canvas,
+    div, font, img, prelude::*, px, relative, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Root, Sizable, WindowExt,
@@ -40,9 +37,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     archive_ops::{default_zip_name, is_supported_archive},
     bookmarks::{
-        Bookmark, add as add_bookmark, default_path as default_bookmarks_path,
-        load as load_bookmarks, remove as remove_bookmark_at, reorder as reorder_bookmark,
-        save as save_bookmarks,
+        Bookmark, add as add_bookmark, load as load_bookmarks, remove as remove_bookmark_at,
+        reorder as reorder_bookmark, save as save_bookmarks,
     },
     commands::{
         ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CompressSelection,
@@ -58,6 +54,7 @@ use crate::{
         ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
     },
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
+    drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
     file_ops::{
         DirectoryChanges, OperationRecord, TransferMode, create_directory, create_zip_operation,
         extract_archive_operation, redo_operation, rename_entry, summarize_failures,
@@ -72,6 +69,10 @@ use crate::{
     operations::{FileClipboard, OperationController, OperationProgressKind},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
+    preview_controller::{
+        PdfPageState, PreviewController, ThumbnailState, WrappedPreview, WrappedPreviewLine,
+    },
+    sidebar_controller::{BookmarkInsertion, BookmarkMenu, SidebarController},
     state::{self, BrowserState, BrowserView},
     theme::{self, Palette},
     thumbnails,
@@ -79,6 +80,7 @@ use crate::{
         TrashRecord, list_trash_records, purge_trash_records, restore_trash_records,
         summarize_failures as summarize_trash_failures, trash_paths,
     },
+    window_ui_state::{ContextMenuTarget, EntryMenu, ViewMode, WindowUiState},
 };
 
 const DIRECTORY_ROW_HEIGHT: f32 = 36.0;
@@ -114,13 +116,6 @@ const ENTRY_MENU_MARGIN: f32 = 8.0;
 const BOOKMARK_MENU_WIDTH: f32 = 152.0;
 const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
 const MAX_EXTERNAL_DROP_PATHS: usize = 256;
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ViewMode {
-    #[default]
-    List,
-    Grid,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectionMotion {
     Up,
@@ -131,40 +126,6 @@ enum SelectionMotion {
     Last,
     PageUp,
     PageDown,
-}
-
-#[derive(Clone, Debug)]
-enum ThumbnailState {
-    Ready(PathBuf),
-    Failed,
-}
-
-#[derive(Clone, Debug)]
-enum PdfPageState {
-    Ready(PathBuf),
-    Failed(String),
-}
-
-#[derive(Clone)]
-struct MarqueeGesture {
-    start_window: Point<Pixels>,
-    origin_content: Point<Pixels>,
-    current_window: Point<Pixels>,
-    base_selection: HashSet<PathBuf>,
-    additive: bool,
-    active: bool,
-}
-
-#[derive(Clone, Copy)]
-struct EntryMenu {
-    position: Point<Pixels>,
-    target: ContextMenuTarget,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ContextMenuTarget {
-    Entry,
-    CurrentDirectory,
 }
 
 #[derive(Clone, Debug)]
@@ -179,27 +140,10 @@ struct BookmarkDrag {
     path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BookmarkInsertion {
-    index: usize,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LocationBreadcrumb {
     label: String,
     path: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy)]
-struct BookmarkMenu {
-    index: usize,
-    position: Point<Pixels>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct EntryHitRegion {
-    bounds: Bounds<Pixels>,
-    navigable: bool,
 }
 
 struct DragPreview {
@@ -246,100 +190,17 @@ impl Render for DragPreview {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WrappedPreviewLine {
-    source_line: Option<usize>,
-    contents: String,
-}
-
-#[derive(Clone)]
-struct WrappedPreview {
-    ticket: u64,
-    columns: usize,
-    lines: Arc<[WrappedPreviewLine]>,
-}
-
 pub struct Marcel {
     browser_focus: FocusHandle,
     palette: Palette,
     home_dir: PathBuf,
     directory: DirectorySession,
-    search_input: Entity<InputState>,
-    _search_subscriptions: Vec<Subscription>,
-    location_input: Entity<InputState>,
-    _location_subscription: Subscription,
-    location_editing: bool,
-    location_resolving: bool,
-    location_error: Option<String>,
-    location_ticket: u64,
-    rename_path: Option<PathBuf>,
-    rename_input: Option<Entity<InputState>>,
-    rename_subscription: Option<Subscription>,
     operations: OperationController,
-    entry_menu: Option<EntryMenu>,
-    marquee: Option<MarqueeGesture>,
-    marquee_scroll_task: Option<Task<()>>,
-    file_drag_pointer: Option<Point<Pixels>>,
-    file_drag_scroll_task: Option<Task<()>>,
-    browser_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    entry_hit_bounds: Rc<RefCell<HashMap<PathBuf, EntryHitRegion>>>,
-    entry_content_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
-    directory_scroll: UniformListScrollHandle,
-    view_mode: ViewMode,
-    grid_layout_columns: usize,
-    thumbnails: HashMap<PathBuf, ThumbnailState>,
-    thumbnail_order: VecDeque<PathBuf>,
-    thumbnail_queue: VecDeque<PathBuf>,
-    thumbnail_pending: HashSet<PathBuf>,
-    thumbnail_inflight: HashSet<PathBuf>,
-    thumbnail_stale: HashSet<PathBuf>,
-    thumbnail_wake_sender: async_channel::Sender<()>,
-    thumbnail_wake_receiver: async_channel::Receiver<()>,
-    thumbnail_workers: Vec<Task<()>>,
-    preview_state: PreviewState,
-    preview_ticket: u64,
-    preview_task: Option<Task<()>>,
-    preview_cancel: Option<Arc<AtomicBool>>,
-    folder_preview_entries: Vec<FileEntry>,
-    folder_preview_loading: bool,
-    folder_preview_error: Option<String>,
-    folder_preview_task: Option<Task<()>>,
-    folder_preview_scroll: UniformListScrollHandle,
-    pdf_pages: HashMap<usize, PdfPageState>,
-    pdf_page_queue: VecDeque<usize>,
-    pdf_page_pending: HashSet<usize>,
-    pdf_page_inflight: HashSet<usize>,
-    pdf_page_wake_sender: async_channel::Sender<()>,
-    pdf_page_wake_receiver: async_channel::Receiver<()>,
-    pdf_page_workers: Vec<Task<()>>,
-    pdf_scroll: UniformListScrollHandle,
-    preview_wrap: Option<WrappedPreview>,
-    preview_wrap_task: Option<Task<()>>,
-    preview_resize_task: Option<Task<()>>,
-    preview_text_scroll: UniformListScrollHandle,
-    preview_width: Rc<Cell<Pixels>>,
-    preview_mono_cell_width: Rc<Cell<Pixels>>,
-    preview_mono_line_height: Rc<Cell<Pixels>>,
-    state_save_sender: async_channel::Sender<BrowserState>,
-    _state_save_task: Task<()>,
+    drag: DragController,
+    preview: PreviewController,
+    ui: WindowUiState,
     history: NavigationHistory,
-    places: Vec<Place>,
-    place_icons: HashMap<PathBuf, PathBuf>,
-    places_loading: bool,
-    places_task: Option<Task<()>>,
-    browsing_trash: bool,
-    trash_records: HashMap<PathBuf, TrashRecord>,
-    bookmarks: Vec<Bookmark>,
-    bookmark_icons: HashMap<PathBuf, PathBuf>,
-    bookmarks_path: PathBuf,
-    bookmarks_loading: bool,
-    bookmarks_load_task: Option<Task<()>>,
-    bookmarks_save_task: Option<Task<()>>,
-    bookmark_insertion: Option<BookmarkInsertion>,
-    bookmark_menu: Option<BookmarkMenu>,
-    bookmark_region_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    bookmark_row_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
-    place_drop_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
+    sidebar: SidebarController,
 }
 
 impl Marcel {
@@ -348,10 +209,6 @@ impl Marcel {
         let home_dir = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| start_dir.clone());
-        let (thumbnail_wake_sender, thumbnail_wake_receiver) =
-            async_channel::bounded(THUMBNAIL_WORKERS);
-        let (pdf_page_wake_sender, pdf_page_wake_receiver) =
-            async_channel::bounded(PDF_PAGE_WORKERS);
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Filter current folder")
@@ -394,85 +251,20 @@ impl Marcel {
             palette: theme::active(),
             home_dir: home_dir.clone(),
             directory,
-            search_input,
-            _search_subscriptions: vec![search_subscription],
-            location_input,
-            _location_subscription: location_subscription,
-            location_editing: false,
-            location_resolving: false,
-            location_error: None,
-            location_ticket: 0,
-            rename_path: None,
-            rename_input: None,
-            rename_subscription: None,
             operations: OperationController::default(),
-            entry_menu: None,
-            marquee: None,
-            marquee_scroll_task: None,
-            file_drag_pointer: None,
-            file_drag_scroll_task: None,
-            browser_bounds: Rc::new(Cell::new(None)),
-            entry_hit_bounds: Rc::new(RefCell::new(HashMap::new())),
-            entry_content_bounds: Rc::new(RefCell::new(HashMap::new())),
-            directory_scroll: UniformListScrollHandle::new(),
-            view_mode: match browser_state.view {
-                BrowserView::List => ViewMode::List,
-                BrowserView::Grid => ViewMode::Grid,
-            },
-            grid_layout_columns: 1,
-            thumbnails: HashMap::new(),
-            thumbnail_order: VecDeque::new(),
-            thumbnail_queue: VecDeque::new(),
-            thumbnail_pending: HashSet::new(),
-            thumbnail_inflight: HashSet::new(),
-            thumbnail_stale: HashSet::new(),
-            thumbnail_wake_sender,
-            thumbnail_wake_receiver,
-            thumbnail_workers: Vec::new(),
-            preview_state: PreviewState::Empty,
-            preview_ticket: 0,
-            preview_task: None,
-            preview_cancel: None,
-            folder_preview_entries: Vec::new(),
-            folder_preview_loading: false,
-            folder_preview_error: None,
-            folder_preview_task: None,
-            folder_preview_scroll: UniformListScrollHandle::new(),
-            pdf_pages: HashMap::new(),
-            pdf_page_queue: VecDeque::new(),
-            pdf_page_pending: HashSet::new(),
-            pdf_page_inflight: HashSet::new(),
-            pdf_page_wake_sender,
-            pdf_page_wake_receiver,
-            pdf_page_workers: Vec::new(),
-            pdf_scroll: UniformListScrollHandle::new(),
-            preview_wrap: None,
-            preview_wrap_task: None,
-            preview_resize_task: None,
-            preview_text_scroll: UniformListScrollHandle::new(),
-            preview_width: Rc::new(Cell::new(px(0.0))),
-            preview_mono_cell_width: Rc::new(Cell::new(mono_font_size * 0.6)),
-            preview_mono_line_height: Rc::new(Cell::new(mono_font_size * 1.5)),
-            state_save_sender,
-            _state_save_task: state_save_task,
+            drag: DragController::default(),
+            preview: PreviewController::new(mono_font_size, THUMBNAIL_WORKERS, PDF_PAGE_WORKERS),
+            ui: WindowUiState::new(
+                search_input,
+                search_subscription,
+                location_input,
+                location_subscription,
+                &browser_state,
+                state_save_sender,
+                state_save_task,
+            ),
             history: NavigationHistory::new(start_dir),
-            places: vec![Place::home(home_dir.clone())],
-            place_icons: HashMap::new(),
-            places_loading: true,
-            places_task: None,
-            browsing_trash: false,
-            trash_records: HashMap::new(),
-            bookmarks: Vec::new(),
-            bookmark_icons: HashMap::new(),
-            bookmarks_path: default_bookmarks_path(&home_dir),
-            bookmarks_loading: true,
-            bookmarks_load_task: None,
-            bookmarks_save_task: None,
-            bookmark_insertion: None,
-            bookmark_menu: None,
-            bookmark_region_bounds: Rc::new(Cell::new(None)),
-            bookmark_row_bounds: Rc::new(RefCell::new(HashMap::new())),
-            place_drop_bounds: Rc::new(RefCell::new(HashMap::new())),
+            sidebar: SidebarController::new(&home_dir),
         };
         this.start_places_load(home_dir, cx);
         this.start_bookmarks_load(cx);
@@ -499,19 +291,19 @@ impl Marcel {
             (places, icons)
         }));
 
-        self.places_task = Some(cx.spawn(async move |this, cx| {
+        self.sidebar.places_task = Some(cx.spawn(async move |this, cx| {
             let (places, icons) = load_task.await;
             let _ = this.update(cx, |this, cx| {
-                this.places = places;
-                this.place_icons = icons;
-                this.places_loading = false;
+                this.sidebar.places = places;
+                this.sidebar.place_icons = icons;
+                this.sidebar.places_loading = false;
                 cx.notify();
             });
         }));
     }
 
     fn start_bookmarks_load(&mut self, cx: &mut Context<Self>) {
-        let path = self.bookmarks_path.clone();
+        let path = self.sidebar.bookmarks_path.clone();
         let load_task = cx.background_executor().spawn(smol::unblock(move || {
             let bookmarks = load_bookmarks(&path)?;
             let mut icon_provider = crate::icons::IconProvider::discover();
@@ -526,14 +318,14 @@ impl Marcel {
             anyhow::Ok((bookmarks, icons))
         }));
 
-        self.bookmarks_load_task = Some(cx.spawn(async move |this, cx| {
+        self.sidebar.bookmarks_load_task = Some(cx.spawn(async move |this, cx| {
             let result = load_task.await;
             let _ = this.update(cx, |this, cx| {
-                this.bookmarks_loading = false;
+                this.sidebar.bookmarks_loading = false;
                 match result {
                     Ok((bookmarks, icons)) => {
-                        this.bookmarks = bookmarks;
-                        this.bookmark_icons = icons;
+                        this.sidebar.bookmarks = bookmarks;
+                        this.sidebar.bookmark_icons = icons;
                     }
                     Err(error) => {
                         eprintln!("Could not load Marcel bookmarks: {error:#}");
@@ -545,26 +337,26 @@ impl Marcel {
     }
 
     fn start_bookmarks_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmarks_save_task.is_some() {
+        if self.sidebar.bookmarks_save_task.is_some() {
             return;
         }
-        let path = self.bookmarks_path.clone();
-        let snapshot = self.bookmarks.clone();
+        let path = self.sidebar.bookmarks_path.clone();
+        let snapshot = self.sidebar.bookmarks.clone();
         let saved_snapshot = snapshot.clone();
         let save_task = cx
             .background_executor()
             .spawn(smol::unblock(move || save_bookmarks(&path, &snapshot)));
 
-        self.bookmarks_save_task = Some(cx.spawn_in(window, async move |this, window| {
+        self.sidebar.bookmarks_save_task = Some(cx.spawn_in(window, async move |this, window| {
             let result = save_task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                this.bookmarks_save_task = None;
+                this.sidebar.bookmarks_save_task = None;
                 if let Err(error) = result {
                     window.push_notification(
                         Notification::error(format!("Could not save bookmarks: {error}")),
                         cx,
                     );
-                } else if this.bookmarks != saved_snapshot {
+                } else if this.sidebar.bookmarks != saved_snapshot {
                     this.start_bookmarks_save(window, cx);
                 }
                 cx.notify();
@@ -579,13 +371,13 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         if paths.is_empty() {
-            self.bookmark_insertion = None;
+            self.sidebar.bookmark_insertion = None;
             return;
         }
 
         let mut added = 0;
         for path in paths {
-            if add_bookmark(&mut self.bookmarks, path.clone()) {
+            if add_bookmark(&mut self.sidebar.bookmarks, path.clone()) {
                 if let Some(icon) = self
                     .directory
                     .entries
@@ -593,12 +385,12 @@ impl Marcel {
                     .find(|entry| &entry.path == path)
                     .and_then(|entry| entry.icon_path.clone())
                 {
-                    self.bookmark_icons.insert(path.clone(), icon);
+                    self.sidebar.bookmark_icons.insert(path.clone(), icon);
                 }
                 added += 1;
             }
         }
-        self.bookmark_insertion = None;
+        self.sidebar.bookmark_insertion = None;
         if added == 0 {
             window.push_notification(
                 Notification::info("Those folders are already bookmarked"),
@@ -621,19 +413,19 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.bookmark_insertion = None;
-        if reorder_bookmark(&mut self.bookmarks, from, insertion) {
+        self.sidebar.bookmark_insertion = None;
+        if reorder_bookmark(&mut self.sidebar.bookmarks, from, insertion) {
             self.start_bookmarks_save(window, cx);
             cx.notify();
         }
     }
 
     fn remove_bookmark(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.bookmark_menu = None;
-        let Some(bookmark) = remove_bookmark_at(&mut self.bookmarks, index) else {
+        self.sidebar.bookmark_menu = None;
+        let Some(bookmark) = remove_bookmark_at(&mut self.sidebar.bookmarks, index) else {
             return;
         };
-        self.bookmark_icons.remove(&bookmark.path);
+        self.sidebar.bookmark_icons.remove(&bookmark.path);
         self.start_bookmarks_save(window, cx);
         window.push_notification(
             Notification::success(format!("Removed bookmark “{}”", bookmark.label())),
@@ -647,8 +439,8 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let menu = self.bookmark_menu?;
-        self.bookmarks.get(menu.index)?;
+        let menu = self.sidebar.bookmark_menu?;
+        self.sidebar.bookmarks.get(menu.index)?;
         let colors = cx.theme().colors;
         // Popovers and `accent` share the raised surface in Marcel palettes.
         // The active-list tint stays visible over that surface on every theme.
@@ -680,7 +472,7 @@ impl Marcel {
                 .text_sm()
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.bookmark_menu = None;
+                    this.sidebar.bookmark_menu = None;
                     cx.notify();
                 }))
                 .child(
@@ -860,14 +652,14 @@ impl Marcel {
         event: &DragMoveEvent<BookmarkDrag>,
         cx: &mut Context<Self>,
     ) {
-        let Some(region) = self.bookmark_region_bounds.get() else {
+        let Some(region) = self.sidebar.bookmark_region_bounds.get() else {
             return;
         };
         let pointer = event.event.position;
         let index = if !region.contains(&pointer) {
             return;
         } else {
-            let rows = self.bookmark_row_bounds.borrow();
+            let rows = self.sidebar.bookmark_row_bounds.borrow();
             let mut ordered = rows.iter().collect::<Vec<_>>();
             ordered.sort_by_key(|(index, _)| **index);
             ordered
@@ -875,10 +667,10 @@ impl Marcel {
                 .find_map(|(index, bounds)| {
                     (pointer.y < bounds.top() + bounds.size.height / 2.0).then_some(**index)
                 })
-                .unwrap_or(self.bookmarks.len())
+                .unwrap_or(self.sidebar.bookmarks.len())
         };
-        if self.bookmark_insertion != Some(BookmarkInsertion { index }) {
-            self.bookmark_insertion = Some(BookmarkInsertion { index });
+        if self.sidebar.bookmark_insertion != Some(BookmarkInsertion { index }) {
+            self.sidebar.bookmark_insertion = Some(BookmarkInsertion { index });
             cx.notify();
         }
     }
@@ -891,33 +683,42 @@ impl Marcel {
     ) {
         let drag = event.drag(cx).clone();
         let pointer = event.event.position;
-        self.file_drag_pointer = Some(pointer);
-        if self.file_drag_scroll_task.is_none() {
+        self.drag.file_pointer = Some(pointer);
+        if self.drag.file_scroll_task.is_none() {
             self.start_file_drag_autoscroll(cx);
         }
         let operation_busy = self.operations.is_busy();
         let can_move_to = |path: &Path| !operation_busy && can_move_files_to(&drag.paths, path);
 
-        let over_browser_folder = self.entry_hit_bounds.borrow().iter().any(|(path, hit)| {
-            can_drop_on_entry_hit(hit, pointer, &drag.paths, path, operation_busy)
-        });
+        let over_browser_folder = self
+            .drag
+            .entry_hit_bounds
+            .borrow()
+            .iter()
+            .any(|(path, hit)| {
+                can_drop_on_entry_hit(hit, pointer, &drag.paths, path, operation_busy)
+            });
         let over_place = self
+            .sidebar
             .place_drop_bounds
             .borrow()
             .iter()
             .any(|(path, bounds)| bounds.contains(&pointer) && can_move_to(path));
-        let over_bookmark = self
-            .bookmark_row_bounds
-            .borrow()
-            .iter()
-            .any(|(index, bounds)| {
-                bounds.contains(&pointer)
-                    && self
-                        .bookmarks
-                        .get(*index)
-                        .is_some_and(|bookmark| can_move_to(&bookmark.path))
-            });
+        let over_bookmark =
+            self.sidebar
+                .bookmark_row_bounds
+                .borrow()
+                .iter()
+                .any(|(index, bounds)| {
+                    bounds.contains(&pointer)
+                        && self
+                            .sidebar
+                            .bookmarks
+                            .get(*index)
+                            .is_some_and(|bookmark| can_move_to(&bookmark.path))
+                });
         let over_bookmark_region = self
+            .sidebar
             .bookmark_region_bounds
             .get()
             .is_some_and(|bounds| bounds.contains(&pointer));
@@ -933,25 +734,18 @@ impl Marcel {
     }
 
     fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
-        self.rename_path = None;
-        self.rename_input = None;
-        self.rename_subscription = None;
-        if self.browsing_trash {
+        self.ui.rename_path = None;
+        self.ui.rename_input = None;
+        self.ui.rename_subscription = None;
+        if self.sidebar.browsing_trash {
             self.start_trash_load(clear_filter, cx);
             return;
         }
-        self.entry_menu = None;
-        self.bookmark_menu = None;
+        self.ui.entry_menu = None;
+        self.sidebar.bookmark_menu = None;
         let (ticket, path) = self.directory.begin_load(clear_filter);
-        self.thumbnail_workers.clear();
-        self.thumbnail_queue.clear();
-        self.thumbnail_pending.clear();
-        self.thumbnail_inflight.clear();
-        self.thumbnail_stale.clear();
-        while self.thumbnail_wake_receiver.try_recv().is_ok() {}
-        self.thumbnails.clear();
-        self.thumbnail_order.clear();
-        self.entry_content_bounds.borrow_mut().clear();
+        self.preview.reset_thumbnails();
+        self.drag.entry_content_bounds.borrow_mut().clear();
         self.clear_selection();
 
         let (sender, receiver) = async_channel::unbounded();
@@ -1008,20 +802,13 @@ impl Marcel {
     }
 
     fn start_trash_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
-        self.browsing_trash = true;
-        self.entry_menu = None;
-        self.bookmark_menu = None;
+        self.sidebar.browsing_trash = true;
+        self.ui.entry_menu = None;
+        self.sidebar.bookmark_menu = None;
         let ticket = self.directory.begin_virtual_load(clear_filter);
-        self.thumbnail_workers.clear();
-        self.thumbnail_queue.clear();
-        self.thumbnail_pending.clear();
-        self.thumbnail_inflight.clear();
-        self.thumbnail_stale.clear();
-        while self.thumbnail_wake_receiver.try_recv().is_ok() {}
-        self.thumbnails.clear();
-        self.thumbnail_order.clear();
-        self.entry_content_bounds.borrow_mut().clear();
-        self.trash_records.clear();
+        self.preview.reset_thumbnails();
+        self.drag.entry_content_bounds.borrow_mut().clear();
+        self.sidebar.trash_records.clear();
         self.clear_selection();
 
         let load = cx.background_executor().spawn(smol::unblock(move || {
@@ -1052,12 +839,12 @@ impl Marcel {
         self.directory.load_task = Some(cx.spawn(async move |this, cx| {
             let result = load.await;
             let _ = this.update(cx, |this, cx| {
-                if ticket != this.directory.generation || !this.browsing_trash {
+                if ticket != this.directory.generation || !this.sidebar.browsing_trash {
                     return;
                 }
                 match result {
                     Ok((entries, records)) => {
-                        this.trash_records = records;
+                        this.sidebar.trash_records = records;
                         let reconcile = this.directory.merge_batch(entries);
                         this.apply_selection_reconcile(reconcile, cx);
                         this.directory.finish_load();
@@ -1123,15 +910,7 @@ impl Marcel {
     }
 
     fn invalidate_watched_thumbnails(&mut self, paths: &[PathBuf]) {
-        for path in paths {
-            self.thumbnails.remove(path);
-            self.thumbnail_order.retain(|existing| existing != path);
-            self.thumbnail_queue.retain(|queued| queued != path);
-            self.thumbnail_pending.remove(path);
-            if self.thumbnail_inflight.contains(path) {
-                self.thumbnail_stale.insert(path.clone());
-            }
-        }
+        self.preview.invalidate_thumbnails(paths);
     }
 
     fn select_pending_loaded_entries(&mut self, cx: &mut Context<Self>) {
@@ -1154,7 +933,7 @@ impl Marcel {
         add_to_history: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.browsing_trash && path == self.directory.current_dir {
+        if !self.sidebar.browsing_trash && path == self.directory.current_dir {
             if !reveal.is_empty() {
                 self.set_filter_query(String::new(), cx);
                 self.directory.pending_reveal = reveal;
@@ -1163,8 +942,8 @@ impl Marcel {
             }
             return;
         }
-        self.browsing_trash = false;
-        self.trash_records.clear();
+        self.sidebar.browsing_trash = false;
+        self.sidebar.trash_records.clear();
         if add_to_history {
             self.history.push(&path);
         }
@@ -1186,8 +965,8 @@ impl Marcel {
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_back() {
-            self.browsing_trash = false;
-            self.trash_records.clear();
+            self.sidebar.browsing_trash = false;
+            self.sidebar.trash_records.clear();
             self.directory.current_dir = path;
             self.directory.pending_reveal.clear();
             self.start_directory_load(true, cx);
@@ -1196,8 +975,8 @@ impl Marcel {
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_forward() {
-            self.browsing_trash = false;
-            self.trash_records.clear();
+            self.sidebar.browsing_trash = false;
+            self.sidebar.trash_records.clear();
             self.directory.current_dir = path;
             self.directory.pending_reveal.clear();
             self.start_directory_load(true, cx);
@@ -1205,7 +984,7 @@ impl Marcel {
     }
 
     fn go_up(&mut self, cx: &mut Context<Self>) {
-        if self.browsing_trash {
+        if self.sidebar.browsing_trash {
             return;
         }
         if let Some(parent) = self.directory.current_dir.parent() {
@@ -1216,13 +995,13 @@ impl Marcel {
     fn command_enabled(&self, command: BrowserCommand) -> bool {
         match command {
             BrowserCommand::GoToParent => {
-                !self.browsing_trash && self.directory.current_dir.parent().is_some()
+                !self.sidebar.browsing_trash && self.directory.current_dir.parent().is_some()
             }
             BrowserCommand::GoBack => self.history.can_go_back(),
             BrowserCommand::GoForward => self.history.can_go_forward(),
             BrowserCommand::ActivateSelection => {
                 self.directory.selection.primary().is_some()
-                    && (!self.browsing_trash
+                    && (!self.sidebar.browsing_trash
                         || self
                             .directory
                             .selection
@@ -1247,15 +1026,15 @@ impl Marcel {
                 })
                 .is_some_and(|entry| !entry.navigable && entry.kind != EntryKind::Directory),
             BrowserCommand::ClearSelection => {
-                self.rename_path.is_some() || !self.directory.selection.selected().is_empty()
+                self.ui.rename_path.is_some() || !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::PasteFiles => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && self.directory.error.is_none()
                     && self
@@ -1264,29 +1043,31 @@ impl Marcel {
                         .is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
             BrowserCommand::NewFolder => {
-                !self.browsing_trash && !self.operations.is_busy() && self.directory.error.is_none()
+                !self.sidebar.browsing_trash
+                    && !self.operations.is_busy()
+                    && self.directory.error.is_none()
             }
             BrowserCommand::OpenTerminal => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.directory.loading
                     && self.directory.error.is_none()
                     && self.directory.current_dir.is_dir()
             }
             BrowserCommand::RenameSelection => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && self.directory.error.is_none()
                     && self.directory.selection.selected().len() == 1
                     && self.directory.selection.primary().is_some()
             }
             BrowserCommand::CompressSelection => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && self.directory.error.is_none()
                     && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::ExtractSelection => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && self.directory.error.is_none()
                     && self.directory.selection.selected().len() == 1
@@ -1305,12 +1086,12 @@ impl Marcel {
                         })
             }
             BrowserCommand::TrashSelection => {
-                !self.browsing_trash
+                !self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::RestoreSelection => {
-                self.browsing_trash
+                self.sidebar.browsing_trash
                     && !self.operations.is_busy()
                     && !self.directory.selection.selected().is_empty()
                     && self
@@ -1318,21 +1099,23 @@ impl Marcel {
                         .selection
                         .selected()
                         .iter()
-                        .all(|path| self.trash_records.contains_key(path))
+                        .all(|path| self.sidebar.trash_records.contains_key(path))
             }
             BrowserCommand::DeletePermanently => {
                 !self.operations.is_busy()
                     && !self.directory.selection.selected().is_empty()
-                    && (!self.browsing_trash
+                    && (!self.sidebar.browsing_trash
                         || self
                             .directory
                             .selection
                             .selected()
                             .iter()
-                            .all(|path| self.trash_records.contains_key(path)))
+                            .all(|path| self.sidebar.trash_records.contains_key(path)))
             }
             BrowserCommand::EmptyTrash => {
-                self.browsing_trash && !self.operations.is_busy() && !self.trash_records.is_empty()
+                self.sidebar.browsing_trash
+                    && !self.operations.is_busy()
+                    && !self.sidebar.trash_records.is_empty()
             }
             BrowserCommand::UndoFileOperation => self.operations.can_undo(),
             BrowserCommand::RedoFileOperation => self.operations.can_redo(),
@@ -1414,7 +1197,7 @@ impl Marcel {
             BrowserCommand::ActivateSelection => self.activate_primary(cx),
             BrowserCommand::OpenWithSelection => self.open_primary_with(cx),
             BrowserCommand::ClearSelection => {
-                if self.rename_path.is_some() {
+                if self.ui.rename_path.is_some() {
                     self.cancel_rename(window, cx);
                 } else {
                     self.clear_selection();
@@ -1459,7 +1242,7 @@ impl Marcel {
                         .is_some_and(|entry| &entry.path == path)
                 })
         });
-        let columns = match self.view_mode {
+        let columns = match self.ui.view_mode {
             ViewMode::List => 1,
             ViewMode::Grid => self.grid_columns(),
         };
@@ -1469,7 +1252,7 @@ impl Marcel {
             self.directory.visible_entries.len(),
             columns,
             viewport_items,
-            self.view_mode,
+            self.ui.view_mode,
             motion,
         ) else {
             return;
@@ -1490,11 +1273,12 @@ impl Marcel {
             self.directory.selection.select_only(entry.path.clone());
         }
 
-        let scroll_row = match self.view_mode {
+        let scroll_row = match self.ui.view_mode {
             ViewMode::List => target,
             ViewMode::Grid => target / columns,
         };
-        self.directory_scroll
+        self.ui
+            .directory_scroll
             .scroll_to_item(scroll_row, ScrollStrategy::Center);
         self.start_preview(entry, cx);
         cx.notify();
@@ -1502,11 +1286,12 @@ impl Marcel {
 
     fn keyboard_page_size(&self, columns: usize) -> usize {
         let height = self
+            .drag
             .browser_bounds
             .get()
             .map(|bounds| f32::from(bounds.size.height))
             .unwrap_or(DIRECTORY_ROW_HEIGHT);
-        match self.view_mode {
+        match self.ui.view_mode {
             ViewMode::List => (height / DIRECTORY_ROW_HEIGHT).floor().max(1.0) as usize,
             ViewMode::Grid => (height / GRID_ROW_HEIGHT).floor().max(1.0) as usize * columns.max(1),
         }
@@ -1551,7 +1336,7 @@ impl Marcel {
     }
 
     fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let Some(path) = self.directory.selection.primary().cloned() else {
             return;
         };
@@ -1582,9 +1367,9 @@ impl Marcel {
                 InputEvent::Change | InputEvent::Focus => {}
             },
         );
-        self.rename_path = Some(path);
-        self.rename_input = Some(input.clone());
-        self.rename_subscription = Some(subscription);
+        self.ui.rename_path = Some(path);
+        self.ui.rename_input = Some(input.clone());
+        self.ui.rename_subscription = Some(subscription);
         cx.notify();
 
         cx.defer_in(window, move |_, window, cx| {
@@ -1601,7 +1386,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.rename_path.clone() else {
+        let Some(path) = self.ui.rename_path.clone() else {
             return;
         };
         let name = input.read(cx).value().to_string();
@@ -1617,17 +1402,17 @@ impl Marcel {
             return;
         }
 
-        self.rename_path = None;
-        self.rename_input = None;
-        self.rename_subscription = None;
+        self.ui.rename_path = None;
+        self.ui.rename_input = None;
+        self.ui.rename_subscription = None;
         self.browser_focus.focus(window);
         self.start_rename(path, name, window, cx);
     }
 
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.rename_path = None;
-        self.rename_input = None;
-        self.rename_subscription = None;
+        self.ui.rename_path = None;
+        self.ui.rename_input = None;
+        self.ui.rename_subscription = None;
         self.browser_focus.focus(window);
         cx.notify();
     }
@@ -1694,7 +1479,7 @@ impl Marcel {
     }
 
     fn open_new_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
         let input_for_dialog = input.clone();
         let view = cx.entity();
@@ -1771,7 +1556,7 @@ impl Marcel {
     }
 
     fn open_compress_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let selected = self.directory.selection.selected();
         let sources = self
             .visible_paths()
@@ -1876,7 +1661,7 @@ impl Marcel {
     }
 
     fn start_extract_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let Some(archive) = self.directory.selection.primary().cloned() else {
             return;
         };
@@ -1945,7 +1730,7 @@ impl Marcel {
                         };
                         let changes = operation.reverse_directory_changes();
                         let message = operation_history_message(&operation, false);
-                        if this.browsing_trash {
+                        if this.sidebar.browsing_trash {
                             match &operation {
                                 OperationRecord::Trash { records } => this.remove_trash_entries(
                                     records
@@ -1999,7 +1784,7 @@ impl Marcel {
                         let path = redone.path().to_path_buf();
                         let changes = redone.forward_directory_changes();
                         let message = operation_history_message(&redone, true);
-                        if this.browsing_trash {
+                        if this.sidebar.browsing_trash {
                             match &redone {
                                 OperationRecord::Trash { .. } => {
                                     this.upsert_trash_entries(
@@ -2050,7 +1835,7 @@ impl Marcel {
         let count = paths.len();
         self.operations
             .set_clipboard(Some(FileClipboard { mode, paths }));
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let verb = match mode {
             TransferMode::Copy => "Copied",
             TransferMode::Move => "Cut",
@@ -2086,7 +1871,7 @@ impl Marcel {
         if paths.is_empty() || !self.operations.begin_simple() {
             return;
         }
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let task = cx
             .background_executor()
             .spawn(smol::unblock(move || trash_paths(&paths)));
@@ -2132,12 +1917,12 @@ impl Marcel {
             .visible_paths()
             .into_iter()
             .filter(|path| selected.contains(path))
-            .filter_map(|path| self.trash_records.get(&path).cloned())
+            .filter_map(|path| self.sidebar.trash_records.get(&path).cloned())
             .collect::<Vec<_>>();
         if records.is_empty() || !self.operations.begin_simple() {
             return;
         }
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let count = records.len();
         let backing_paths = records
             .iter()
@@ -2171,7 +1956,7 @@ impl Marcel {
     }
 
     fn open_permanent_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         let selected = self.directory.selection.selected();
         let paths = self
             .visible_paths()
@@ -2181,10 +1966,10 @@ impl Marcel {
         if paths.is_empty() {
             return;
         }
-        let trash_records = self.browsing_trash.then(|| {
+        let trash_records = self.sidebar.browsing_trash.then(|| {
             paths
                 .iter()
-                .filter_map(|path| self.trash_records.get(path).cloned())
+                .filter_map(|path| self.sidebar.trash_records.get(path).cloned())
                 .collect::<Vec<_>>()
         });
         if trash_records.as_ref().is_some_and(Vec::is_empty) {
@@ -2244,8 +2029,13 @@ impl Marcel {
     }
 
     fn open_empty_trash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.entry_menu = None;
-        let records = self.trash_records.values().cloned().collect::<Vec<_>>();
+        self.ui.entry_menu = None;
+        let records = self
+            .sidebar
+            .trash_records
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         if records.is_empty() {
             return;
         }
@@ -2344,7 +2134,7 @@ impl Marcel {
                         (outcome.completed.len(), failure, removed)
                     }
                 };
-                if this.browsing_trash {
+                if this.sidebar.browsing_trash {
                     this.remove_trash_entries(removed_paths, cx);
                 } else {
                     this.apply_directory_changes(
@@ -2385,7 +2175,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.bookmark_insertion = None;
+        self.sidebar.bookmark_insertion = None;
         self.start_transfer(paths, destination, TransferMode::Move, None, window, cx);
     }
 
@@ -2403,7 +2193,7 @@ impl Marcel {
             );
             return;
         };
-        self.bookmark_insertion = None;
+        self.sidebar.bookmark_insertion = None;
         self.start_transfer(paths, destination, TransferMode::Copy, None, window, cx);
     }
 
@@ -2449,7 +2239,7 @@ impl Marcel {
         else {
             return;
         };
-        self.entry_menu = None;
+        self.ui.entry_menu = None;
         self.start_operation_progress_refresh(cx);
         let change_sources = sources.clone();
         let task = cx.background_executor().spawn(smol::unblock(move || {
@@ -2537,7 +2327,7 @@ impl Marcel {
         reveal: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if self.browsing_trash {
+        if self.sidebar.browsing_trash {
             return;
         }
 
@@ -2564,7 +2354,7 @@ impl Marcel {
             let mut events = task.await;
             events.extend(removed.into_iter().map(DirectoryEvent::Removed));
             let _ = this.update(cx, |this, cx| {
-                if this.browsing_trash
+                if this.sidebar.browsing_trash
                     || directory_generation != this.directory.generation
                     || current_dir != this.directory.current_dir
                 {
@@ -2598,11 +2388,11 @@ impl Marcel {
     }
 
     fn remove_trash_entries(&mut self, backing_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if !self.browsing_trash || backing_paths.is_empty() {
+        if !self.sidebar.browsing_trash || backing_paths.is_empty() {
             return;
         }
         for path in &backing_paths {
-            self.trash_records.remove(path);
+            self.sidebar.trash_records.remove(path);
         }
         let events = backing_paths
             .iter()
@@ -2620,7 +2410,7 @@ impl Marcel {
     }
 
     fn upsert_trash_entries(&mut self, records: Vec<TrashRecord>, cx: &mut Context<Self>) {
-        if !self.browsing_trash || records.is_empty() {
+        if !self.sidebar.browsing_trash || records.is_empty() {
             return;
         }
         let directory_generation = self.directory.generation;
@@ -2643,12 +2433,15 @@ impl Marcel {
         cx.spawn(async move |this, cx| {
             let entries = task.await;
             let _ = this.update(cx, |this, cx| {
-                if !this.browsing_trash || directory_generation != this.directory.generation {
+                if !this.sidebar.browsing_trash || directory_generation != this.directory.generation
+                {
                     return;
                 }
                 let mut events = Vec::with_capacity(entries.len());
                 for (entry, record) in entries {
-                    this.trash_records.insert(entry.path.clone(), record);
+                    this.sidebar
+                        .trash_records
+                        .insert(entry.path.clone(), record);
                     events.push(DirectoryEvent::Changed(entry));
                 }
                 match this.directory.apply_events(events) {
@@ -2898,20 +2691,21 @@ impl Marcel {
     }
 
     fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.view_mode == mode {
+        if self.ui.view_mode == mode {
             return;
         }
-        self.view_mode = mode;
+        self.ui.view_mode = mode;
         self.persist_browser_state();
-        self.marquee = None;
-        self.marquee_scroll_task.take();
-        self.entry_content_bounds.borrow_mut().clear();
-        self.directory_scroll = UniformListScrollHandle::new();
+        self.drag.marquee = None;
+        self.drag.marquee_scroll_task.take();
+        self.drag.entry_content_bounds.borrow_mut().clear();
+        self.ui.directory_scroll = UniformListScrollHandle::new();
         cx.notify();
     }
 
     fn grid_columns(&self) -> usize {
         let width = self
+            .drag
             .browser_bounds
             .get()
             .map(|bounds| f32::from(bounds.size.width))
@@ -2939,22 +2733,24 @@ impl Marcel {
         // Marcel rebuilds the not-yet-started queue whenever GPUI reports a new
         // viewport. Running decodes may finish, but old queued work cannot sit
         // ahead of newly visible tiles.
-        self.thumbnail_queue.clear();
-        self.thumbnail_pending = self.thumbnail_inflight.clone();
+        self.preview.thumbnail_queue.clear();
+        self.preview.thumbnail_pending = self.preview.thumbnail_inflight.clone();
         for path in priority {
-            if self.thumbnails.contains_key(&path) || !self.thumbnail_pending.insert(path.clone()) {
+            if self.preview.thumbnails.contains_key(&path)
+                || !self.preview.thumbnail_pending.insert(path.clone())
+            {
                 continue;
             }
-            self.thumbnail_queue.push_back(path);
+            self.preview.thumbnail_queue.push_back(path);
         }
         self.start_thumbnail_workers(cx);
         for _ in 0..THUMBNAIL_WORKERS {
-            let _ = self.thumbnail_wake_sender.try_send(());
+            let _ = self.preview.thumbnail_wake_sender.try_send(());
         }
     }
 
     fn start_thumbnail_workers(&mut self, cx: &mut Context<Self>) {
-        if !self.thumbnail_workers.is_empty() {
+        if !self.preview.thumbnail_workers.is_empty() {
             return;
         }
 
@@ -2967,121 +2763,96 @@ impl Marcel {
         // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-scheduler/src/worker.rs
         for _ in 0..THUMBNAIL_WORKERS {
             let executor = executor.clone();
-            let wake = self.thumbnail_wake_receiver.clone();
-            self.thumbnail_workers.push(cx.spawn(async move |this, cx| {
-                loop {
-                    let request = this
-                        .update(cx, |this, _| {
-                            let path = this.thumbnail_queue.pop_front()?;
-                            this.thumbnail_inflight.insert(path.clone());
-                            Some(path)
-                        })
-                        .ok()
-                        .flatten();
-                    let Some(path) = request else {
-                        if wake.recv().await.is_err() {
+            let wake = self.preview.thumbnail_wake_receiver.clone();
+            self.preview
+                .thumbnail_workers
+                .push(cx.spawn(async move |this, cx| {
+                    loop {
+                        let request = this
+                            .update(cx, |this, _| {
+                                let path = this.preview.thumbnail_queue.pop_front()?;
+                                this.preview.thumbnail_inflight.insert(path.clone());
+                                Some(path)
+                            })
+                            .ok()
+                            .flatten();
+                        let Some(path) = request else {
+                            if wake.recv().await.is_err() {
+                                break;
+                            }
+                            continue;
+                        };
+
+                        let load_path = path.clone();
+                        let result = executor
+                            .spawn(smol::unblock(move || {
+                                thumbnails::load_or_create(&load_path)
+                            }))
+                            .await;
+                        let keep_running = this
+                            .update(cx, |this, cx| {
+                                if ticket != this.directory.generation {
+                                    return false;
+                                }
+                                this.preview.thumbnail_inflight.remove(&path);
+                                this.preview.thumbnail_pending.remove(&path);
+                                if this.preview.thumbnail_stale.remove(&path) {
+                                    cx.notify();
+                                    return true;
+                                }
+                                let state = match result {
+                                    Ok(thumbnail) => ThumbnailState::Ready(thumbnail),
+                                    Err(_) => ThumbnailState::Failed,
+                                };
+                                this.remember_thumbnail(path, state);
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !keep_running {
                             break;
                         }
-                        continue;
-                    };
-
-                    let load_path = path.clone();
-                    let result = executor
-                        .spawn(smol::unblock(move || {
-                            thumbnails::load_or_create(&load_path)
-                        }))
-                        .await;
-                    let keep_running = this
-                        .update(cx, |this, cx| {
-                            if ticket != this.directory.generation {
-                                return false;
-                            }
-                            this.thumbnail_inflight.remove(&path);
-                            this.thumbnail_pending.remove(&path);
-                            if this.thumbnail_stale.remove(&path) {
-                                cx.notify();
-                                return true;
-                            }
-                            let state = match result {
-                                Ok(thumbnail) => ThumbnailState::Ready(thumbnail),
-                                Err(_) => ThumbnailState::Failed,
-                            };
-                            this.remember_thumbnail(path, state);
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !keep_running {
-                        break;
                     }
-                }
-            }));
+                }));
         }
         for _ in 0..THUMBNAIL_WORKERS {
-            let _ = self.thumbnail_wake_sender.try_send(());
+            let _ = self.preview.thumbnail_wake_sender.try_send(());
         }
     }
 
     fn remember_thumbnail(&mut self, path: PathBuf, state: ThumbnailState) {
-        self.thumbnail_order.retain(|existing| existing != &path);
-        self.thumbnail_order.push_back(path.clone());
-        self.thumbnails.insert(path, state);
+        self.preview
+            .thumbnail_order
+            .retain(|existing| existing != &path);
+        self.preview.thumbnail_order.push_back(path.clone());
+        self.preview.thumbnails.insert(path, state);
 
-        while self.thumbnail_order.len() > MAX_MEMORY_THUMBNAILS {
-            if let Some(expired) = self.thumbnail_order.pop_front() {
-                self.thumbnails.remove(&expired);
+        while self.preview.thumbnail_order.len() > MAX_MEMORY_THUMBNAILS {
+            if let Some(expired) = self.preview.thumbnail_order.pop_front() {
+                self.preview.thumbnails.remove(&expired);
             }
         }
     }
 
     fn clear_selection(&mut self) {
         self.directory.selection.clear();
-        self.marquee = None;
-        self.marquee_scroll_task.take();
+        self.drag.marquee = None;
+        self.drag.marquee_scroll_task.take();
         self.clear_preview();
     }
 
     fn clear_preview(&mut self) {
-        self.preview_ticket = self.preview_ticket.wrapping_add(1);
-        if let Some(cancel) = self.preview_cancel.take() {
-            cancel.store(true, Ordering::Release);
-        }
-        self.preview_task.take();
-        self.reset_folder_preview();
-        self.reset_pdf_preview();
-        self.preview_wrap_task.take();
-        self.preview_resize_task.take();
-        self.preview_wrap = None;
-        self.preview_text_scroll = UniformListScrollHandle::new();
-        self.preview_state = PreviewState::Empty;
-    }
-
-    fn reset_folder_preview(&mut self) {
-        self.folder_preview_task.take();
-        self.folder_preview_entries.clear();
-        self.folder_preview_loading = false;
-        self.folder_preview_error = None;
-        self.folder_preview_scroll = UniformListScrollHandle::new();
-    }
-
-    fn reset_pdf_preview(&mut self) {
-        self.pdf_page_workers.clear();
-        self.pdf_page_queue.clear();
-        self.pdf_page_pending.clear();
-        self.pdf_page_inflight.clear();
-        while self.pdf_page_wake_receiver.try_recv().is_ok() {}
-        self.pdf_pages.clear();
-        self.pdf_scroll = UniformListScrollHandle::new();
+        self.preview.clear();
     }
 
     fn preview_wrap_columns(&self) -> usize {
-        let width = f32::from(self.preview_width.get());
+        let width = f32::from(self.preview.width.get());
         let width = if width > 0.0 {
             width
         } else {
             DEFAULT_PREVIEW_WIDTH
         };
-        let cell_width = f32::from(self.preview_mono_cell_width.get()).max(1.0);
+        let cell_width = f32::from(self.preview.mono_cell_width.get()).max(1.0);
         ((width - PREVIEW_TEXT_CHROME_WIDTH) / cell_width)
             .floor()
             .max(16.0) as usize
@@ -3106,11 +2877,11 @@ impl Marcel {
         let measured_height = layout.ascent + layout.descent;
         let line_height = measured_height.max(mono_font_size * 1.5);
 
-        if (self.preview_mono_cell_width.get() - cell_width).abs() >= px(0.1)
-            || (self.preview_mono_line_height.get() - line_height).abs() >= px(0.1)
+        if (self.preview.mono_cell_width.get() - cell_width).abs() >= px(0.1)
+            || (self.preview.mono_line_height.get() - line_height).abs() >= px(0.1)
         {
-            self.preview_mono_cell_width.set(cell_width);
-            self.preview_mono_line_height.set(line_height);
+            self.preview.mono_cell_width.set(cell_width);
+            self.preview.mono_line_height.set(line_height);
             self.schedule_preview_wrap(cx);
         }
     }
@@ -3180,8 +2951,8 @@ impl Marcel {
 
     fn render_location_bar(&self, max_breadcrumbs: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
-        if self.location_editing {
-            let suffix = if self.location_resolving {
+        if self.ui.location_editing {
+            let suffix = if self.ui.location_resolving {
                 Some(
                     div()
                         .text_xs()
@@ -3190,7 +2961,7 @@ impl Marcel {
                         .into_any_element(),
                 )
             } else {
-                self.location_error.as_ref().map(|_| {
+                self.ui.location_error.as_ref().map(|_| {
                     div()
                         .text_sm()
                         .text_color(colors.danger)
@@ -3198,11 +2969,11 @@ impl Marcel {
                         .into_any_element()
                 })
             };
-            return Input::new(&self.location_input)
+            return Input::new(&self.ui.location_input)
                 .small()
                 .h_7()
                 .w_full()
-                .when(self.location_error.is_some(), |input| {
+                .when(self.ui.location_error.is_some(), |input| {
                     input.border_color(colors.danger)
                 })
                 .when_some(suffix, |input, suffix| input.suffix(suffix))
@@ -3210,7 +2981,7 @@ impl Marcel {
         }
 
         let view = cx.entity();
-        let breadcrumbs = if self.browsing_trash {
+        let breadcrumbs = if self.sidebar.browsing_trash {
             vec![LocationBreadcrumb {
                 label: "Trash".to_string(),
                 path: None,
@@ -3312,6 +3083,7 @@ impl Marcel {
         let font_size = cx.theme().font_size;
         let font = font(cx.theme().font_family.clone());
         let max_text_width = self
+            .sidebar
             .places
             .iter()
             .map(|place| place.label.clone())
@@ -3364,11 +3136,11 @@ impl Marcel {
         };
 
         self.apply_selection_reconcile(reconcile, cx);
-        self.directory_scroll = UniformListScrollHandle::new();
-        self.entry_hit_bounds.borrow_mut().clear();
-        self.entry_content_bounds.borrow_mut().clear();
-        self.marquee = None;
-        self.marquee_scroll_task.take();
+        self.ui.directory_scroll = UniformListScrollHandle::new();
+        self.drag.entry_hit_bounds.borrow_mut().clear();
+        self.drag.entry_content_bounds.borrow_mut().clear();
+        self.drag.marquee = None;
+        self.drag.marquee_scroll_task.take();
         cx.notify();
     }
 
@@ -3379,17 +3151,17 @@ impl Marcel {
 
         self.persist_browser_state();
         self.apply_selection_reconcile(reconcile, cx);
-        self.directory_scroll = UniformListScrollHandle::new();
-        self.entry_hit_bounds.borrow_mut().clear();
-        self.entry_content_bounds.borrow_mut().clear();
-        self.marquee = None;
-        self.marquee_scroll_task.take();
+        self.ui.directory_scroll = UniformListScrollHandle::new();
+        self.drag.entry_hit_bounds.borrow_mut().clear();
+        self.drag.entry_content_bounds.borrow_mut().clear();
+        self.drag.marquee = None;
+        self.drag.marquee_scroll_task.take();
         cx.notify();
     }
 
     fn persist_browser_state(&self) {
-        let _ = self.state_save_sender.try_send(BrowserState {
-            view: match self.view_mode {
+        let _ = self.ui.state_save_sender.try_send(BrowserState {
+            view: match self.ui.view_mode {
                 ViewMode::List => BrowserView::List,
                 ViewMode::Grid => BrowserView::Grid,
             },
@@ -3419,12 +3191,14 @@ impl Marcel {
     }
 
     fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_input
+        self.ui
+            .search_input
             .update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn replace_search_text(&self, value: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_input
+        self.ui
+            .search_input
             .update(cx, |input, cx| input.set_value(value, window, cx));
     }
 
@@ -3442,19 +3216,19 @@ impl Marcel {
     ) {
         match event {
             InputEvent::Change => {
-                self.location_error = None;
-                if self.location_resolving {
-                    self.location_ticket = self.location_ticket.wrapping_add(1);
-                    self.location_resolving = false;
+                self.ui.location_error = None;
+                if self.ui.location_resolving {
+                    self.ui.location_ticket = self.ui.location_ticket.wrapping_add(1);
+                    self.ui.location_resolving = false;
                 }
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => self.submit_location(input, window, cx),
             InputEvent::Blur => {
-                if self.location_editing && !self.location_resolving {
-                    self.location_ticket = self.location_ticket.wrapping_add(1);
-                    self.location_editing = false;
-                    self.location_error = None;
+                if self.ui.location_editing && !self.ui.location_resolving {
+                    self.ui.location_ticket = self.ui.location_ticket.wrapping_add(1);
+                    self.ui.location_editing = false;
+                    self.ui.location_error = None;
                     cx.notify();
                 }
             }
@@ -3463,16 +3237,16 @@ impl Marcel {
     }
 
     fn begin_location_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.location_ticket = self.location_ticket.wrapping_add(1);
-        self.location_editing = true;
-        self.location_resolving = false;
-        self.location_error = None;
-        let value = if self.browsing_trash {
+        self.ui.location_ticket = self.ui.location_ticket.wrapping_add(1);
+        self.ui.location_editing = true;
+        self.ui.location_resolving = false;
+        self.ui.location_error = None;
+        let value = if self.sidebar.browsing_trash {
             String::new()
         } else {
             self.directory.current_dir.display().to_string()
         };
-        let input = self.location_input.clone();
+        let input = self.ui.location_input.clone();
         input.update(cx, |input, cx| input.set_value(value, window, cx));
         cx.notify();
 
@@ -3483,10 +3257,10 @@ impl Marcel {
     }
 
     fn cancel_location_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.location_ticket = self.location_ticket.wrapping_add(1);
-        self.location_editing = false;
-        self.location_resolving = false;
-        self.location_error = None;
+        self.ui.location_ticket = self.ui.location_ticket.wrapping_add(1);
+        self.ui.location_editing = false;
+        self.ui.location_resolving = false;
+        self.ui.location_error = None;
         self.browser_focus.focus(window);
         cx.notify();
     }
@@ -3497,17 +3271,17 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.location_resolving {
+        if self.ui.location_resolving {
             return;
         }
 
         let value = input.read(cx).value().to_string();
         let current_dir = self.directory.current_dir.clone();
         let home_dir = self.home_dir.clone();
-        self.location_ticket = self.location_ticket.wrapping_add(1);
-        let ticket = self.location_ticket;
-        self.location_resolving = true;
-        self.location_error = None;
+        self.ui.location_ticket = self.ui.location_ticket.wrapping_add(1);
+        let ticket = self.ui.location_ticket;
+        self.ui.location_resolving = true;
+        self.ui.location_error = None;
         cx.notify();
 
         let resolve_task = cx.background_executor().spawn(smol::unblock(move || {
@@ -3516,14 +3290,14 @@ impl Marcel {
         cx.spawn_in(window, async move |this, window| {
             let result = resolve_task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                if ticket != this.location_ticket || !this.location_editing {
+                if ticket != this.ui.location_ticket || !this.ui.location_editing {
                     return;
                 }
-                this.location_resolving = false;
+                this.ui.location_resolving = false;
                 match result {
                     Ok(LocationTarget { directory, reveal }) => {
-                        this.location_editing = false;
-                        this.location_error = None;
+                        this.ui.location_editing = false;
+                        this.ui.location_error = None;
                         this.navigate_to_revealing(
                             directory,
                             reveal.into_iter().collect(),
@@ -3533,9 +3307,10 @@ impl Marcel {
                         this.browser_focus.focus(window);
                     }
                     Err(error) => {
-                        this.location_error = Some(error.clone());
+                        this.ui.location_error = Some(error.clone());
                         window.push_notification(Notification::error(error), cx);
-                        this.location_input
+                        this.ui
+                            .location_input
                             .update(cx, |input, cx| input.focus(window, cx));
                     }
                 }
@@ -3552,8 +3327,8 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         let stroke = &event.keystroke;
-        let search_focused = self.search_input.focus_handle(cx).is_focused(window);
-        let location_focused = self.location_input.focus_handle(cx).is_focused(window);
+        let search_focused = self.ui.search_input.focus_handle(cx).is_focused(window);
+        let location_focused = self.ui.location_input.focus_handle(cx).is_focused(window);
         let browser_focused = self.browser_focus.is_focused(window);
         let input_focused = window.has_focused_input(cx);
 
@@ -3674,33 +3449,33 @@ impl Marcel {
             lines,
             render_rich: false,
             ..
-        }) = &self.preview_state
+        }) = &self.preview.state
         else {
-            self.preview_wrap_task.take();
-            self.preview_wrap = None;
+            self.preview.wrap_task.take();
+            self.preview.wrap = None;
             return;
         };
 
         let columns = self.preview_wrap_columns();
-        if self.preview_wrap.as_ref().is_some_and(|wrapped| {
-            wrapped.ticket == self.preview_ticket && wrapped.columns == columns
+        if self.preview.wrap.as_ref().is_some_and(|wrapped| {
+            wrapped.ticket == self.preview.ticket && wrapped.columns == columns
         }) {
             return;
         }
 
         let lines = lines.clone();
-        let ticket = self.preview_ticket;
-        self.preview_wrap_task.take();
+        let ticket = self.preview.ticket;
+        self.preview.wrap_task.take();
         let wrap_task = cx
             .background_executor()
             .spawn(smol::unblock(move || wrap_preview_lines(&lines, columns)));
-        self.preview_wrap_task = Some(cx.spawn(async move |this, cx| {
+        self.preview.wrap_task = Some(cx.spawn(async move |this, cx| {
             let lines = wrap_task.await;
             let _ = this.update(cx, |this, cx| {
-                if ticket != this.preview_ticket || columns != this.preview_wrap_columns() {
+                if ticket != this.preview.ticket || columns != this.preview_wrap_columns() {
                     return;
                 }
-                this.preview_wrap = Some(WrappedPreview {
+                this.preview.wrap = Some(WrappedPreview {
                     ticket,
                     columns,
                     lines,
@@ -3711,8 +3486,8 @@ impl Marcel {
     }
 
     fn schedule_preview_wrap(&mut self, cx: &mut Context<Self>) {
-        self.preview_resize_task.take();
-        self.preview_resize_task = Some(cx.spawn(async move |this, cx| {
+        self.preview.resize_task.take();
+        self.preview.resize_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(PREVIEW_WRAP_DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| this.start_preview_wrap(cx));
         }));
@@ -3785,7 +3560,7 @@ impl Marcel {
         } else {
             self.directory.selection.select_only(path.to_path_buf());
         }
-        self.entry_menu = Some(EntryMenu {
+        self.ui.entry_menu = Some(EntryMenu {
             position,
             target: ContextMenuTarget::Entry,
         });
@@ -3793,11 +3568,12 @@ impl Marcel {
     }
 
     fn prepare_directory_context_menu(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let Some(bounds) = self.browser_bounds.get() else {
+        let Some(bounds) = self.drag.browser_bounds.get() else {
             return;
         };
         if !bounds.contains(&event.position)
             || self
+                .drag
                 .entry_hit_bounds
                 .borrow()
                 .values()
@@ -3807,7 +3583,7 @@ impl Marcel {
         }
 
         self.clear_selection();
-        self.entry_menu = Some(EntryMenu {
+        self.ui.entry_menu = Some(EntryMenu {
             position: event.position,
             target: ContextMenuTarget::CurrentDirectory,
         });
@@ -3815,13 +3591,13 @@ impl Marcel {
     }
 
     fn dismiss_entry_menu(&mut self, cx: &mut Context<Self>) {
-        if self.entry_menu.take().is_some() {
+        if self.ui.entry_menu.take().is_some() {
             cx.notify();
         }
     }
 
     fn render_entry_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.entry_menu?;
+        let menu = self.ui.entry_menu?;
         let colors = cx.theme().colors;
         // Popovers and `accent` share the raised surface in Marcel palettes.
         // Use the translucent primary tint for an unambiguous menu hover.
@@ -3852,7 +3628,7 @@ impl Marcel {
         let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles);
         let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
         let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
-        let trash_menu_command = if self.browsing_trash {
+        let trash_menu_command = if self.sidebar.browsing_trash {
             BrowserCommand::RestoreSelection
         } else {
             BrowserCommand::TrashSelection
@@ -3865,7 +3641,7 @@ impl Marcel {
             ContextMenuTarget::Entry => {
                 ENTRY_MENU_HEIGHT + if extract_visible { 28.0 } else { 0.0 }
             }
-            ContextMenuTarget::CurrentDirectory if self.browsing_trash => {
+            ContextMenuTarget::CurrentDirectory if self.sidebar.browsing_trash => {
                 DIRECTORY_MENU_HEIGHT + 36.0
             }
             ContextMenuTarget::CurrentDirectory => DIRECTORY_MENU_HEIGHT,
@@ -3921,7 +3697,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::NewFolder,
                                             window,
@@ -3952,7 +3728,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::PasteFiles,
                                             window,
@@ -3982,7 +3758,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::UndoFileOperation,
                                             window,
@@ -4012,7 +3788,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::RedoFileOperation,
                                             window,
@@ -4043,7 +3819,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::SelectAll,
                                             window,
@@ -4086,7 +3862,7 @@ impl Marcel {
                             .cursor_pointer()
                             .hover(|this| this.bg(colors.list_active))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.entry_menu = None;
+                                this.ui.entry_menu = None;
                                 this.set_show_hidden(!this.directory.show_hidden, cx);
                             }))
                             .child("Show Hidden Files")
@@ -4104,7 +3880,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::OpenTerminal,
                                             window,
@@ -4134,7 +3910,7 @@ impl Marcel {
                             .child("Copy Location"),
                     )
                     .child(planned("Properties"))
-                    .when(self.browsing_trash, |this| {
+                    .when(self.sidebar.browsing_trash, |this| {
                         this.child(separator()).child(
                             h_flex()
                                 .id("directory-menu-empty-trash")
@@ -4145,7 +3921,7 @@ impl Marcel {
                                     this.cursor_pointer()
                                         .hover(|this| this.bg(colors.list_active))
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.entry_menu = None;
+                                            this.ui.entry_menu = None;
                                             this.execute_browser_command(
                                                 BrowserCommand::EmptyTrash,
                                                 window,
@@ -4190,7 +3966,7 @@ impl Marcel {
                         .cursor_pointer()
                         .hover(|this| this.bg(colors.list_active))
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.entry_menu = None;
+                            this.ui.entry_menu = None;
                             this.execute_browser_command(
                                 BrowserCommand::ActivateSelection,
                                 window,
@@ -4216,7 +3992,7 @@ impl Marcel {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_menu = None;
+                                    this.ui.entry_menu = None;
                                     this.execute_browser_command(
                                         BrowserCommand::OpenWithSelection,
                                         window,
@@ -4298,7 +4074,7 @@ impl Marcel {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_menu = None;
+                                    this.ui.entry_menu = None;
                                     this.execute_browser_command(
                                         BrowserCommand::PasteFiles,
                                         window,
@@ -4330,7 +4106,7 @@ impl Marcel {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_menu = None;
+                                    this.ui.entry_menu = None;
                                     this.execute_browser_command(
                                         BrowserCommand::RenameSelection,
                                         window,
@@ -4361,20 +4137,20 @@ impl Marcel {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.entry_menu = None;
+                                    this.ui.entry_menu = None;
                                     this.execute_browser_command(trash_menu_command, window, cx);
                                 }))
                         })
                         .when(!trash_menu_enabled, |this| {
                             this.text_color(colors.muted_foreground)
                         })
-                        .child(if self.browsing_trash {
+                        .child(if self.sidebar.browsing_trash {
                             "Restore"
                         } else {
                             "Move to Trash"
                         })
                         .child(div().flex_1())
-                        .when(!self.browsing_trash, |this| {
+                        .when(!self.sidebar.browsing_trash, |this| {
                             this.child(
                                 div()
                                     .text_xs()
@@ -4393,7 +4169,7 @@ impl Marcel {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_menu = None;
+                                    this.ui.entry_menu = None;
                                     this.execute_browser_command(
                                         BrowserCommand::DeletePermanently,
                                         window,
@@ -4425,7 +4201,7 @@ impl Marcel {
                             this.cursor_pointer()
                                 .hover(|this| this.bg(colors.list_active))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_menu = None;
+                                    this.ui.entry_menu = None;
                                     this.execute_browser_command(
                                         BrowserCommand::CompressSelection,
                                         window,
@@ -4449,7 +4225,7 @@ impl Marcel {
                                 this.cursor_pointer()
                                     .hover(|this| this.bg(colors.list_active))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.entry_menu = None;
+                                        this.ui.entry_menu = None;
                                         this.execute_browser_command(
                                             BrowserCommand::ExtractSelection,
                                             window,
@@ -4471,11 +4247,12 @@ impl Marcel {
     }
 
     fn begin_marquee(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let Some(bounds) = self.browser_bounds.get() else {
+        let Some(bounds) = self.drag.browser_bounds.get() else {
             return;
         };
         if !bounds.contains(&event.position)
             || self
+                .drag
                 .entry_hit_bounds
                 .borrow()
                 .values()
@@ -4486,21 +4263,23 @@ impl Marcel {
 
         let additive = event.modifiers.secondary();
         let visible_paths = self
+            .drag
             .entry_hit_bounds
             .borrow()
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
-        self.entry_content_bounds
+        self.drag
+            .entry_content_bounds
             .borrow_mut()
             .retain(|path, _| visible_paths.contains(path));
-        let scroll = self.directory_scroll.0.borrow().base_handle.offset();
+        let scroll = self.ui.directory_scroll.0.borrow().base_handle.offset();
         let base_selection = self.directory.selection.selected().clone();
         if !additive {
             self.directory.selection.clear();
             self.clear_preview();
         }
-        self.marquee = Some(MarqueeGesture {
+        self.drag.marquee = Some(MarqueeGesture {
             start_window: event.position,
             origin_content: event.position - bounds.origin - scroll,
             current_window: event.position,
@@ -4515,7 +4294,7 @@ impl Marcel {
         if !event.dragging() {
             return;
         }
-        let Some(gesture) = self.marquee.as_mut() else {
+        let Some(gesture) = self.drag.marquee.as_mut() else {
             return;
         };
 
@@ -4537,18 +4316,19 @@ impl Marcel {
     }
 
     fn apply_marquee_selection(&mut self, clear_preview: bool, cx: &mut Context<Self>) {
-        let Some(bounds) = self.browser_bounds.get() else {
+        let Some(bounds) = self.drag.browser_bounds.get() else {
             return;
         };
-        let Some(gesture) = self.marquee.as_ref() else {
+        let Some(gesture) = self.drag.marquee.as_ref() else {
             return;
         };
-        let scroll = self.directory_scroll.0.borrow().base_handle.offset();
+        let scroll = self.ui.directory_scroll.0.borrow().base_handle.offset();
         let current_content = gesture.current_window - bounds.origin - scroll;
         let rectangle = marquee_bounds(gesture.origin_content, current_content);
         let base_selection = gesture.base_selection.clone();
         let additive = gesture.additive;
         let intersecting = self
+            .drag
             .entry_content_bounds
             .borrow()
             .iter()
@@ -4566,8 +4346,8 @@ impl Marcel {
     }
 
     fn start_marquee_autoscroll(&mut self, cx: &mut Context<Self>) {
-        self.marquee_scroll_task.take();
-        self.marquee_scroll_task = Some(cx.spawn(async move |this, cx| {
+        self.drag.marquee_scroll_task.take();
+        self.drag.marquee_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(POINTER_EDGE_SCROLL_INTERVAL).await;
                 let keep_running = this
@@ -4581,10 +4361,10 @@ impl Marcel {
     }
 
     fn tick_marquee_autoscroll(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(bounds) = self.browser_bounds.get() else {
+        let Some(bounds) = self.drag.browser_bounds.get() else {
             return false;
         };
-        let Some(gesture) = self.marquee.as_ref() else {
+        let Some(gesture) = self.drag.marquee.as_ref() else {
             return false;
         };
         if !gesture.active {
@@ -4596,7 +4376,7 @@ impl Marcel {
             return true;
         }
 
-        let handle = self.directory_scroll.0.borrow().base_handle.clone();
+        let handle = self.ui.directory_scroll.0.borrow().base_handle.clone();
         let mut offset = handle.offset();
         let old_offset = offset;
         offset.y = (offset.y + delta).clamp(-handle.max_offset().height, px(0.0));
@@ -4610,8 +4390,8 @@ impl Marcel {
     }
 
     fn start_file_drag_autoscroll(&mut self, cx: &mut Context<Self>) {
-        self.file_drag_scroll_task.take();
-        self.file_drag_scroll_task = Some(cx.spawn(async move |this, cx| {
+        self.drag.file_scroll_task.take();
+        self.drag.file_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(POINTER_EDGE_SCROLL_INTERVAL).await;
                 let keep_running = this
@@ -4626,13 +4406,13 @@ impl Marcel {
 
     fn tick_file_drag_autoscroll(&mut self, cx: &mut Context<Self>) -> bool {
         if !cx.has_active_drag() {
-            self.file_drag_pointer = None;
+            self.drag.file_pointer = None;
             return false;
         }
-        let Some(bounds) = self.browser_bounds.get() else {
+        let Some(bounds) = self.drag.browser_bounds.get() else {
             return false;
         };
-        let Some(pointer) = self.file_drag_pointer else {
+        let Some(pointer) = self.drag.file_pointer else {
             return false;
         };
         if pointer.x < bounds.left() || pointer.x > bounds.right() {
@@ -4644,7 +4424,7 @@ impl Marcel {
             return true;
         }
 
-        let handle = self.directory_scroll.0.borrow().base_handle.clone();
+        let handle = self.ui.directory_scroll.0.borrow().base_handle.clone();
         let mut offset = handle.offset();
         let old_offset = offset;
         offset.y = (offset.y + delta).clamp(-handle.max_offset().height, px(0.0));
@@ -4655,8 +4435,8 @@ impl Marcel {
     }
 
     fn end_marquee(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
-        if event.button == MouseButton::Left && self.marquee.take().is_some() {
-            self.marquee_scroll_task.take();
+        if event.button == MouseButton::Left && self.drag.marquee.take().is_some() {
+            self.drag.marquee_scroll_task.take();
             let ordered = self.visible_paths();
             self.directory.selection.ensure_primary(&ordered);
             if let Some(entry) = self
@@ -4678,32 +4458,15 @@ impl Marcel {
     }
 
     fn start_preview(&mut self, entry: FileEntry, cx: &mut Context<Self>) {
-        self.preview_ticket = self.preview_ticket.wrapping_add(1);
-        let ticket = self.preview_ticket;
-
         // Like Yazi's preview task, replacing this handle cancels the previous
         // foreground task. The ticket also prevents a late result from
         // becoming current:
         // https://github.com/sxyazi/yazi/blob/main/yazi-core/src/tab/preview.rs
-        if let Some(cancel) = self.preview_cancel.take() {
-            cancel.store(true, Ordering::Release);
-        }
-        self.preview_task.take();
-        self.reset_folder_preview();
-        self.reset_pdf_preview();
-        self.preview_wrap_task.take();
-        self.preview_resize_task.take();
-        self.preview_wrap = None;
-        self.preview_text_scroll = UniformListScrollHandle::new();
-        self.preview_state = PreviewState::Loading {
-            name: entry.name.clone(),
-        };
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.preview_cancel = Some(cancelled.clone());
+        let (ticket, cancelled) = self.preview.begin_loading(entry.name.clone());
 
         if entry.navigable {
             let path = entry.path;
-            self.preview_state = PreviewState::Ready(Preview::Directory { path: path.clone() });
+            self.preview.state = PreviewState::Ready(Preview::Directory { path: path.clone() });
             self.start_folder_preview_load(path, ticket, cancelled, cx);
             cx.notify();
             return;
@@ -4713,13 +4476,13 @@ impl Marcel {
             .background_executor()
             .spawn(smol::unblock(move || load_preview(&entry, &cancelled)));
 
-        self.preview_task = Some(cx.spawn(async move |this, cx| {
+        self.preview.task = Some(cx.spawn(async move |this, cx| {
             let result = load_task.await;
             let _ = this.update(cx, |this, cx| {
-                if ticket != this.preview_ticket {
+                if ticket != this.preview.ticket {
                     return;
                 }
-                this.preview_state = match result {
+                this.preview.state = match result {
                     Ok(preview) => PreviewState::Ready(preview),
                     Err(error) => PreviewState::Error(error.to_string()),
                 };
@@ -4737,10 +4500,10 @@ impl Marcel {
         cancelled: Arc<AtomicBool>,
         cx: &mut Context<Self>,
     ) {
-        self.folder_preview_entries.clear();
-        self.folder_preview_error = None;
-        self.folder_preview_loading = true;
-        self.folder_preview_scroll = UniformListScrollHandle::new();
+        self.preview.folder_entries.clear();
+        self.preview.folder_error = None;
+        self.preview.folder_loading = true;
+        self.preview.folder_scroll = UniformListScrollHandle::new();
 
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
@@ -4757,15 +4520,15 @@ impl Marcel {
         // Sources (upstream commit e58022b9aafc8dabf586e2cc29b79a230071716f):
         // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-actor/src/lives/preview.rs
         // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-actor/src/mgr/peek.rs
-        self.folder_preview_task = Some(cx.spawn(async move |this, cx| {
+        self.preview.folder_task = Some(cx.spawn(async move |this, cx| {
             while let Ok(update) = receiver.recv().await {
                 let should_continue = this
                     .update(cx, |this, cx| {
-                        if ticket != this.preview_ticket {
+                        if ticket != this.preview.ticket {
                             return false;
                         }
                         let PreviewState::Ready(Preview::Directory { path: preview_path }) =
-                            &this.preview_state
+                            &this.preview.state
                         else {
                             return false;
                         };
@@ -4777,13 +4540,13 @@ impl Marcel {
                             matches!(&update, DirectoryUpdate::Done | DirectoryUpdate::Error(_));
                         match update {
                             DirectoryUpdate::Batch(batch) => {
-                                this.folder_preview_entries = merge_sorted_entries(
-                                    std::mem::take(&mut this.folder_preview_entries),
+                                this.preview.folder_entries = merge_sorted_entries(
+                                    std::mem::take(&mut this.preview.folder_entries),
                                     batch,
                                 );
                             }
                             DirectoryUpdate::Degraded { skipped, examples } => {
-                                this.folder_preview_error = Some(format!(
+                                this.preview.folder_error = Some(format!(
                                     "Skipped {skipped} unreadable entries{}",
                                     if examples.is_empty() {
                                         String::new()
@@ -4793,11 +4556,11 @@ impl Marcel {
                                 ));
                             }
                             DirectoryUpdate::Done => {
-                                this.folder_preview_loading = false;
+                                this.preview.folder_loading = false;
                             }
                             DirectoryUpdate::Error(error) => {
-                                this.folder_preview_loading = false;
-                                this.folder_preview_error = Some(error);
+                                this.preview.folder_loading = false;
+                                this.preview.folder_error = Some(error);
                             }
                         }
                         cx.notify();
@@ -4821,7 +4584,8 @@ impl Marcel {
             return;
         }
         let Some(entry) = self
-            .folder_preview_entries
+            .preview
+            .folder_entries
             .iter()
             .find(|entry| entry.path == path)
             .cloned()
@@ -4832,7 +4596,7 @@ impl Marcel {
     }
 
     fn ensure_pdf_pages(&mut self, visible: Range<usize>, cx: &mut Context<Self>) {
-        let PreviewState::Ready(Preview::Pdf { pages, .. }) = &self.preview_state else {
+        let PreviewState::Ready(Preview::Pdf { pages, .. }) = &self.preview.state else {
             return;
         };
         let pages = *pages;
@@ -4842,83 +4606,86 @@ impl Marcel {
         // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-plugin/preset/plugins/pdf.lua
         let priority = prioritize_pdf_pages(visible, pages);
 
-        self.pdf_page_queue.clear();
-        self.pdf_page_pending = self.pdf_page_inflight.clone();
+        self.preview.pdf_queue.clear();
+        self.preview.pdf_pending = self.preview.pdf_inflight.clone();
         for page in priority {
-            if self.pdf_pages.contains_key(&page) || !self.pdf_page_pending.insert(page) {
+            if self.preview.pdf_pages.contains_key(&page) || !self.preview.pdf_pending.insert(page)
+            {
                 continue;
             }
-            self.pdf_page_queue.push_back(page);
+            self.preview.pdf_queue.push_back(page);
         }
 
         self.start_pdf_page_workers(cx);
         for _ in 0..PDF_PAGE_WORKERS {
-            let _ = self.pdf_page_wake_sender.try_send(());
+            let _ = self.preview.pdf_wake_sender.try_send(());
         }
     }
 
     fn start_pdf_page_workers(&mut self, cx: &mut Context<Self>) {
-        if !self.pdf_page_workers.is_empty() {
+        if !self.preview.pdf_workers.is_empty() {
             return;
         }
 
-        let ticket = self.preview_ticket;
+        let ticket = self.preview.ticket;
         let executor = cx.background_executor().clone();
         for _ in 0..PDF_PAGE_WORKERS {
             let executor = executor.clone();
-            let wake = self.pdf_page_wake_receiver.clone();
-            self.pdf_page_workers.push(cx.spawn(async move |this, cx| {
-                loop {
-                    let request = this
-                        .update(cx, |this, _| {
-                            let page = this.pdf_page_queue.pop_front()?;
-                            let PreviewState::Ready(Preview::Pdf { source, .. }) =
-                                &this.preview_state
-                            else {
-                                return None;
-                            };
-                            let cancelled = this.preview_cancel.clone()?;
-                            this.pdf_page_inflight.insert(page);
-                            Some((page, source.clone(), cancelled))
-                        })
-                        .ok()
-                        .flatten();
-                    let Some((page, source, cancelled)) = request else {
-                        if wake.recv().await.is_err() {
+            let wake = self.preview.pdf_wake_receiver.clone();
+            self.preview
+                .pdf_workers
+                .push(cx.spawn(async move |this, cx| {
+                    loop {
+                        let request = this
+                            .update(cx, |this, _| {
+                                let page = this.preview.pdf_queue.pop_front()?;
+                                let PreviewState::Ready(Preview::Pdf { source, .. }) =
+                                    &this.preview.state
+                                else {
+                                    return None;
+                                };
+                                let cancelled = this.preview.cancel.clone()?;
+                                this.preview.pdf_inflight.insert(page);
+                                Some((page, source.clone(), cancelled))
+                            })
+                            .ok()
+                            .flatten();
+                        let Some((page, source, cancelled)) = request else {
+                            if wake.recv().await.is_err() {
+                                break;
+                            }
+                            continue;
+                        };
+
+                        let result = executor
+                            .spawn(smol::unblock(move || {
+                                crate::pdf_preview::render_pdf_page(&source, page, &cancelled)
+                            }))
+                            .await;
+                        let keep_running = this
+                            .update(cx, |this, cx| {
+                                if ticket != this.preview.ticket {
+                                    return false;
+                                }
+                                this.preview.pdf_inflight.remove(&page);
+                                this.preview.pdf_pending.remove(&page);
+                                let state = match result {
+                                    Ok(rendered) => PdfPageState::Ready(rendered.path),
+                                    Err(error) => PdfPageState::Failed(error.to_string()),
+                                };
+                                this.preview.pdf_pages.insert(page, state);
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !keep_running {
                             break;
                         }
-                        continue;
-                    };
-
-                    let result = executor
-                        .spawn(smol::unblock(move || {
-                            crate::pdf_preview::render_pdf_page(&source, page, &cancelled)
-                        }))
-                        .await;
-                    let keep_running = this
-                        .update(cx, |this, cx| {
-                            if ticket != this.preview_ticket {
-                                return false;
-                            }
-                            this.pdf_page_inflight.remove(&page);
-                            this.pdf_page_pending.remove(&page);
-                            let state = match result {
-                                Ok(rendered) => PdfPageState::Ready(rendered.path),
-                                Err(error) => PdfPageState::Failed(error.to_string()),
-                            };
-                            this.pdf_pages.insert(page, state);
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !keep_running {
-                        break;
                     }
-                }
-            }));
+                }));
         }
         for _ in 0..PDF_PAGE_WORKERS {
-            let _ = self.pdf_page_wake_sender.try_send(());
+            let _ = self.preview.pdf_wake_sender.try_send(());
         }
     }
 
@@ -4931,15 +4698,15 @@ impl Marcel {
         #[cfg(target_os = "linux")]
         {
             let path = entry.path;
-            let ticket = self.preview_ticket;
+            let ticket = self.preview.ticket;
             let open_task = cx
                 .background_executor()
                 .spawn(crate::system_open::open_file(path.clone()));
             cx.spawn(async move |this, cx| {
                 if let Err(error) = open_task.await {
                     let _ = this.update(cx, |this, cx| {
-                        if this.preview_ticket == ticket {
-                            this.preview_state = PreviewState::Error(error.to_string());
+                        if this.preview.ticket == ticket {
+                            this.preview.state = PreviewState::Error(error.to_string());
                             cx.notify();
                         }
                     });
@@ -4978,7 +4745,7 @@ impl Marcel {
                 if let Err(error) = open_task.await {
                     let _ = this.update(cx, |this, cx| {
                         if this.directory.selection.primary() == Some(&path) {
-                            this.preview_state = PreviewState::Error(error.to_string());
+                            this.preview.state = PreviewState::Error(error.to_string());
                             cx.notify();
                         }
                     });
@@ -5017,9 +4784,9 @@ impl Marcel {
         let radius = cx.theme().radius;
         let is_trash = place.is_trash();
         let active = if is_trash {
-            self.browsing_trash
+            self.sidebar.browsing_trash
         } else {
-            !self.browsing_trash && self.directory.current_dir == place.path
+            !self.sidebar.browsing_trash && self.directory.current_dir == place.path
         };
         let operation_busy = self.operations.is_busy();
         let drop_path = place.path.clone();
@@ -5027,8 +4794,9 @@ impl Marcel {
         let navigate_path = place.path.clone();
         let can_drop_path = place.path.clone();
         let bounds_path = place.path.clone();
-        let place_drop_bounds = self.place_drop_bounds.clone();
+        let place_drop_bounds = self.sidebar.place_drop_bounds.clone();
         let icon = self
+            .sidebar
             .place_icons
             .get(&place.path)
             .cloned()
@@ -5128,7 +4896,7 @@ impl Marcel {
         let radius = cx.theme().radius;
         let active = self.directory.current_dir == bookmark.path;
         let operation_busy = self.operations.is_busy();
-        let insertion_here = self.bookmark_insertion == Some(BookmarkInsertion { index });
+        let insertion_here = self.sidebar.bookmark_insertion == Some(BookmarkInsertion { index });
         let navigate_path = bookmark.path.clone();
         let drop_path = bookmark.path.clone();
         let external_drop_path = bookmark.path.clone();
@@ -5137,8 +4905,9 @@ impl Marcel {
             index,
             path: bookmark.path.clone(),
         };
-        let bookmark_row_bounds = self.bookmark_row_bounds.clone();
+        let bookmark_row_bounds = self.sidebar.bookmark_row_bounds.clone();
         let icon = self
+            .sidebar
             .bookmark_icons
             .get(&bookmark.path)
             .cloned()
@@ -5229,8 +4998,8 @@ impl Marcel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            this.entry_menu = None;
-                            this.bookmark_menu = Some(BookmarkMenu {
+                            this.ui.entry_menu = None;
+                            this.sidebar.bookmark_menu = Some(BookmarkMenu {
                                 index,
                                 position: event.position,
                             });
@@ -5274,6 +5043,7 @@ impl Marcel {
         // begin until that gesture ends. Avoid rebuilding a potentially huge
         // selected-file payload on every marquee repaint.
         let selected_drag = self
+            .drag
             .marquee
             .is_none()
             .then(|| self.selected_file_drag())
@@ -5294,8 +5064,8 @@ impl Marcel {
                         let can_drop_path = path.clone();
                         let selected = this.directory.selection.is_selected(&path);
                         let navigable = entry.navigable;
-                        let rename_input = (this.rename_path.as_ref() == Some(&path))
-                            .then(|| this.rename_input.clone())
+                        let rename_input = (this.ui.rename_path.as_ref() == Some(&path))
+                            .then(|| this.ui.rename_input.clone())
                             .flatten();
                         let drag = if selected {
                             selected_drag
@@ -5305,11 +5075,12 @@ impl Marcel {
                             Self::single_file_drag(&path, navigable)
                         };
                         let operation_busy = this.operations.is_busy();
-                        let dragging_enabled = !this.browsing_trash && rename_input.is_none();
-                        let entry_hit_bounds = this.entry_hit_bounds.clone();
-                        let entry_content_bounds = this.entry_content_bounds.clone();
-                        let browser_bounds = this.browser_bounds.clone();
-                        let directory_scroll = this.directory_scroll.clone();
+                        let dragging_enabled =
+                            !this.sidebar.browsing_trash && rename_input.is_none();
+                        let entry_hit_bounds = this.drag.entry_hit_bounds.clone();
+                        let entry_content_bounds = this.drag.entry_content_bounds.clone();
+                        let browser_bounds = this.drag.browser_bounds.clone();
+                        let directory_scroll = this.ui.directory_scroll.clone();
                         let icon = if let Some(icon_path) = entry.icon_path.clone() {
                             img(icon_path)
                                 .size(px(20.0))
@@ -5466,7 +5237,7 @@ impl Marcel {
                     .collect::<Vec<_>>()
             }),
         )
-        .track_scroll(self.directory_scroll.clone())
+        .track_scroll(self.ui.directory_scroll.clone())
         .h_full()
         .into_any_element()
     }
@@ -5477,14 +5248,15 @@ impl Marcel {
         // See the list-view note: marquee repaints do not need file-drag
         // payloads, especially when the rectangle spans thousands of items.
         let selected_drag = self
+            .drag
             .marquee
             .is_none()
             .then(|| self.selected_file_drag())
             .flatten();
         let columns = self.grid_columns();
-        if columns != self.grid_layout_columns {
-            self.grid_layout_columns = columns;
-            self.entry_content_bounds.borrow_mut().clear();
+        if columns != self.ui.grid_layout_columns {
+            self.ui.grid_layout_columns = columns;
+            self.drag.entry_content_bounds.borrow_mut().clear();
         }
         let row_count = self.directory.visible_entries.len().div_ceil(columns);
 
@@ -5518,8 +5290,8 @@ impl Marcel {
                             let can_drop_path = path.clone();
                             let selected = this.directory.selection.is_selected(&path);
                             let navigable = entry.navigable;
-                            let rename_input = (this.rename_path.as_ref() == Some(&path))
-                                .then(|| this.rename_input.clone())
+                            let rename_input = (this.ui.rename_path.as_ref() == Some(&path))
+                                .then(|| this.ui.rename_input.clone())
                                 .flatten();
                             let drag = if selected {
                                 selected_drag
@@ -5529,14 +5301,15 @@ impl Marcel {
                                 Self::single_file_drag(&path, navigable)
                             };
                             let operation_busy = this.operations.is_busy();
-                            let dragging_enabled = !this.browsing_trash && rename_input.is_none();
+                            let dragging_enabled =
+                                !this.sidebar.browsing_trash && rename_input.is_none();
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
-                            let entry_hit_bounds = this.entry_hit_bounds.clone();
-                            let entry_content_bounds = this.entry_content_bounds.clone();
-                            let browser_bounds = this.browser_bounds.clone();
-                            let directory_scroll = this.directory_scroll.clone();
+                            let entry_hit_bounds = this.drag.entry_hit_bounds.clone();
+                            let entry_content_bounds = this.drag.entry_content_bounds.clone();
+                            let browser_bounds = this.drag.browser_bounds.clone();
+                            let directory_scroll = this.ui.directory_scroll.clone();
 
-                            let visual = match this.thumbnails.get(&path) {
+                            let visual = match this.preview.thumbnails.get(&path) {
                                 Some(ThumbnailState::Ready(thumbnail)) => div()
                                     .flex()
                                     .flex_none()
@@ -5749,7 +5522,7 @@ impl Marcel {
                 .collect::<Vec<_>>()
             }),
         )
-        .track_scroll(self.directory_scroll.clone())
+        .track_scroll(self.ui.directory_scroll.clone())
         .h_full()
         .into_any_element()
     }
@@ -5770,16 +5543,16 @@ impl Marcel {
             }
         });
 
-        let bounds_state = self.browser_bounds.clone();
-        let visible_hit_bounds = self.entry_hit_bounds.clone();
+        let bounds_state = self.drag.browser_bounds.clone();
+        let visible_hit_bounds = self.drag.entry_hit_bounds.clone();
         let degraded_warning = self.directory.warning.clone();
         let gesture_view = cx.entity();
-        let marquee = self.marquee.as_ref().and_then(|gesture| {
+        let marquee = self.drag.marquee.as_ref().and_then(|gesture| {
             if !gesture.active {
                 return None;
             }
-            let bounds = self.browser_bounds.get()?;
-            let scroll = self.directory_scroll.0.borrow().base_handle.offset();
+            let bounds = self.drag.browser_bounds.get()?;
+            let scroll = self.ui.directory_scroll.0.borrow().base_handle.offset();
             let origin_window = bounds.origin + gesture.origin_content + scroll;
             let rectangle = marquee_bounds(origin_window, gesture.current_window);
             let left = rectangle.left().max(bounds.left());
@@ -5812,17 +5585,17 @@ impl Marcel {
                 .text_color(colors.muted_foreground)
                 .child(message)
                 .into_any_element(),
-            None => match self.view_mode {
+            None => match self.ui.view_mode {
                 ViewMode::List => self.render_list(cx),
                 ViewMode::Grid => self.render_grid(cx),
             },
         };
-        let directory_scroll = self.directory_scroll.clone();
+        let directory_scroll = self.ui.directory_scroll.clone();
         let operation_busy = self.operations.is_busy();
         let can_drop_path = self.directory.current_dir.clone();
         let internal_drop_path = self.directory.current_dir.clone();
         let external_drop_path = self.directory.current_dir.clone();
-        let browsing_trash = self.browsing_trash;
+        let browsing_trash = self.sidebar.browsing_trash;
 
         div()
             .relative()
@@ -5929,14 +5702,14 @@ impl Marcel {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
 
-        if self.folder_preview_entries.is_empty() {
-            if let Some(error) = &self.folder_preview_error {
+        if self.preview.folder_entries.is_empty() {
+            if let Some(error) = &self.preview.folder_error {
                 return centered_preview_message(
                     format!("Could not read this folder\n{error}"),
                     colors.danger,
                 );
             }
-            if self.folder_preview_loading {
+            if self.preview.folder_loading {
                 return centered_preview_message(
                     "Loading folder contents…",
                     colors.muted_foreground,
@@ -5945,19 +5718,19 @@ impl Marcel {
             return centered_preview_message("This folder is empty", colors.muted_foreground);
         }
 
-        let scroll = self.folder_preview_scroll.clone();
-        let ticket = self.preview_ticket;
+        let scroll = self.preview.folder_scroll.clone();
+        let ticket = self.preview.ticket;
         div()
             .relative()
             .size_full()
             .child(
                 uniform_list(
                     ("folder-preview-entries", ticket),
-                    self.folder_preview_entries.len(),
+                    self.preview.folder_entries.len(),
                     cx.processor(move |this, range: Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let entry = this.folder_preview_entries.get(index)?.clone();
+                                let entry = this.preview.folder_entries.get(index)?.clone();
                                 let click_path = entry.path.clone();
                                 let icon = if let Some(icon_path) = entry.icon_path.clone() {
                                     img(icon_path)
@@ -6030,7 +5803,7 @@ impl Marcel {
     fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.update_preview_font_metrics(window, cx);
         let colors = cx.theme().colors;
-        match &self.preview_state {
+        match &self.preview.state {
             PreviewState::Empty => {
                 centered_preview_message("Select a file to preview", colors.muted_foreground)
             }
@@ -6045,7 +5818,7 @@ impl Marcel {
                 let muted = colors.muted_foreground;
                 let danger = colors.danger;
                 img(path.clone())
-                    .id(("preview-image", self.preview_ticket))
+                    .id(("preview-image", self.preview.ticket))
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .with_loading(move || centered_preview_message("Decoding image…", muted))
@@ -6056,10 +5829,10 @@ impl Marcel {
             }
             PreviewState::Ready(Preview::Pdf { pages, .. }) => {
                 let pages = *pages;
-                let scroll = self.pdf_scroll.clone();
-                let page_width = (f32::from(self.preview_width.get()) - 40.0).max(240.0);
+                let scroll = self.preview.pdf_scroll.clone();
+                let page_width = (f32::from(self.preview.width.get()) - 40.0).max(240.0);
                 let page_height = px((page_width * 1.414).clamp(340.0, 1_240.0));
-                let ticket = self.preview_ticket;
+                let ticket = self.preview.ticket;
 
                 div()
                     .relative()
@@ -6073,7 +5846,12 @@ impl Marcel {
                                 range
                                     .map(|index| {
                                         let page = index + 1;
-                                        let content = match this.pdf_pages.get(&page).cloned() {
+                                        let content = match this
+                                            .preview
+                                            .pdf_pages
+                                            .get(&page)
+                                            .cloned()
+                                        {
                                             Some(PdfPageState::Ready(path)) => img(path)
                                                 .id(("pdf-page-image", page))
                                                 .size_full()
@@ -6145,15 +5923,15 @@ impl Marcel {
                     } else {
                         code_fence(contents, language)
                     };
-                    TextView::markdown(("preview-text", self.preview_ticket), source, window, cx)
+                    TextView::markdown(("preview-text", self.preview.ticket), source, window, cx)
                         .selectable(true)
                         .scrollable(true)
                         .size_full()
                         .p_3()
                         .into_any_element()
                 } else {
-                    let Some(wrapped) = self.preview_wrap.as_ref().filter(|wrapped| {
-                        wrapped.ticket == self.preview_ticket
+                    let Some(wrapped) = self.preview.wrap.as_ref().filter(|wrapped| {
+                        wrapped.ticket == self.preview.ticket
                             && wrapped.columns == self.preview_wrap_columns()
                     }) else {
                         return centered_preview_message(
@@ -6162,19 +5940,19 @@ impl Marcel {
                         );
                     };
                     let lines = wrapped.lines.clone();
-                    let scroll = self.preview_text_scroll.clone();
+                    let scroll = self.preview.text_scroll.clone();
                     let foreground = colors.foreground;
                     let muted = colors.muted_foreground;
                     let mono_font = cx.theme().mono_font_family.clone();
                     let mono_font_size = cx.theme().mono_font_size;
-                    let mono_line_height = self.preview_mono_line_height.get();
+                    let mono_line_height = self.preview.mono_line_height.get();
 
                     div()
                         .relative()
                         .size_full()
                         .child(
                             uniform_list(
-                                ("preview-text-lines", self.preview_ticket),
+                                ("preview-text-lines", self.preview.ticket),
                                 lines.len(),
                                 move |range, _, _| {
                                     range
@@ -6230,19 +6008,19 @@ impl Marcel {
 
 impl Render for Marcel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.search_input.read(cx).value().as_ref() != self.directory.filter_query {
-            self.search_input.update(cx, |input, cx| {
+        if self.ui.search_input.read(cx).value().as_ref() != self.directory.filter_query {
+            self.ui.search_input.update(cx, |input, cx| {
                 input.set_value(self.directory.filter_query.clone(), window, cx);
             });
         }
 
         let colors = cx.theme().colors;
-        self.place_drop_bounds.borrow_mut().clear();
-        self.bookmark_row_bounds.borrow_mut().clear();
+        self.sidebar.place_drop_bounds.borrow_mut().clear();
+        self.sidebar.bookmark_row_bounds.borrow_mut().clear();
         if !cx.has_active_drag() {
-            self.bookmark_insertion = None;
-            self.file_drag_pointer = None;
-            self.file_drag_scroll_task.take();
+            self.sidebar.bookmark_insertion = None;
+            self.drag.file_pointer = None;
+            self.drag.file_scroll_task.take();
         }
         let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
         let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
@@ -6252,10 +6030,11 @@ impl Render for Marcel {
             (window_width - f32::from(sidebar_width)).max(MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH);
         let browser_default = px(workspace_width * 0.6);
         let preview_default = px(workspace_width * 0.4);
-        if self.preview_width.get() == px(0.0) {
-            self.preview_width.set(preview_default);
+        if self.preview.width.get() == px(0.0) {
+            self.preview.width.set(preview_default);
         }
         let place_buttons = self
+            .sidebar
             .places
             .clone()
             .into_iter()
@@ -6263,18 +6042,19 @@ impl Render for Marcel {
             .map(|(index, place)| self.render_place(index, place, cx))
             .collect::<Vec<_>>();
         let bookmark_buttons = self
+            .sidebar
             .bookmarks
             .clone()
             .into_iter()
             .enumerate()
             .map(|(index, bookmark)| self.render_bookmark(index, bookmark, cx))
             .collect::<Vec<_>>();
-        let bookmark_final_insertion = self.bookmark_insertion
+        let bookmark_final_insertion = self.sidebar.bookmark_insertion
             == Some(BookmarkInsertion {
-                index: self.bookmarks.len(),
+                index: self.sidebar.bookmarks.len(),
             });
-        let bookmarks_ready = !self.bookmarks_loading;
-        let bookmark_region_bounds = self.bookmark_region_bounds.clone();
+        let bookmarks_ready = !self.sidebar.bookmarks_loading;
+        let bookmark_region_bounds = self.sidebar.bookmark_region_bounds.clone();
         let hidden_switch_view = cx.entity();
         let hidden_switch = Switch::new("show-hidden-files")
             .small()
@@ -6296,7 +6076,7 @@ impl Render for Marcel {
                     .w_5()
                     .text_center()
                     .text_lg()
-                    .text_color(if self.view_mode == ViewMode::List {
+                    .text_color(if self.ui.view_mode == ViewMode::List {
                         colors.sidebar_primary
                     } else {
                         colors.muted_foreground
@@ -6306,7 +6086,7 @@ impl Render for Marcel {
             .child(
                 Switch::new("browser-view-mode")
                     .small()
-                    .checked(self.view_mode == ViewMode::Grid)
+                    .checked(self.ui.view_mode == ViewMode::Grid)
                     .tooltip("Switch between list and icon views")
                     .on_click(move |checked, _, cx| {
                         view_switch_view.update(cx, |this, cx| {
@@ -6326,7 +6106,7 @@ impl Render for Marcel {
                     .w_5()
                     .text_center()
                     .text_lg()
-                    .text_color(if self.view_mode == ViewMode::Grid {
+                    .text_color(if self.ui.view_mode == ViewMode::Grid {
                         colors.sidebar_primary
                     } else {
                         colors.muted_foreground
@@ -6376,7 +6156,7 @@ impl Render for Marcel {
                         .child("Places"),
                 )
                 .children(place_buttons)
-                .when(self.places_loading, |this| {
+                .when(self.sidebar.places_loading, |this| {
                     this.child(
                         div()
                             .px_3()
@@ -6423,9 +6203,10 @@ impl Render for Marcel {
                         }))
                         .on_drop(cx.listener(|this, drag: &BookmarkDrag, window, cx| {
                             let insertion = this
+                                .sidebar
                                 .bookmark_insertion
                                 .map(|insertion| insertion.index)
-                                .unwrap_or(this.bookmarks.len());
+                                .unwrap_or(this.sidebar.bookmarks.len());
                             this.move_bookmark(drag.index, insertion, window, cx);
                         }))
                         .on_drop(cx.listener(|this, drag: &FileDrag, window, cx| {
@@ -6442,7 +6223,7 @@ impl Render for Marcel {
                                 .child("Bookmarks"),
                         )
                         .children(bookmark_buttons)
-                        .when(self.bookmarks_loading, |this| {
+                        .when(self.sidebar.bookmarks_loading, |this| {
                             this.child(
                                 div()
                                     .px_3()
@@ -6453,7 +6234,7 @@ impl Render for Marcel {
                             )
                         })
                         .when(
-                            !self.bookmarks_loading && self.bookmarks.is_empty(),
+                            !self.sidebar.bookmarks_loading && self.sidebar.bookmarks.is_empty(),
                             |this| {
                                 this.child(
                                     div()
@@ -6632,7 +6413,7 @@ impl Render for Marcel {
                             .rounded(cx.theme().radius)
                             .text_lg()
                             .text_color(
-                                if !self.browsing_trash
+                                if !self.sidebar.browsing_trash
                                     && self.directory.current_dir.parent().is_some()
                                 {
                                     colors.sidebar_foreground
@@ -6642,7 +6423,7 @@ impl Render for Marcel {
                             )
                             .child("↑")
                             .when(
-                                !self.browsing_trash
+                                !self.sidebar.browsing_trash
                                     && self.directory.current_dir.parent().is_some(),
                                 |button| {
                                     button
@@ -6720,7 +6501,7 @@ impl Render for Marcel {
                     .gap_2()
                     .child(location_bar)
                     .child(
-                        Input::new(&self.search_input)
+                        Input::new(&self.ui.search_input)
                             .small()
                             .cleanable(true)
                             .h_7()
@@ -6738,12 +6519,13 @@ impl Render for Marcel {
         let preview_details = selected_entry.map(|entry| {
             if entry.navigable {
                 let folders = self
-                    .folder_preview_entries
+                    .preview
+                    .folder_entries
                     .iter()
                     .filter(|entry| entry.navigable)
                     .count();
-                let files = self.folder_preview_entries.len().saturating_sub(folders);
-                let progress = if self.folder_preview_loading {
+                let files = self.preview.folder_entries.len().saturating_sub(folders);
+                let progress = if self.preview.folder_loading {
                     " · Loading…"
                 } else {
                     ""
@@ -6757,19 +6539,19 @@ impl Render for Marcel {
                 format!("{} · {size}", entry.display_kind())
             }
         });
-        let image_mime = match &self.preview_state {
+        let image_mime = match &self.preview.state {
             PreviewState::Ready(Preview::Image { mime, .. }) => Some(mime.clone()),
             _ => None,
         };
         let truncated = matches!(
-            &self.preview_state,
+            &self.preview.state,
             PreviewState::Ready(Preview::Text {
                 truncated: true,
                 ..
             })
         );
         let clipped_lines = matches!(
-            &self.preview_state,
+            &self.preview.state,
             PreviewState::Ready(Preview::Text {
                 clipped_lines: true,
                 ..
@@ -6838,7 +6620,7 @@ impl Render for Marcel {
             .child(
                 canvas(
                     {
-                        let preview_width = self.preview_width.clone();
+                        let preview_width = self.preview.width.clone();
                         let preview_view = cx.entity();
                         move |bounds, _, cx| {
                             if (preview_width.get() - bounds.size.width).abs() >= px(1.0) {
