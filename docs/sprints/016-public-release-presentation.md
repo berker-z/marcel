@@ -1,7 +1,7 @@
 # Sprint 16: public release presentation and metadata
 
 **Status:** Planned — explicitly deferred until the hardening matrix is
-accepted.
+accepted, except for the completed application-icon identity slice.
 
 ## Goal
 
@@ -45,7 +45,7 @@ distribution formats already exist.
 - [ ] Add the hero GIF, static fallback, alt text, and reproducible capture
   notes.
 - [ ] Add representative screenshots with intentional filenames and sizes.
-- [ ] Add the original branded icon in scalable and required raster sizes.
+- [x] Add the original branded icon in scalable and required raster sizes.
 - [ ] Install and validate complete AppStream metadata.
 - [ ] Add a platform support/install matrix with no fictional commands.
 - [ ] Separate install, default-handler, and generic FileManager1 instructions.

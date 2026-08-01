@@ -342,8 +342,9 @@ family.
 
 Marcel is not ready to replace a mature system file manager for every workflow:
 
-- A branded application icon, read-only Properties presentation,
-  non-Nix release artifacts, and release automation are not implemented.
+- A read-only Properties presentation, non-Nix release artifacts, and release
+  automation are not implemented. Marcel's branded application icon is
+  installed by the Nix package and used for X11 window metadata.
   Branded D-Bus activation, single-instance routing, and the FileManager1
   navigation methods are implemented. Installing the ordinary package still
   does not take ownership of the generic file-manager D-Bus service.

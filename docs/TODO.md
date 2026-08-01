@@ -32,9 +32,10 @@ Sprint status uses four consistent meanings:
   file drag-and-drop are implemented.
 - Bilateral Chrome/Marcel dragging was manually reconfirmed on Wayland after
   replacing the private GPUI fork with the upstream drag lifecycle.
-- Sprint 16, mandatory hosted CI, public presentation, release metadata,
-  branded artwork, distribution expansion, and a tagged `0.1.0` are explicitly
-  deferred. Local fmt, Clippy, and all-target tests remain mandatory meanwhile.
+- The remaining Sprint 16 work—mandatory hosted CI, public presentation,
+  release metadata, distribution expansion, and a tagged `0.1.0`—is explicitly
+  deferred. The application icon identity slice is complete. Local fmt, Clippy,
+  and all-target tests remain mandatory meanwhile.
 - New File, Properties, Duplicate, Move To, media playback, remote locations,
   X11 outbound drag, and other feature work are parked until this hardening
   phase is accepted.
@@ -66,7 +67,7 @@ The personal daily-driver milestone is complete. Public release work is parked
 during hardening; when resumed, its remaining scope is intentionally bounded:
 
 1. Harden the distribution closure: free archive baseline, packaged icon
-   fallback, branded icon/AppStream metadata, clean-environment launch checks,
+   fallback, AppStream metadata, clean-environment launch checks,
    and documented runtime dependencies.
 2. Tag `0.1.0`, build it from the tag on both declared architectures, and
    verify that installing it takes neither MIME nor generic FileManager1
@@ -137,8 +138,8 @@ The packaging contract, current dependency caveats, target formats, and
   - an overlay for downstream flakes
   - build and runtime dependency declarations suitable for GPUI, Poppler, and
     future media preview tools
-- [x] Install a freedesktop desktop entry using the generic file-manager icon.
-  Add branded application icons before a stable release.
+- [x] Install a freedesktop desktop entry, initially using the generic
+  file-manager icon.
 - [x] Advertise `inode/directory` support and document setting `marcel.desktop` as
   the default directory handler.
 - [x] Provide a Home Manager example for installing Marcel and setting
@@ -162,9 +163,9 @@ The packaging contract, current dependency caveats, target formats, and
 - [ ] Expose RAR decoding as an explicitly unfree opt-in package variant rather
   than requiring users to assemble the backend and
   `MARCEL_ENABLE_RAR=1` override themselves.
-- [ ] Add a distinct Marcel application icon in the freedesktop-required
-  scalable and raster sizes. Use it in the desktop entry, window metadata, and
-  AppStream metadata.
+- [x] Add a distinct Marcel application icon in the freedesktop-required
+  scalable and raster sizes. Use it in desktop entries and X11 window metadata;
+  reuse the same icon name when AppStream metadata lands.
 - [ ] Install and validate `io.github.berker_z.Marcel.metainfo.xml`, including
   release data, content rating, URLs, launchable desktop ID, and representative
   screenshots.

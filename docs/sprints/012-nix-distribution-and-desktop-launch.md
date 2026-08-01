@@ -27,8 +27,9 @@ single-instance routing, or `org.freedesktop.FileManager1`.
 - The package installs nixpkgs' free `7zz` at the private discovery path
   `$out/libexec/marcel/7zz`; archive behavior does not depend on ambient PATH.
 - `marcel.desktop` uses `Exec=marcel %U`, advertises `inode/directory`, and
-  deliberately claims no archive MIME types. Until Marcel has branded artwork,
-  it uses the standard `system-file-manager` icon.
+  deliberately claims no archive MIME types. This sprint initially used the
+  standard `system-file-manager` icon; the later pulled-forward Sprint 16
+  identity slice replaced it with Marcel's branded icon.
 
 ## Acceptance checks
 
@@ -48,7 +49,8 @@ single-instance routing, or `org.freedesktop.FileManager1`.
 - [x] Install the package from the user's dotfiles and confirm Marcel launches.
 - [ ] Manually confirm desktop launcher activation, directory and file-target
   opening, PDF preview, and archive operations through the installed package.
-- [ ] Add branded scalable and raster application icons.
+- [x] Add branded scalable and raster application icons. Delivered later as a
+  deliberately pulled-forward Sprint 16 identity slice.
 - [x] Add single-instance routing and `org.freedesktop.FileManager1`
   (delivered in Sprint 14).
 - [ ] Publish versioned release artifacts and optional binary-cache output.

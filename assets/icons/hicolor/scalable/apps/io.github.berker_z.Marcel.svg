@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Original Marcel application artwork. -->
+  <path
+    fill="#2e3440"
+    d="M78 82h132c14 0 25 6 33 18l19 28h172c28 0 50 22 50 50v238c0 28-22 50-50 50H78c-28 0-50-22-50-50V132c0-28 22-50 50-50Z"
+  />
+  <path
+    fill="#3b4252"
+    d="M60 154c0-12 10-22 22-22h348c12 0 22 10 22 22v58H60v-58Z"
+  />
+  <circle cx="94" cy="172" r="10" fill="#d8dee9"/>
+  <circle cx="126" cy="172" r="10" fill="#8fbcbb"/>
+  <circle cx="158" cy="172" r="10" fill="#81a1c1"/>
+
+  <path fill="#353c4a" d="M60 224h105v210H82c-12 0-22-10-22-22V224Z"/>
+  <path fill="#3b4252" d="M177 224h125v210H177V224Z"/>
+  <path fill="#88c0d0" d="M314 224h138v188c0 12-10 22-22 22H314V224Z"/>
+
+  <g fill="#81a1c1">
+    <circle cx="88" cy="268" r="7"/>
+    <circle cx="88" cy="310" r="7"/>
+    <circle cx="88" cy="352" r="7"/>
+  </g>
+  <g fill="#d8dee9">
+    <rect x="108" y="261" width="38" height="14" rx="7"/>
+    <rect x="108" y="303" width="30" height="14" rx="7" opacity=".7"/>
+    <rect x="108" y="345" width="35" height="14" rx="7" opacity=".7"/>
+  </g>
+
+  <g fill="#d8dee9">
+    <path d="M196 260h20l7 8h28c6 0 10 4 10 10v20c0 6-4 10-10 10h-55c-6 0-10-4-10-10v-28c0-6 4-10 10-10Z"/>
+    <path d="M196 326h20l7 8h28c6 0 10 4 10 10v20c0 6-4 10-10 10h-55c-6 0-10-4-10-10v-28c0-6 4-10 10-10Z" opacity=".82"/>
+  </g>
+  <g fill="#81a1c1">
+    <rect x="270" y="277" width="20" height="12" rx="6"/>
+    <rect x="270" y="343" width="20" height="12" rx="6"/>
+  </g>
+
+  <circle cx="383" cy="277" r="15" fill="#ebcb8b"/>
+  <path
+    fill="#4c7984"
+    d="m332 366 30-37c5-6 13-6 18 0l17 20 13-15c5-6 13-6 18 0l12 14v38H332v-20Z"
+  />
+  <rect x="338" y="400" width="76" height="12" rx="6" fill="#4c7984" opacity=".8"/>
+</svg>

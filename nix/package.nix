@@ -91,7 +91,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       comment = "Browse files with a fast, persistent preview pane";
       exec = "marcel %U";
       dbusActivatable = true;
-      icon = "system-file-manager";
+      icon = "io.github.berker_z.Marcel";
       categories = [
         "System"
         "FileTools"
@@ -111,7 +111,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       genericName = "File Manager";
       comment = "Compatibility desktop identifier for Marcel";
       exec = "marcel %U";
-      icon = "system-file-manager";
+      icon = "io.github.berker_z.Marcel";
       noDisplay = true;
       mimeTypes = [ "inode/directory" ];
     })
@@ -121,8 +121,10 @@ rustPlatform.buildRustPackage (finalAttrs: {
     mkdir -p "$out/libexec/marcel"
     ln -s ${lib.getExe' _7zz "7zz"} "$out/libexec/marcel/7zz"
 
-    mkdir -p "$out/share/marcel/icons" "$out/share/licenses/marcel"
+    mkdir -p "$out/share/marcel/icons" "$out/share/licenses/marcel" \
+      "$out/share/icons"
     cp -R ${../assets/icons/nordzy} "$out/share/marcel/icons/nordzy"
+    cp -R ${../assets/icons/hicolor} "$out/share/icons/hicolor"
     install -Dm644 ${../assets/fonts/OFL-Iosevka.md} \
       "$out/share/licenses/marcel/OFL-Iosevka.md"
     install -Dm644 ${../assets/icons/nordzy/COPYING} \

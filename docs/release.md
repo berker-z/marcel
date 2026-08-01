@@ -134,14 +134,13 @@ hidden files visible.
 
 ### Marcel application icon
 
-The desktop entry currently uses the generic `system-file-manager` icon.
-Marcel needs a distinct, original application icon before a stable public
-package. It must be installed in the standard scalable and raster hicolor
-locations and used consistently by:
+Marcel ships an original three-pane application icon under the reverse-DNS name
+`io.github.berker_z.Marcel`. The SVG source and 16, 24, 32, 48, 64, 128, 256,
+and 512 pixel hicolor assets are installed by the Nix package and used by:
 
 - `io.github.berker_z.Marcel.desktop`;
-- application/window metadata;
-- AppStream metadata;
+- X11 window metadata;
+- future AppStream metadata;
 - AppImage desktop integration;
 - Debian, RPM, AUR, and nixpkgs packages.
 
@@ -425,7 +424,7 @@ published source tag.
 Before creating the first tag:
 
 - [x] Make free `7zz` the default and define the optional RAR policy.
-- [ ] Add Marcel's application icon in required sizes.
+- [x] Add Marcel's application icon in required sizes.
 - [ ] Add and validate AppStream metadata.
 - [x] Bundle and verify the private curated Nordzy semantic fallback.
 - [x] Bundle and verify Marcel's private regular/semibold Iosevka subsets and

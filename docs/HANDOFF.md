@@ -37,12 +37,13 @@ The package installs `marcel.desktop` with:
 ```text
 Exec=marcel %U
 MimeType=inode/directory;
-Icon=system-file-manager
+Icon=io.github.berker_z.Marcel
 ```
 
 It deliberately claims no archive MIME types. ZIP, 7z, RAR, and tar
 double-click behavior therefore remains assigned to the user's archive viewer.
-A branded Marcel icon remains release work.
+The later identity slice replaced the generic icon with Marcel's branded
+reverse-DNS hicolor asset.
 
 ## Desktop launch arguments
 

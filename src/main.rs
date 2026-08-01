@@ -1,4 +1,4 @@
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, sync::OnceLock};
 
 use gpui::{App, AppContext, Bounds, Entity, WindowBounds, WindowHandle, WindowOptions, px, size};
 use gpui_component::Root;
@@ -71,6 +71,7 @@ fn open_marcel_window(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindo
     let handle = cx.open_window(
         WindowOptions {
             app_id: Some(marcel::desktop_integration::APPLICATION_ID.to_string()),
+            icon: window_icon(),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("Marcel".into()),
@@ -91,6 +92,22 @@ fn open_marcel_window(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindo
         handle,
         view: view.expect("window builder must initialize Marcel"),
     })
+}
+
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    static ICON: OnceLock<Arc<image::RgbaImage>> = OnceLock::new();
+    if let Some(icon) = ICON.get() {
+        return Some(icon.clone());
+    }
+    let icon = Arc::new(
+        image::load_from_memory(include_bytes!(
+            "../assets/icons/hicolor/256x256/apps/io.github.berker_z.Marcel.png"
+        ))
+        .ok()?
+        .into_rgba8(),
+    );
+    let _ = ICON.set(icon.clone());
+    Some(icon)
 }
 
 fn handle_desktop_request(
@@ -175,4 +192,15 @@ fn open_desktop_locations(
 
 fn prune_closed_windows(windows: &mut Vec<MarcelWindow>, cx: &App) {
     windows.retain(|window| window.handle.read(cx).is_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_window_icon_decodes_at_the_declared_size() {
+        let icon = window_icon().expect("bundled Marcel icon must decode");
+        assert_eq!((icon.width(), icon.height()), (256, 256));
+    }
 }

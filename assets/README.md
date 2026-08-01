@@ -13,3 +13,8 @@ The font is embedded in Marcel rather than installed in the user's font
 registry. The icons form a private fallback and are not installed as a
 system-wide freedesktop theme. Source archive hashes are pinned in the
 generator.
+
+The Marcel application icon under `icons/hicolor` is original project artwork.
+Its three-pane browser mark highlights the persistent preview pane using the
+default Nord identity palette. The SVG is the source of truth; raster hicolor
+sizes are generated from it.
