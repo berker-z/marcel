@@ -15,8 +15,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use rustix::fs::{CWD, RenameFlags, renameat_with};
 use rustix::process::{Pid, Signal, kill_process_group};
+
+use crate::local_fs::{PathOccupancy, path_occupancy, rename_no_replace};
 
 pub const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 pub const MAX_EXPANDED_BYTES: u64 = 100 * 1024 * 1024 * 1024;
@@ -629,25 +630,15 @@ fn is_compound_tar_archive(path: &Path) -> bool {
 }
 
 fn ensure_unoccupied(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => bail!(
+    match path_occupancy(path) {
+        Ok(PathOccupancy::Occupied) => bail!(
             "“{}” already exists; nothing was overwritten",
             path.display()
         ),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(PathOccupancy::Vacant) => Ok(()),
         Err(error) => Err(error)
             .with_context(|| format!("Could not inspect destination “{}”", path.display())),
     }
-}
-
-fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    Ok(renameat_with(
-        CWD,
-        source,
-        CWD,
-        destination,
-        RenameFlags::NOREPLACE,
-    )?)
 }
 
 struct CommandOutput {

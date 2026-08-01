@@ -14,6 +14,7 @@ mod icons;
 pub mod identity;
 mod image_preview;
 pub mod launch;
+mod local_fs;
 mod operations;
 mod pdf_preview;
 mod places;

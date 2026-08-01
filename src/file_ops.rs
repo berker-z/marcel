@@ -14,6 +14,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::{
     archive_ops::{MAX_ARCHIVE_ENTRIES, create_zip_archive, extract_archive},
+    local_fs::rename_no_replace,
     trash_ops::{TrashRecord, restore_trash_records, retrash_records},
 };
 
@@ -1375,17 +1376,6 @@ fn cleanup_staging(path: &Path) {
     } else {
         let _ = fs::remove_file(path);
     }
-}
-
-fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        source,
-        rustix::fs::CWD,
-        destination,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(Into::into)
 }
 
 fn snapshot_tree(root: &Path) -> Result<Vec<PathSnapshot>> {

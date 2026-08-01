@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     ffi::OsString,
-    fs, io,
+    fs,
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,7 +9,11 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::{delete_ops::delete_trash_backings, file_ops::TransferProgress};
+use crate::{
+    delete_ops::delete_trash_backings,
+    file_ops::TransferProgress,
+    local_fs::{PathOccupancy, path_occupancy, rename_no_replace},
+};
 
 // Conceptually adapted from Yazi's separation between its background file
 // scheduler and freedesktop Trash VFS:
@@ -473,9 +477,11 @@ fn validate_identity(path: &Path, expected: &TrashIdentity, label: &str) -> Resu
 }
 
 fn ensure_unoccupied(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => bail!("Cannot restore: “{}” is already occupied", path.display()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+    match path_occupancy(path) {
+        Ok(PathOccupancy::Occupied) => {
+            bail!("Cannot restore: “{}” is already occupied", path.display())
+        }
+        Ok(PathOccupancy::Vacant) => Ok(()),
         Err(error) => Err(error)
             .with_context(|| format!("Could not inspect restore target “{}”", path.display())),
     }
@@ -491,17 +497,6 @@ fn rollback_restored(restored: &[&TrashRecord]) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        source,
-        rustix::fs::CWD,
-        destination,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(Into::into)
 }
 
 fn identity(metadata: &fs::Metadata) -> TrashIdentity {

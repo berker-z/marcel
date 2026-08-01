@@ -11,7 +11,9 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::{file_ops::TransferProgress, trash_ops::path_overlaps_system_trash};
+use crate::{
+    file_ops::TransferProgress, local_fs::rename_no_replace, trash_ops::path_overlaps_system_trash,
+};
 
 // Conceptually adapted from Yazi's no-follow, leaf-before-directory delete
 // traversal and per-item scheduler outcomes (MIT, upstream commit
@@ -456,17 +458,6 @@ fn refresh_parent_identity(
     }
     directories.insert(parent.to_path_buf(), current);
     Ok(())
-}
-
-fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        source,
-        rustix::fs::CWD,
-        destination,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(Into::into)
 }
 
 fn identity(metadata: &fs::Metadata) -> DeleteIdentity {
