@@ -7,43 +7,34 @@ item here belongs in that sprint.
 
 ## Current priorities
 
-- Freeze feature and release work while
+- Keep feature and release work frozen. The automated implementation in
   [`Sprint 17`](sprints/017-stability-and-architecture-hardening.md) closes the
-  confirmed PDF, watcher, D-Bus reveal, selection, window-lifecycle,
-  non-UTF-8 filename, hostile-image, enumeration, and hot-path allocation
-  problems found during external review.
-- Mechanically extract preview, sidebar, drag/drop, and cohesive window UI
-  ownership from `app.rs` during the same hardening sprint. Preserve behavior
-  and avoid an event bus or speculative trait architecture.
+  confirmed review findings; the next work is its desktop/manual acceptance
+  matrix and any hardening defects that matrix reveals.
+- Continue mechanical ownership cleanup only where a concrete interaction or
+  test seam requires it. Preview, sidebar, drag/drop, and cohesive window UI
+  state now have controllers; GPUI-bound orchestration intentionally remains
+  on `Marcel` rather than moving behind an event bus or speculative traits.
 - Marcel's local-filesystem core has reached the personal daily-driver
   milestone: browsing, previews, selection, filtering, bookmarks, incremental
   watching, safe copy/move, Trash/restore, permanent deletion, archives,
   packaging, D-Bus activation, single-instance routing, and bilateral Wayland
   file drag-and-drop are implemented.
-- After Sprint 17, continue distribution hardening before adding more features:
-  the free 7-Zip
-  baseline and private font/icon identity bundle are complete; add Marcel's
-  branded icon and AppStream metadata, audit every runtime subprocess/resource,
-  and test from a clean minimal desktop.
-- Make the public documentation match the product's maturity. Restructure the
-  README around the application rather than the current packaging path, add
-  polished visual media, and keep installation guidance platform-neutral even
-  while Nix remains the only shipped package.
-- Cut a tagged `0.1.0` personal MVP release from the hardened package. Keep
-  becoming the default directory handler a separate, explicit user step, then
-  prepare the independent nixpkgs package contribution.
-- Finish Sprint 14's shared Properties/`ShowItemProperties` surface after the
-  packaging milestone. X11 outbound drag support is not a blocker for the
-  initial Wayland-focused release.
+- Sprint 16, mandatory hosted CI, public presentation, release metadata,
+  branded artwork, distribution expansion, and a tagged `0.1.0` are explicitly
+  deferred. Local fmt, Clippy, and all-target tests remain mandatory meanwhile.
+- New File, Properties, Duplicate, Move To, media playback, remote locations,
+  X11 outbound drag, and other feature work are parked until this hardening
+  phase is accepted.
 - Complete the manual Trash/restore checks in
   [`Sprint 7`](sprints/007-trash-and-restore.md). The implementation uses the
   native freedesktop Trash, identity-validating undo/redo, and an aggregated
   bottom-most Places entry.
 - Complete the permanent-delete and Empty Trash manual checks in
   [`Sprint 8`](sprints/008-permanent-deletion.md).
-- Complete New File and Properties in
-  [`Sprint 9`](sprints/009-conventional-local-actions.md); safe inline Rename
-  and Open in Terminal are implemented.
+- Retain New File and Properties in
+  [`Sprint 9`](sprints/009-conventional-local-actions.md) as parked feature
+  work; safe inline Rename and Open in Terminal are implemented.
 - Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
   operation-controller and directory-session extractions are complete.
 - Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
@@ -52,16 +43,15 @@ item here belongs in that sprint.
 - Complete Sprint 1 preview and navigation acceptance runs.
 - Ask Berker to demonstrate the known PDF preview resize problem and describe
   the expected behavior before choosing a fix.
-- Add audio and video metadata previews with an explicit play action.
 - [x] Add interactive breadcrumb navigation and a `Ctrl+L` editable location
   mode for paths and local file URIs.
 - Finish Sprint 2 visual-browsing acceptance checks and thumbnail failure
   presentation.
 
-## Daily-driver milestone and `v0.1.0` closure
+## Deferred `v0.1.0` closure
 
-The personal daily-driver milestone is complete. The remaining work before a
-tagged, publicly consumable `v0.1.0` is intentionally bounded:
+The personal daily-driver milestone is complete. Public release work is parked
+during hardening; when resumed, its remaining scope is intentionally bounded:
 
 1. Harden the distribution closure: free archive baseline, packaged icon
    fallback, branded icon/AppStream metadata, clean-environment launch checks,
@@ -86,32 +76,34 @@ personal release.
 
 ## Recommended delivery order
 
-This order favors daily-driver completeness over novelty while keeping new
-state machines out of Marcel's coordinator until they have clear ownership.
+This order favors evidence-driven hardening over novelty. Steps after the
+manual acceptance phase are intentionally parked, not current commitments.
 
-1. Complete [Sprint 17](sprints/017-stability-and-architecture-hardening.md):
-   correctness fixes, hostile-input bounds, validation debt, and mechanical
-   coordinator extraction.
-2. Complete [Sprint 16](sprints/016-public-release-presentation.md): public
-   documentation, branded artwork, AppStream metadata, and honest
-   platform-neutral installation structure.
-3. Complete the distribution-hardening checklist below and test the flake
+1. Accept [Sprint 17](sprints/017-stability-and-architecture-hardening.md) by
+   running its graphical multi-window checks and the consolidated outstanding
+   watcher, preview, large-directory, Trash, permanent-delete, mount, and
+   interrupted-operation matrix from earlier sprints.
+2. Fix any correctness, recovery, diagnostics, or ownership problems exposed
+   by that matrix, with focused regression coverage.
+3. When release work resumes, complete
+   [Sprint 16](sprints/016-public-release-presentation.md), including mandatory
+   hosted fmt, Clippy, tests, and Nix package-build gates.
+4. Complete the distribution-hardening checklist below and test the flake
    install on a clean minimal NixOS environment.
-4. Cut `v0.1.0` and prepare the nixpkgs package.
-5. Close Sprint 14's remaining Properties surface without changing the user's
+5. Cut `v0.1.0` and prepare the nixpkgs package.
+6. Close Sprint 14's remaining Properties surface without changing the user's
    default directory handler merely by installing Marcel.
-6. Add New File, then finish the Sprint 7 and Sprint 8 destructive-operation
-   smoke tests and record any discovered recovery or mounted-volume behavior.
-7. Add Duplicate and Move To.
-8. Finish X11 source support and manual acceptance for the implemented
+7. Add New File.
+8. Add Duplicate and Move To.
+9. Finish X11 source support and manual acceptance for the implemented
    bilateral native desktop drag-and-drop, then add desktop clipboard
    interoperability.
-9. Add cross-filesystem transfers, explicit conflict decisions, and the
+10. Add cross-filesystem transfers, explicit conflict decisions, and the
    documented symbolic-link policy.
-10. Add removable volumes, mounts, and common remote locations.
-11. Consolidate broader settings, sorting, grouping, zoom,
+11. Add removable volumes, mounts, and common remote locations.
+12. Consolidate broader settings, sorting, grouping, zoom,
    and other UI refinements.
-12. Add media playback and optional ebook previews after the file-manager and
+13. Add media playback and optional ebook previews after the file-manager and
    desktop-integration foundation is complete.
 
 The known PDF resize problem, interrupted permanent-delete quarantine

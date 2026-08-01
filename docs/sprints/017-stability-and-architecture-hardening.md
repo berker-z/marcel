@@ -1,8 +1,8 @@
 # Sprint 17: stability and architecture hardening
 
-**Status:** In progress — feature and release work are paused while confirmed
-correctness, hostile-input, lifecycle, and coordinator-ownership problems are
-closed.
+**Status:** Implemented — the automated hardening slice is complete. Feature
+and release work remain paused while the outstanding desktop/manual acceptance
+matrix is run.
 
 ## Goal
 
@@ -50,12 +50,14 @@ and does not add features, distribution formats, or release automation.
 
 ## Coordinator extraction
 
-- Move preview loading, folder preview, PDF scheduling, wrapping, and related
-  cancellation/cache state behind a `PreviewController`.
-- Move internal/native file-drag lifecycle, hit regions, and edge scrolling
-  behind a `DragController`.
-- Move Places, bookmarks, Trash-place metadata, sidebar menus, and drop regions
-  behind a `SidebarController`.
+- Move preview, folder-preview, PDF, wrapping, and related cancellation/cache
+  ownership behind a `PreviewController`. GPUI-bound scheduling and rendering
+  may remain on `Marcel` until moving them creates a testable seam.
+- Move internal/native file-drag state, hit regions, and edge-scrolling
+  ownership behind a `DragController` while keeping GPUI event orchestration
+  on `Marcel`.
+- Move Places, bookmarks, Trash-place metadata, sidebar menus, and drop-region
+  ownership behind a `SidebarController`.
 - Group remaining pane/layout/filter/location/rename state where a small
   `WindowUiState` improves ownership without obscuring GPUI interaction.
 - Preserve Marcel's existing commands, gpui-component surfaces, and behavior;
@@ -63,29 +65,42 @@ and does not add features, distribution formats, or release automation.
 
 ## Acceptance checks
 
-- [ ] Reject `Pages: 0` and cover inspection/rendering with a regression test.
-- [ ] Rescan once for ambiguous native-watcher revalidation failures and share
+- [x] Reject `Pages: 0` and cover inspection/rendering with a regression test.
+- [x] Rescan once for ambiguous native-watcher revalidation failures and share
   the policy with operation reconciliation.
-- [ ] Reveal every `ShowItems` target in a same-directory batch.
-- [ ] Preserve a deterministic primary after toggle, retain, and completed
+- [x] Reveal every `ShowItems` target in a same-directory batch.
+- [x] Preserve a deterministic primary after toggle, retain, and completed
   marquee interactions.
-- [ ] Remove closed windows from routing and prove stale handles/entities are
-  not selected for activation or location requests.
-- [ ] Round-trip arbitrary Unix `OsString` names in the filesystem model and
+- [x] Remove closed windows from routing and prune unusable handles before
+  activation or location requests.
+- [x] Round-trip arbitrary Unix `OsString` names in the filesystem model and
   render invalid UTF-8 names without display collisions.
-- [ ] Allow an invalid-UTF-8 source name to be renamed safely to a valid name.
-- [ ] Bound still and animated full-image previews and cover oversized,
+- [x] Allow an invalid-UTF-8 source name to be renamed safely to a valid name.
+- [x] Bound still and animated full-image previews and cover oversized,
   over-dimensioned, and over-frame inputs.
-- [ ] Surface bounded directory-entry degradation instead of silently omitting
+- [x] Surface bounded directory-entry degradation instead of silently omitting
   all failed entries.
-- [ ] Remove per-comparison lowercase allocation and reuse folded filter data.
-- [ ] Consolidate no-replace rename and occupancy primitives with operation
+- [x] Remove per-comparison lowercase allocation and reuse folded filter data.
+- [x] Consolidate no-replace rename and occupancy primitives with operation
   regression coverage unchanged.
-- [ ] Extract preview, drag/drop, sidebar, and cohesive window UI ownership
+- [x] Extract preview, drag/drop, sidebar, and cohesive window UI ownership
   mechanically from `app.rs`.
-- [ ] Run focused large-directory, invalid-filename, watcher-error,
-  multi-window, malformed-PDF, and hostile-image checks.
-- [ ] Pass `cargo fmt --check`,
+- [x] Run automated large-directory, invalid-filename, watcher-error,
+  malformed-PDF, and hostile-image checks.
+- [ ] Manually exercise multi-window close/reopen, activation, and grouped
+  `ShowItems` routing in a graphical session.
+- [x] Pass `cargo fmt --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test --all-targets` in the declared development environment.
 
+## Deferred coordination and manual validation
+
+- Run the consolidated destructive-operation, mounted-volume Trash,
+  read-only-mount, watcher, broken-symlink, process-interruption, and quarantine
+  recovery matrix retained by earlier sprints.
+- Reproduce the known PDF resize behavior with the maintainer before choosing
+  a UI fix.
+- Port and upstream the narrowly documented Wayland drag-source primitive when
+  external GPUI coordination resumes. This is not a local hardening change.
+- Keep mandatory hosted CI, release metadata, artwork, and public packaging in
+  deferred Sprint 16.

@@ -374,32 +374,21 @@ Marcel is not ready to replace a mature system file manager for every workflow:
 
 ## Roadmap
 
-The personal daily-driver milestone is reached. The immediate
-daily-driver-to-`0.1.0` sequence is:
+The personal daily-driver milestone is reached. Marcel is now in a deliberate
+hardening phase: new features and public-release work are parked while the
+remaining filesystem, desktop-integration, and recovery acceptance matrix is
+run.
 
-1. Polish the public README and documentation structure, add representative
-   screenshots/GIF media, and keep installation guidance honest about the
-   currently Nix-only distribution.
-2. Add the branded application icon and AppStream metadata, then run the clean
-   installed-package audit without silently changing the system's default file
-   manager.
-3. Finish Sprint 14 acceptance and the shared Properties surface.
-4. Complete destructive-operation, mounted-Trash, watcher, preview, and
-   large-directory acceptance passes.
-5. Finish New File, then add Duplicate and Move To in their
-   appropriate operation slices.
-6. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
-   from the application coordinator.
-7. Finish X11 outbound native drag acceptance and implement desktop
-   clipboard interoperability.
-8. Add cross-filesystem transfers, conflict decisions, and a documented
-   symbolic-link policy.
-9. Add removable volumes, mounts, and common remote locations.
-10. Add non-Nix release artifacts.
-11. Consolidate broader persistent settings, sorting, grouping, zoom, and
-   accessibility work.
-12. Add media playback and optional ebook previews after the file-manager
-   foundation is complete.
+1. Finish Sprint 17's graphical multi-window checks and the outstanding
+   watcher, preview, large-directory, mounted-Trash, permanent-delete, and
+   interrupted-operation acceptance passes.
+2. Fix any correctness, recovery, diagnostics, or ownership defects those
+   checks expose, with focused regression tests.
+3. Resume Sprint 16 only when public release work is wanted; it owns hosted CI,
+   public documentation, artwork, AppStream metadata, and release presentation.
+4. Resume Properties, New File, Duplicate, Move To, desktop clipboard, remote
+   locations, media playback, and other feature work only after hardening is
+   accepted.
 
 The authoritative cross-sprint roadmap lives in the
 [product backlog](docs/TODO.md). The
@@ -409,10 +398,12 @@ The
 [interaction model](docs/interaction-model.md) defines selection, shortcuts,
 menus, reversibility, and destructive-operation behavior. Detailed
 implementation and acceptance history is recorded under
-[`docs/sprints/`](docs/sprints/). Marcel has progressed through fifteen
-numbered implementation sprints;
-[Sprint 16](docs/sprints/016-public-release-presentation.md) tracks the next
-public-presentation and release-metadata pass.
+[`docs/sprints/`](docs/sprints/). Marcel has progressed through seventeen
+numbered implementation sprints. The automated portion of
+[Sprint 17](docs/sprints/017-stability-and-architecture-hardening.md) is
+implemented and awaits its desktop/manual acceptance matrix;
+[Sprint 16](docs/sprints/016-public-release-presentation.md) is intentionally
+deferred.
 
 ## Acknowledgements and provenance
 

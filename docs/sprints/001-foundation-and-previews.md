@@ -21,7 +21,7 @@ types.
 - [x] Single selection and conventional pointer interaction.
 - [x] Multi-selection.
 - [x] Back, forward, parent, and path display navigation.
-- [ ] Interactive breadcrumb segments.
+- [x] Interactive breadcrumb segments (delivered in Sprint 13).
 - [x] Preview request cancellation and stale-result rejection when selection
   changes.
 - [x] Image previews, including animated GIFs through GPUI's image pipeline.
@@ -50,7 +50,6 @@ types.
   a resize problem is known but intentionally left undescribed until they can
   demonstrate it.
 - Audio/video metadata plus an explicit contextual play action.
-- Interactive breadcrumb segments.
 - Large-directory, rapid-selection, corrupt-file, and complete preview-fixture
   acceptance runs.
 

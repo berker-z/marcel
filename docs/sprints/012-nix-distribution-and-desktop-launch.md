@@ -49,5 +49,6 @@ single-instance routing, or `org.freedesktop.FileManager1`.
 - [ ] Manually confirm desktop launcher activation, directory and file-target
   opening, PDF preview, and archive operations through the installed package.
 - [ ] Add branded scalable and raster application icons.
-- [ ] Add single-instance routing and `org.freedesktop.FileManager1`.
+- [x] Add single-instance routing and `org.freedesktop.FileManager1`
+  (delivered in Sprint 14).
 - [ ] Publish versioned release artifacts and optional binary-cache output.

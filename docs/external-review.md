@@ -164,3 +164,20 @@ Before adding several more stateful features, prioritize:
 Media playback and ebook previews remain valuable, but they should not delay
 the filesystem and architecture work needed for Marcel to become a credible
 default file explorer.
+
+## 2026-08-01 hardening review response
+
+A later external review identified concrete PDF, watcher, grouped D-Bus
+reveal, selection-primary, window-lifecycle, non-UTF-8 filename, full-image,
+directory-enumeration, sorting/filtering, duplicated-filesystem-primitive, and
+coordinator-ownership risks. Marcel reproduced or confirmed each local issue
+and addressed them in Sprint 17.
+
+The automated slice adds direct regressions for malformed PDFs, watcher error
+fallback, grouped reveal, selection invariants, arbitrary Unix names, hostile
+images, bounded degraded enumeration, no-replace publication, and a 50,000
+entry sort/filter workload. Preview, drag, sidebar, and window UI state now
+have concrete controllers while GPUI-bound orchestration remains on `Marcel`.
+Mandatory hosted CI and public release work remain deferred to Sprint 16; the
+desktop/manual acceptance matrix and upstream GPUI coordination are still open
+and are not represented as completed by those tests.
