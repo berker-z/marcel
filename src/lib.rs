@@ -12,6 +12,7 @@ pub mod fs;
 mod history;
 mod icons;
 pub mod identity;
+mod image_preview;
 pub mod launch;
 mod operations;
 mod pdf_preview;

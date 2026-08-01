@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::fs::{FileEntry, format_size};
+use crate::image_preview;
 use crate::pdf_preview::inspect_pdf;
 
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
@@ -67,8 +68,9 @@ pub fn load_preview(
         .is_some_and(|mime| mime.starts_with("image/"))
         || is_image_extension(&entry.path)
     {
+        let path = image_preview::prepare(&entry.path, cancelled).map_err(io::Error::other)?;
         return Ok(Preview::Image {
-            path: entry.path.clone(),
+            path,
             mime: inferred.unwrap_or_else(|| "image".to_string()),
         });
     }
