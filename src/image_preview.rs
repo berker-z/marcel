@@ -1,21 +1,18 @@
 use std::{
-    fs::{self, File},
-    io::{self, BufReader, BufWriter},
-    path::{Path, PathBuf},
+    fs::File,
+    io::{self, BufReader},
+    path::Path,
+    sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
-    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context as _, Result, bail};
+use gpui::RenderImage;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageFormat, ImageReader, Limits,
-    codecs::{
-        gif::{GifDecoder, GifEncoder, Repeat},
-        webp::WebPDecoder,
-    },
+    codecs::{gif::GifDecoder, webp::WebPDecoder},
     metadata::Orientation,
 };
-use md5::{Digest, Md5};
 
 const PREVIEW_EDGE: u32 = 2_048;
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -24,13 +21,8 @@ const MAX_SOURCE_PIXELS: u64 = 40_000_000;
 const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ANIMATION_FRAMES: usize = 240;
 const MAX_ANIMATION_OUTPUT_PIXELS: u64 = 64_000_000;
-const MAX_CACHE_FILES: usize = 128;
 
-pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<PathBuf> {
-    prepare_in(path, &preview_cache_dir(), cancelled)
-}
-
-fn prepare_in(path: &Path, cache_dir: &Path, cancelled: &AtomicBool) -> Result<PathBuf> {
+pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<Arc<RenderImage>> {
     check_cancelled(cancelled)?;
     let metadata = path
         .metadata()
@@ -41,41 +33,17 @@ fn prepare_in(path: &Path, cache_dir: &Path, cancelled: &AtomicBool) -> Result<P
 
     let format = ImageReader::open(path)?.with_guessed_format()?.format();
     let format = format.context("image format could not be identified")?;
-    let extension =
+    let frames =
         if matches!(format, ImageFormat::Gif | ImageFormat::WebP) && is_animated(path, format)? {
-            "gif"
+            decode_bounded_animation(path, format, cancelled)?
         } else {
-            "png"
+            vec![decode_bounded_still(path, cancelled)?]
         };
-    fs::create_dir_all(cache_dir)?;
-    let destination = cache_dir.join(format!("{}.{}", cache_key(path, &metadata), extension));
-    if destination
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
-        return Ok(destination);
-    }
-
-    let temporary = tempfile::Builder::new()
-        .prefix("preview-")
-        .suffix(&format!(".{extension}"))
-        .tempfile_in(cache_dir)?;
-    if extension == "gif" {
-        encode_bounded_animation(path, format, temporary.as_file(), cancelled)?;
-    } else {
-        encode_bounded_still(path, temporary.as_file(), cancelled)?;
-    }
     check_cancelled(cancelled)?;
-    match temporary.persist_noclobber(&destination) {
-        Ok(_) => {}
-        Err(error) if destination.is_file() => drop(error.file),
-        Err(error) => return Err(error.error.into()),
-    }
-    prune_cache(cache_dir);
-    Ok(destination)
+    Ok(Arc::new(RenderImage::new(frames)))
 }
 
-fn encode_bounded_still(path: &Path, output: &File, cancelled: &AtomicBool) -> Result<()> {
+fn decode_bounded_still(path: &Path, cancelled: &AtomicBool) -> Result<Frame> {
     let mut limits = Limits::no_limits();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
@@ -88,20 +56,20 @@ fn encode_bounded_still(path: &Path, output: &File, cancelled: &AtomicBool) -> R
     check_cancelled(cancelled)?;
     let image = DynamicImage::from_decoder(decoder)?;
     check_cancelled(cancelled)?;
-    let mut image = image.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE);
+    let mut image = bound_preview_dimensions(image);
     if orientation != Orientation::NoTransforms {
         image.apply_orientation(orientation);
     }
-    image.write_to(&mut BufWriter::new(output.try_clone()?), ImageFormat::Png)?;
-    Ok(())
+    let mut image = image.to_rgba8();
+    rgba_to_bgra(&mut image);
+    Ok(Frame::new(image))
 }
 
-fn encode_bounded_animation(
+fn decode_bounded_animation(
     path: &Path,
     format: ImageFormat,
-    output: &File,
     cancelled: &AtomicBool,
-) -> Result<()> {
+) -> Result<Vec<Frame>> {
     let reader = BufReader::new(File::open(path)?);
     let frames = match format {
         ImageFormat::Gif => {
@@ -119,33 +87,44 @@ fn encode_bounded_animation(
         _ => bail!("unsupported animated image format"),
     };
 
-    let mut encoder = GifEncoder::new_with_speed(BufWriter::new(output.try_clone()?), 20);
-    encoder.set_repeat(Repeat::Infinite)?;
-    let mut frame_count = 0usize;
+    let mut output = Vec::new();
     let mut output_pixels = 0u64;
     for frame in frames {
         check_cancelled(cancelled)?;
-        frame_count += 1;
-        if frame_count > MAX_ANIMATION_FRAMES {
+        if output.len() >= MAX_ANIMATION_FRAMES {
             bail!("animation exceeds the {MAX_ANIMATION_FRAMES}-frame preview limit");
         }
         let frame = frame?;
         let delay = frame.delay();
-        let image = DynamicImage::ImageRgba8(frame.into_buffer())
-            .thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
-            .to_rgba8();
+        let mut image =
+            bound_preview_dimensions(DynamicImage::ImageRgba8(frame.into_buffer())).to_rgba8();
         output_pixels = output_pixels
             .checked_add(u64::from(image.width()) * u64::from(image.height()))
             .context("animation preview size overflowed")?;
         if output_pixels > MAX_ANIMATION_OUTPUT_PIXELS {
             bail!("animation exceeds the decoded preview memory limit");
         }
-        encoder.encode_frame(Frame::from_parts(image, 0, 0, delay))?;
+        rgba_to_bgra(&mut image);
+        output.push(Frame::from_parts(image, 0, 0, delay));
     }
-    if frame_count == 0 {
+    if output.is_empty() {
         bail!("animation contains no frames");
     }
-    Ok(())
+    Ok(output)
+}
+
+fn rgba_to_bgra(image: &mut image::RgbaImage) {
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+}
+
+fn bound_preview_dimensions(image: DynamicImage) -> DynamicImage {
+    if image.width() > PREVIEW_EDGE || image.height() > PREVIEW_EDGE {
+        image.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
+    } else {
+        image
+    }
 }
 
 fn is_animated(path: &Path, format: ImageFormat) -> Result<bool> {
@@ -186,62 +165,11 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
     }
 }
 
-fn cache_key(path: &Path, metadata: &fs::Metadata) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let mut hash = Md5::new();
-    hash.update(b"marcel-image-preview-v1");
-    hash.update(path.as_os_str().as_encoded_bytes());
-    hash.update(metadata.len().to_le_bytes());
-    hash.update(modified.to_le_bytes());
-    hash.update(PREVIEW_EDGE.to_le_bytes());
-    format!("{:x}", hash.finalize())
-}
-
-fn preview_cache_dir() -> PathBuf {
-    absolute_env_path("XDG_CACHE_HOME")
-        .or_else(|| absolute_env_path("HOME").map(|home| home.join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("marcel")
-        .join("image-preview-v1")
-}
-
-fn absolute_env_path(name: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os(name)?);
-    path.is_absolute().then_some(path)
-}
-
-fn prune_cache(cache_dir: &Path) {
-    let Ok(entries) = fs::read_dir(cache_dir) else {
-        return;
-    };
-    let mut files = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            metadata
-                .is_file()
-                .then(|| (metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()))
-        })
-        .collect::<Vec<_>>();
-    if files.len() <= MAX_CACHE_FILES {
-        return;
-    }
-    files.sort_unstable_by_key(|(modified, _)| *modified);
-    let remove_count = files.len() - MAX_CACHE_FILES;
-    for (_, path) in files.into_iter().take(remove_count) {
-        let _ = fs::remove_file(path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Delay, RgbaImage};
+    use image::{Delay, RgbaImage, codecs::gif::GifEncoder};
+    use std::io::BufWriter;
     use std::sync::atomic::AtomicBool;
 
     #[test]
@@ -253,7 +181,7 @@ mod tests {
             .set_len(MAX_SOURCE_BYTES + 1)
             .unwrap();
 
-        assert!(prepare_in(&source, &root.path().join("cache"), &AtomicBool::new(false)).is_err());
+        assert!(prepare(&source, &AtomicBool::new(false)).is_err());
     }
 
     #[test]
@@ -262,12 +190,26 @@ mod tests {
         let source = root.path().join("wide.png");
         RgbaImage::new(PREVIEW_EDGE + 512, 2).save(&source).unwrap();
 
-        let output =
-            prepare_in(&source, &root.path().join("cache"), &AtomicBool::new(false)).unwrap();
-        let dimensions = image::image_dimensions(output).unwrap();
+        let output = prepare(&source, &AtomicBool::new(false)).unwrap();
+        let dimensions = output.size(0);
 
-        assert!(dimensions.0 <= PREVIEW_EDGE);
-        assert!(dimensions.1 <= PREVIEW_EDGE);
+        assert!(dimensions.width.0 <= PREVIEW_EDGE as i32);
+        assert!(dimensions.height.0 <= PREVIEW_EDGE as i32);
+    }
+
+    #[test]
+    fn prepares_gpui_bgra_pixels_without_a_second_decode() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("pixel.png");
+        RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 40]))
+            .save(&source)
+            .unwrap();
+
+        let output = prepare(&source, &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(output.size(0).width.0, 1);
+        assert_eq!(output.size(0).height.0, 1);
+        assert_eq!(output.as_bytes(0), Some([30, 20, 10, 40].as_slice()));
     }
 
     #[test]
@@ -287,7 +229,7 @@ mod tests {
         }
         drop(encoder);
 
-        assert!(prepare_in(&source, &root.path().join("cache"), &AtomicBool::new(false)).is_err());
+        assert!(prepare(&source, &AtomicBool::new(false)).is_err());
     }
 
     #[test]

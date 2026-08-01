@@ -78,6 +78,8 @@ and does not add features, distribution formats, or release automation.
 - [x] Allow an invalid-UTF-8 source name to be renamed safely to a valid name.
 - [x] Bound still and animated full-image previews and cover oversized,
   over-dimensioned, and over-frame inputs.
+- [x] Hand bounded decoded image frames directly to GPUI without a disk
+  encode/read/decode loop.
 - [x] Surface bounded directory-entry degradation instead of silently omitting
   all failed entries.
 - [x] Remove per-comparison lowercase allocation and reuse folded filter data.

@@ -5840,10 +5840,10 @@ impl Marcel {
                 centered_preview_message(format!("Preview failed\n{error}"), colors.danger)
             }
             PreviewState::Ready(Preview::Directory { .. }) => self.render_folder_preview(cx),
-            PreviewState::Ready(Preview::Image { path, .. }) => {
+            PreviewState::Ready(Preview::Image { image, .. }) => {
                 let muted = colors.muted_foreground;
                 let danger = colors.danger;
-                img(path.clone())
+                img(image.clone())
                     .id(("preview-image", self.preview.ticket))
                     .size_full()
                     .object_fit(ObjectFit::Contain)

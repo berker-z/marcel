@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use gpui::RenderImage;
+
 use crate::fs::{FileEntry, format_size};
 use crate::image_preview;
 use crate::pdf_preview::inspect_pdf;
@@ -19,7 +21,7 @@ pub enum Preview {
         path: PathBuf,
     },
     Image {
-        path: PathBuf,
+        image: Arc<RenderImage>,
         mime: String,
     },
     Pdf {
@@ -68,9 +70,9 @@ pub fn load_preview(
         .is_some_and(|mime| mime.starts_with("image/"))
         || is_image_extension(&entry.path)
     {
-        let path = image_preview::prepare(&entry.path, cancelled).map_err(io::Error::other)?;
+        let image = image_preview::prepare(&entry.path, cancelled).map_err(io::Error::other)?;
         return Ok(Preview::Image {
-            path,
+            image,
             mime: inferred.unwrap_or_else(|| "image".to_string()),
         });
     }
