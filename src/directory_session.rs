@@ -25,7 +25,7 @@ pub struct DirectorySession {
     pub(crate) load_task: Option<Task<()>>,
     pub(crate) watch_task: Option<Task<()>>,
     watch_cancel: Option<Arc<AtomicBool>>,
-    pub(crate) pending_reveal: Option<PathBuf>,
+    pub(crate) pending_reveal: Vec<PathBuf>,
 }
 
 impl DirectorySession {
@@ -43,7 +43,7 @@ impl DirectorySession {
             load_task: None,
             watch_task: None,
             watch_cancel: None,
-            pending_reveal: None,
+            pending_reveal: Vec::new(),
         }
     }
 
@@ -140,7 +140,7 @@ impl DirectorySession {
 
     pub fn finish_load(&mut self) {
         self.loading = false;
-        self.pending_reveal = None;
+        self.pending_reveal.clear();
     }
 
     pub fn fail_load(&mut self, error: String) {
@@ -168,18 +168,28 @@ impl DirectorySession {
         Some(self.reconcile_selection())
     }
 
-    pub fn take_pending_visible_entry(&mut self) -> Option<FileEntry> {
-        let path = self.pending_reveal.as_ref()?;
-        let entry = self
+    pub fn take_pending_visible_entries(&mut self) -> Vec<FileEntry> {
+        if self.pending_reveal.is_empty() {
+            return Vec::new();
+        }
+        let visible = self
             .visible_entries
             .iter()
             .filter_map(|index| self.entries.get(*index))
-            .find(|entry| &entry.path == path)
-            .cloned()?;
-
-        self.pending_reveal = None;
-        self.selection.select_only(entry.path.clone());
-        Some(entry)
+            .map(|entry| (entry.path.clone(), entry.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut revealed = Vec::new();
+        self.pending_reveal.retain(|path| {
+            if let Some(entry) = visible.get(path) {
+                revealed.push(entry.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.selection
+            .add_all(revealed.iter().map(|entry| entry.path.clone()));
+        revealed
     }
 
     pub fn visible_entry(&self, index: usize) -> Option<&FileEntry> {
@@ -240,7 +250,9 @@ impl DirectorySession {
             .filter_map(|index| self.entries.get(*index))
             .map(|entry| entry.path.as_path())
             .collect::<HashSet<_>>();
-        self.selection.retain(|path| visible.contains(path));
+        let ordered = self.visible_paths();
+        self.selection
+            .retain(&ordered, |path| visible.contains(path));
         if self.selection.primary().is_some() {
             return ReconcileSelection::Unchanged;
         }
@@ -462,19 +474,41 @@ mod tests {
     #[test]
     fn pending_reveal_waits_until_the_entry_is_visible() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.pending_reveal = Some(PathBuf::from("/folder/later.txt"));
-        assert!(session.take_pending_visible_entry().is_none());
+        session.pending_reveal = vec![PathBuf::from("/folder/later.txt")];
+        assert!(session.take_pending_visible_entries().is_empty());
 
         session.entries.push(entry("later.txt", false, Some(1)));
         session.rebuild_visible_entries();
-        let revealed = session.take_pending_visible_entry().unwrap();
+        let revealed = session.take_pending_visible_entries();
 
-        assert_eq!(revealed.name, "later.txt");
-        assert!(session.pending_reveal.is_none());
+        assert_eq!(revealed[0].name, "later.txt");
+        assert!(session.pending_reveal.is_empty());
         assert_eq!(
             session.selection.primary().map(PathBuf::as_path),
             Some(Path::new("/folder/later.txt")),
         );
+    }
+
+    #[test]
+    fn pending_reveal_selects_every_item_across_incremental_batches() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.pending_reveal = vec![
+            PathBuf::from("/folder/first.txt"),
+            PathBuf::from("/folder/second.txt"),
+        ];
+
+        session.entries.push(entry("second.txt", false, Some(1)));
+        session.rebuild_visible_entries();
+        assert_eq!(session.take_pending_visible_entries().len(), 1);
+
+        session.entries.push(entry("first.txt", false, Some(1)));
+        sort_entries(&mut session.entries);
+        session.rebuild_visible_entries();
+        assert_eq!(session.take_pending_visible_entries().len(), 1);
+
+        assert!(session.pending_reveal.is_empty());
+        assert_eq!(session.selection.selected().len(), 2);
+        assert!(session.selection.primary().is_some());
     }
 
     #[test]

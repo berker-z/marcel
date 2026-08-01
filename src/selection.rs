@@ -42,16 +42,16 @@ impl SelectionModel {
         }
     }
 
-    pub fn toggle(&mut self, path: PathBuf) {
+    pub fn toggle(&mut self, path: PathBuf, ordered: &[PathBuf]) {
         if self.selected.remove(&path) {
             if self.primary.as_ref() == Some(&path) {
-                self.primary = None;
+                self.primary = nearest_selected(&path, ordered, &self.selected);
             }
         } else {
             self.selected.insert(path.clone());
             self.primary = Some(path.clone());
         }
-        self.anchor = Some(path);
+        self.anchor = self.primary.clone().or(Some(path));
     }
 
     pub fn select_range(&mut self, path: PathBuf, ordered: &[PathBuf], additive: bool) {
@@ -95,13 +95,32 @@ impl SelectionModel {
         self.primary = Some(primary);
     }
 
-    pub fn retain(&mut self, mut predicate: impl FnMut(&Path) -> bool) {
+    pub fn retain(&mut self, ordered: &[PathBuf], mut predicate: impl FnMut(&Path) -> bool) {
         self.selected.retain(|path| predicate(path));
         if self.primary.as_ref().is_some_and(|path| !predicate(path)) {
             self.primary = None;
         }
         if self.anchor.as_ref().is_some_and(|path| !predicate(path)) {
             self.anchor = None;
+        }
+        self.ensure_primary(ordered);
+    }
+
+    pub fn add_all(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for path in paths {
+            self.primary.get_or_insert_with(|| path.clone());
+            self.anchor.get_or_insert_with(|| path.clone());
+            self.selected.insert(path);
+        }
+    }
+
+    pub fn ensure_primary(&mut self, ordered: &[PathBuf]) {
+        if self.primary.is_none() && !self.selected.is_empty() {
+            self.primary = ordered
+                .iter()
+                .find(|path| self.selected.contains(*path))
+                .cloned();
+            self.anchor = self.primary.clone();
         }
     }
 
@@ -121,6 +140,19 @@ impl SelectionModel {
     }
 }
 
+fn nearest_selected(
+    removed: &Path,
+    ordered: &[PathBuf],
+    selected: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    let removed_index = ordered.iter().position(|path| path == removed)?;
+    ordered[removed_index..]
+        .iter()
+        .chain(ordered[..removed_index].iter().rev())
+        .find(|path| selected.contains(*path))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,7 +165,7 @@ mod tests {
     fn plain_selection_replaces_existing_items() {
         let mut selection = SelectionModel::default();
         selection.select_only(path("a"));
-        selection.toggle(path("b"));
+        selection.toggle(path("b"), &[path("a"), path("b")]);
         selection.select_only(path("c"));
 
         assert_eq!(selection.selected(), &HashSet::from([path("c")]));
@@ -143,10 +175,10 @@ mod tests {
     #[test]
     fn toggle_adds_and_removes_an_item() {
         let mut selection = SelectionModel::default();
-        selection.toggle(path("a"));
+        selection.toggle(path("a"), &[path("a")]);
         assert!(selection.is_selected(Path::new("a")));
 
-        selection.toggle(path("a"));
+        selection.toggle(path("a"), &[path("a")]);
         assert!(!selection.is_selected(Path::new("a")));
         assert_eq!(selection.primary(), None);
     }
@@ -192,7 +224,7 @@ mod tests {
     fn making_a_selected_item_primary_preserves_the_selection() {
         let mut selection = SelectionModel::default();
         selection.select_only(path("a"));
-        selection.toggle(path("b"));
+        selection.toggle(path("b"), &[path("a"), path("b")]);
 
         selection.make_primary(Path::new("a"));
 
@@ -204,12 +236,28 @@ mod tests {
     fn retaining_visible_paths_removes_hidden_selection_state() {
         let mut selection = SelectionModel::default();
         selection.select_only(path("hidden"));
-        selection.toggle(path("visible"));
+        selection.toggle(path("visible"), &[path("hidden"), path("visible")]);
         selection.make_primary(Path::new("hidden"));
 
-        selection.retain(|candidate| candidate == Path::new("visible"));
+        selection.retain(&[path("visible")], |candidate| {
+            candidate == Path::new("visible")
+        });
 
         assert_eq!(selection.selected(), &HashSet::from([path("visible")]));
-        assert_eq!(selection.primary(), None);
+        assert_eq!(selection.primary(), Some(&path("visible")));
+    }
+
+    #[test]
+    fn removing_the_primary_promotes_the_nearest_selected_item() {
+        let ordered = [path("a"), path("b"), path("c")];
+        let mut selection = SelectionModel::default();
+        selection.select_only(path("a"));
+        selection.toggle(path("b"), &ordered);
+        selection.toggle(path("c"), &ordered);
+
+        selection.toggle(path("b"), &ordered);
+
+        assert_eq!(selection.primary(), Some(&path("c")));
+        assert_eq!(selection.selected(), &HashSet::from([path("a"), path("c")]));
     }
 }

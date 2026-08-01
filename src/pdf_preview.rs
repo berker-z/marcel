@@ -219,10 +219,10 @@ fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
 fn parse_page_count(output: &[u8]) -> Option<usize> {
     String::from_utf8_lossy(output).lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
-        name.trim()
-            .eq_ignore_ascii_case("pages")
-            .then(|| value.trim().parse().ok())
-            .flatten()
+        if !name.trim().eq_ignore_ascii_case("pages") {
+            return None;
+        }
+        value.trim().parse().ok().filter(|pages| *pages > 0)
     })
 }
 
@@ -328,6 +328,7 @@ mod tests {
     fn rejects_missing_or_invalid_page_count() {
         assert_eq!(parse_page_count(b"Title: Test\n"), None);
         assert_eq!(parse_page_count(b"Pages: many\n"), None);
+        assert_eq!(parse_page_count(b"Pages: 0\n"), None);
     }
 
     #[test]

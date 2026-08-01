@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use gpui::{
     App, AppContext, Application, Bounds, Entity, WindowBounds, WindowHandle, WindowOptions, px,
@@ -42,11 +42,16 @@ fn main() {
 
         if let Some(runtime) = desktop_runtime {
             let requests = runtime.requests();
+            let windows = Rc::new(RefCell::new(vec![initial_window]));
+            let windows_on_close = windows.clone();
+            let window_close_subscription = cx.on_window_closed(move |cx| {
+                prune_closed_windows(&mut windows_on_close.borrow_mut(), cx);
+            });
             cx.spawn(async move |cx| {
                 let _runtime = runtime;
-                let mut windows = vec![initial_window];
+                let _window_close_subscription = window_close_subscription;
                 while let Ok(request) = requests.recv().await {
-                    cx.update(|cx| handle_desktop_request(request, &mut windows, cx))?;
+                    cx.update(|cx| handle_desktop_request(request, &mut windows.borrow_mut(), cx))?;
                 }
                 Ok::<_, anyhow::Error>(())
             })
@@ -98,6 +103,7 @@ fn handle_desktop_request(
 ) {
     use marcel::desktop_integration::{DesktopRequest, RevealedLocation};
 
+    prune_closed_windows(windows, cx);
     match request {
         DesktopRequest::Activate => {
             cx.activate(true);
@@ -133,10 +139,11 @@ fn open_desktop_locations(
     cx: &mut App,
 ) {
     for (index, location) in locations.into_iter().enumerate() {
-        let reveal = location.items.into_iter().next();
+        let directory = location.directory;
+        let reveal = location.items;
         let reused_existing = if index == 0 {
             windows.last().is_some_and(|active| {
-                let directory = location.directory.clone();
+                let directory = directory.clone();
                 let reveal = reveal.clone();
                 active
                     .handle
@@ -155,16 +162,11 @@ fn open_desktop_locations(
             continue;
         }
 
-        if let Ok(window) = open_marcel_window(location.directory, cx) {
-            if let Some(reveal) = reveal {
+        if let Ok(window) = open_marcel_window(directory.clone(), cx) {
+            if !reveal.is_empty() {
                 let _ = window.handle.update(cx, |_, gpui_window, cx| {
                     window.view.update(cx, |view, cx| {
-                        view.open_external_location(
-                            view_directory_for_reveal(&reveal),
-                            Some(reveal),
-                            gpui_window,
-                            cx,
-                        );
+                        view.open_external_location(directory, reveal, gpui_window, cx);
                     });
                 });
             }
@@ -174,8 +176,6 @@ fn open_desktop_locations(
     cx.activate(true);
 }
 
-fn view_directory_for_reveal(path: &std::path::Path) -> PathBuf {
-    path.parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/"))
+fn prune_closed_windows(windows: &mut Vec<MarcelWindow>, cx: &App) {
+    windows.retain(|window| window.handle.read(cx).is_ok());
 }

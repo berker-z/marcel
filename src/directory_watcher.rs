@@ -179,30 +179,23 @@ fn collect_changed_paths(
 
 pub(crate) fn revalidate_paths(paths: Vec<PathBuf>) -> Vec<DirectoryEvent> {
     let mut icons = IconProvider::discover();
-    paths
-        .into_iter()
-        .map(|path| match FileEntry::from_path(&path, &mut icons) {
-            Ok(entry) => DirectoryEvent::Changed(entry),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => DirectoryEvent::Removed(path),
-            Err(_) => DirectoryEvent::RescanRequired,
-        })
-        .collect()
+    revalidate_paths_with_icons(paths, &mut icons)
 }
 
 fn revalidate_paths_with_icons(
     paths: Vec<PathBuf>,
     icons: &mut IconProvider,
 ) -> Vec<DirectoryEvent> {
-    paths
-        .into_iter()
-        .filter_map(|path| match FileEntry::from_path(&path, icons) {
-            Ok(entry) => Some(DirectoryEvent::Changed(entry)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Some(DirectoryEvent::Removed(path))
-            }
-            Err(_) => None,
-        })
-        .collect()
+    let mut events = Vec::with_capacity(paths.len());
+    for path in paths {
+        let event = match FileEntry::from_path(&path, icons) {
+            Ok(entry) => DirectoryEvent::Changed(entry),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => DirectoryEvent::Removed(path),
+            Err(_) => return vec![DirectoryEvent::RescanRequired],
+        };
+        events.push(event);
+    }
+    events
 }
 
 #[cfg(test)]
@@ -271,6 +264,19 @@ mod tests {
     fn operation_revalidation_requests_rescan_for_ambiguous_errors() {
         assert_eq!(
             revalidate_paths(vec![PathBuf::from("/")]),
+            vec![DirectoryEvent::RescanRequired]
+        );
+    }
+
+    #[test]
+    fn native_revalidation_requests_one_rescan_for_an_ambiguous_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("existing.txt");
+        std::fs::write(&existing, b"hello").unwrap();
+        let mut icons = IconProvider::discover();
+
+        assert_eq!(
+            revalidate_paths_with_icons(vec![existing, PathBuf::from("/")], &mut icons),
             vec![DirectoryEvent::RescanRequired]
         );
     }

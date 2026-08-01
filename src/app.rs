@@ -974,7 +974,7 @@ impl Marcel {
                             DirectoryUpdate::Batch(batch) => {
                                 let reconcile = this.directory.merge_batch(batch);
                                 this.apply_selection_reconcile(reconcile, cx);
-                                this.select_pending_loaded_entry(cx);
+                                this.select_pending_loaded_entries(cx);
                             }
                             DirectoryUpdate::Done => {
                                 this.directory.finish_load();
@@ -1087,7 +1087,7 @@ impl Marcel {
                                     ApplyDirectoryEvents::Applied(reconcile) => {
                                         this.invalidate_watched_thumbnails(&affected);
                                         this.apply_selection_reconcile(reconcile, cx);
-                                        this.select_pending_loaded_entry(cx);
+                                        this.select_pending_loaded_entries(cx);
                                     }
                                     ApplyDirectoryEvents::RescanRequired => {
                                         this.start_directory_load(false, cx);
@@ -1124,28 +1124,31 @@ impl Marcel {
         }
     }
 
-    fn select_pending_loaded_entry(&mut self, cx: &mut Context<Self>) {
-        if let Some(entry) = self.directory.take_pending_visible_entry() {
+    fn select_pending_loaded_entries(&mut self, cx: &mut Context<Self>) {
+        let entries = self.directory.take_pending_visible_entries();
+        if let Some(primary) = self.directory.selection.primary()
+            && let Some(entry) = entries.into_iter().find(|entry| &entry.path == primary)
+        {
             self.start_preview(entry, cx);
         }
     }
 
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {
-        self.navigate_to_revealing(path, None, add_to_history, cx);
+        self.navigate_to_revealing(path, Vec::new(), add_to_history, cx);
     }
 
     fn navigate_to_revealing(
         &mut self,
         path: PathBuf,
-        reveal: Option<PathBuf>,
+        reveal: Vec<PathBuf>,
         add_to_history: bool,
         cx: &mut Context<Self>,
     ) {
         if !self.browsing_trash && path == self.directory.current_dir {
-            if let Some(reveal) = reveal {
+            if !reveal.is_empty() {
                 self.set_filter_query(String::new(), cx);
-                self.directory.pending_reveal = Some(reveal);
-                self.select_pending_loaded_entry(cx);
+                self.directory.pending_reveal = reveal;
+                self.select_pending_loaded_entries(cx);
                 cx.notify();
             }
             return;
@@ -1163,7 +1166,7 @@ impl Marcel {
     pub fn open_external_location(
         &mut self,
         directory: PathBuf,
-        reveal: Option<PathBuf>,
+        reveal: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1176,7 +1179,7 @@ impl Marcel {
             self.browsing_trash = false;
             self.trash_records.clear();
             self.directory.current_dir = path;
-            self.directory.pending_reveal = None;
+            self.directory.pending_reveal.clear();
             self.start_directory_load(true, cx);
         }
     }
@@ -1186,7 +1189,7 @@ impl Marcel {
             self.browsing_trash = false;
             self.trash_records.clear();
             self.directory.current_dir = path;
-            self.directory.pending_reveal = None;
+            self.directory.pending_reveal.clear();
             self.start_directory_load(true, cx);
         }
     }
@@ -2566,16 +2569,18 @@ impl Marcel {
 
                 let affected = directory_event_paths(&events);
                 this.directory.pending_reveal = reveal
-                    .filter(|path| path.parent() == Some(this.directory.current_dir.as_path()));
+                    .filter(|path| path.parent() == Some(this.directory.current_dir.as_path()))
+                    .into_iter()
+                    .collect();
                 match this.directory.apply_events(events) {
                     ApplyDirectoryEvents::Applied(reconcile) => {
                         this.invalidate_watched_thumbnails(&affected);
                         this.apply_selection_reconcile(reconcile, cx);
-                        this.select_pending_loaded_entry(cx);
+                        this.select_pending_loaded_entries(cx);
                         // Unlike a streamed directory load, this is the only
                         // result batch. Do not retain an impossible reveal
                         // across later unrelated watcher events.
-                        this.directory.pending_reveal = None;
+                        this.directory.pending_reveal.clear();
                     }
                     ApplyDirectoryEvents::RescanRequired => {
                         this.start_directory_load(false, cx);
@@ -3515,7 +3520,12 @@ impl Marcel {
                     Ok(LocationTarget { directory, reveal }) => {
                         this.location_editing = false;
                         this.location_error = None;
-                        this.navigate_to_revealing(directory, reveal, true, cx);
+                        this.navigate_to_revealing(
+                            directory,
+                            reveal.into_iter().collect(),
+                            true,
+                            cx,
+                        );
                         this.browser_focus.focus(window);
                     }
                     Err(error) => {
@@ -3730,7 +3740,10 @@ impl Marcel {
                 modifiers.secondary(),
             );
         } else if modifiers.secondary() {
-            self.directory.selection.toggle(entry.path.clone());
+            let ordered = self.visible_paths();
+            self.directory
+                .selection
+                .toggle(entry.path.clone(), &ordered);
         } else {
             self.directory.selection.select_only(entry.path.clone());
         }
@@ -4640,6 +4653,22 @@ impl Marcel {
     fn end_marquee(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
         if event.button == MouseButton::Left && self.marquee.take().is_some() {
             self.marquee_scroll_task.take();
+            let ordered = self.visible_paths();
+            self.directory.selection.ensure_primary(&ordered);
+            if let Some(entry) = self
+                .directory
+                .selection
+                .primary()
+                .and_then(|path| {
+                    self.directory
+                        .entries
+                        .iter()
+                        .find(|entry| &entry.path == path)
+                })
+                .cloned()
+            {
+                self.start_preview(entry, cx);
+            }
             cx.notify();
         }
     }
