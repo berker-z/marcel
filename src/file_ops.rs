@@ -1630,6 +1630,23 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"contents");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rename_accepts_an_invalid_utf8_source_identity() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join(OsString::from_vec(vec![b'n', 0xff]));
+        let destination = root.path().join("readable.txt");
+        fs::write(&source, b"contents").unwrap();
+
+        let operation = rename_entry(&source, "readable.txt").unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(operation.path(), destination);
+        assert_eq!(fs::read(destination).unwrap(), b"contents");
+    }
+
     #[test]
     fn rename_refuses_an_occupied_destination() {
         let root = tempfile::tempdir().unwrap();

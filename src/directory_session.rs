@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     path::PathBuf,
     sync::{
         Arc,
@@ -21,6 +22,7 @@ pub struct DirectorySession {
     pub(crate) selection: SelectionModel,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
+    pub(crate) warning: Option<String>,
     pub(crate) generation: u64,
     pub(crate) load_task: Option<Task<()>>,
     pub(crate) watch_task: Option<Task<()>>,
@@ -39,6 +41,7 @@ impl DirectorySession {
             selection: SelectionModel::default(),
             loading: false,
             error: None,
+            warning: None,
             generation: 0,
             load_task: None,
             watch_task: None,
@@ -115,6 +118,7 @@ impl DirectorySession {
             self.filter_query.clear();
         }
         self.error = None;
+        self.warning = None;
         self.loading = true;
         self.generation
     }
@@ -218,21 +222,22 @@ impl DirectorySession {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, entry)| {
-                    (self.show_hidden || !is_hidden_name(&entry.name)).then_some(index)
+                    (self.show_hidden || !is_hidden_os_name(&entry.name_os)).then_some(index)
                 })
                 .collect();
             return;
         }
 
+        let folded_query = self.filter_query.to_lowercase().chars().collect::<Vec<_>>();
         let mut matches = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                if !self.show_hidden && is_hidden_name(&entry.name) {
+                if !self.show_hidden && is_hidden_os_name(&entry.name_os) {
                     return None;
                 }
-                fuzzy_score(&entry.name, &self.filter_query).map(|score| (index, score))
+                fuzzy_score_folded(&entry.folded_name, &folded_query).map(|score| (index, score))
             })
             .collect::<Vec<_>>();
         matches.sort_unstable_by(|(left_index, left_score), (right_index, right_score)| {
@@ -298,17 +303,33 @@ pub fn is_hidden_name(name: &str) -> bool {
 }
 
 pub fn fuzzy_score(candidate: &str, query: &str) -> Option<i64> {
+    let candidate = candidate.to_lowercase().chars().collect::<Vec<_>>();
+    let query = query.to_lowercase().chars().collect::<Vec<_>>();
+    fuzzy_score_folded(&candidate, &query)
+}
+
+fn is_hidden_os_name(name: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let bytes = name.as_bytes();
+        bytes.first() == Some(&b'.') && bytes != b"." && bytes != b".."
+    }
+    #[cfg(not(unix))]
+    {
+        name.to_str().is_some_and(is_hidden_name)
+    }
+}
+
+fn fuzzy_score_folded(candidate: &[char], query: &[char]) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
-
-    let candidate = candidate.to_lowercase().chars().collect::<Vec<_>>();
-    let query = query.to_lowercase().chars().collect::<Vec<_>>();
     let mut search_from = 0;
     let mut previous_match = None;
     let mut score = 0i64;
 
-    for needle in &query {
+    for needle in query {
         let relative = candidate
             .get(search_from..)?
             .iter()
@@ -388,6 +409,8 @@ mod tests {
         FileEntry {
             path: PathBuf::from("/folder").join(name),
             name: name.to_string(),
+            name_os: name.into(),
+            folded_name: name.to_lowercase().chars().collect(),
             kind: if navigable {
                 EntryKind::Directory
             } else {

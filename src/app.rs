@@ -64,8 +64,8 @@ use crate::{
         transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
-        DirectoryUpdate, EntryKind, FileEntry, format_size, merge_sorted_entries, stream_directory,
-        stream_directory_cancellable,
+        DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
+        stream_directory, stream_directory_cancellable,
     },
     history::NavigationHistory,
     launch::{LocationTarget, resolve_location},
@@ -976,6 +976,16 @@ impl Marcel {
                                 this.apply_selection_reconcile(reconcile, cx);
                                 this.select_pending_loaded_entries(cx);
                             }
+                            DirectoryUpdate::Degraded { skipped, examples } => {
+                                let examples = examples.join("; ");
+                                this.directory.warning = Some(if examples.is_empty() {
+                                    format!("Skipped {skipped} unreadable folder entries")
+                                } else {
+                                    format!(
+                                        "Skipped {skipped} unreadable folder entries: {examples}"
+                                    )
+                                });
+                            }
                             DirectoryUpdate::Done => {
                                 this.directory.finish_load();
                                 this.start_directory_watcher(ticket, path.clone(), cx);
@@ -1267,13 +1277,7 @@ impl Marcel {
                     && !self.operations.is_busy()
                     && self.directory.error.is_none()
                     && self.directory.selection.selected().len() == 1
-                    && self
-                        .directory
-                        .selection
-                        .primary()
-                        .and_then(|path| path.file_name())
-                        .and_then(|name| name.to_str())
-                        .is_some()
+                    && self.directory.selection.primary().is_some()
             }
             BrowserCommand::CompressSelection => {
                 !self.browsing_trash
@@ -1551,15 +1555,13 @@ impl Marcel {
         let Some(path) = self.directory.selection.primary().cloned() else {
             return;
         };
-        let Some(name) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
+        let Some(name) = self
+            .directory
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.name.clone())
         else {
-            window.push_notification(
-                Notification::error("This filename is not valid UTF-8 and cannot be edited yet"),
-                cx,
-            );
             return;
         };
         let is_directory = self
@@ -1608,7 +1610,9 @@ impl Marcel {
             input.update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        if path.file_name() == Some(std::ffi::OsStr::new(&name)) {
+        if path.file_name().is_some_and(|current| {
+            current == std::ffi::OsStr::new(&name) || display_filename(current) == name
+        }) {
             self.cancel_rename(window, cx);
             return;
         }
@@ -4778,6 +4782,16 @@ impl Marcel {
                                     batch,
                                 );
                             }
+                            DirectoryUpdate::Degraded { skipped, examples } => {
+                                this.folder_preview_error = Some(format!(
+                                    "Skipped {skipped} unreadable entries{}",
+                                    if examples.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(": {}", examples.join("; "))
+                                    }
+                                ));
+                            }
                             DirectoryUpdate::Done => {
                                 this.folder_preview_loading = false;
                             }
@@ -5758,6 +5772,7 @@ impl Marcel {
 
         let bounds_state = self.browser_bounds.clone();
         let visible_hit_bounds = self.entry_hit_bounds.clone();
+        let degraded_warning = self.directory.warning.clone();
         let gesture_view = cx.entity();
         let marquee = self.marquee.as_ref().and_then(|gesture| {
             if !gesture.active {
@@ -5874,6 +5889,20 @@ impl Marcel {
             )
             .child(contents)
             .when_some(marquee, |this, marquee| this.child(marquee))
+            .when_some(degraded_warning, |this, warning| {
+                this.child(
+                    div()
+                        .mx_3()
+                        .mb_2()
+                        .px_3()
+                        .py_1()
+                        .rounded(cx.theme().radius)
+                        .bg(colors.warning.opacity(0.14))
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child(warning),
+                )
+            })
             .when(self.directory.loading, |this| {
                 this.child(
                     div()

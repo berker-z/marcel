@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::DirEntry,
     io,
     path::{Path, PathBuf},
@@ -28,6 +28,8 @@ pub enum EntryKind {
 pub struct FileEntry {
     pub path: PathBuf,
     pub name: String,
+    pub name_os: OsString,
+    pub(crate) folded_name: Arc<[char]>,
     pub kind: EntryKind,
     pub navigable: bool,
     pub size: Option<u64>,
@@ -75,7 +77,7 @@ impl FileEntry {
 
     fn from_parts(
         path: PathBuf,
-        name: std::ffi::OsString,
+        name: OsString,
         file_type: std::fs::FileType,
         followed_metadata: Option<std::fs::Metadata>,
         icons: &mut IconProvider,
@@ -92,8 +94,12 @@ impl FileEntry {
 
         let navigable =
             file_type.is_dir() || followed_metadata.as_ref().is_some_and(|meta| meta.is_dir());
+        let display_name = display_filename(&name);
+        let folded_name = display_name.to_lowercase().chars().collect();
         Self {
-            name: name.to_string_lossy().into_owned(),
+            name: display_name,
+            name_os: name,
+            folded_name,
             navigable,
             size: followed_metadata
                 .as_ref()
@@ -122,6 +128,10 @@ impl FileEntry {
 #[derive(Debug)]
 pub enum DirectoryUpdate {
     Batch(Vec<FileEntry>),
+    Degraded {
+        skipped: usize,
+        examples: Vec<String>,
+    },
     Done,
     Error(String),
 }
@@ -162,15 +172,26 @@ fn stream_directory_inner(
 
     let mut icons = IconProvider::discover();
     let mut batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
+    let mut skipped = 0usize;
+    let mut examples = Vec::new();
     for entry in reader {
         if cancelled.is_some_and(|cancelled| cancelled.load(AtomicOrdering::Acquire)) {
             return;
         }
-        let Ok(entry) = entry else {
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                record_degraded_entry(&mut skipped, &mut examples, None, &error);
+                continue;
+            }
         };
-        let Ok(entry) = FileEntry::from_dir_entry(entry, &mut icons) else {
-            continue;
+        let path = entry.path();
+        let entry = match FileEntry::from_dir_entry(entry, &mut icons) {
+            Ok(entry) => entry,
+            Err(error) => {
+                record_degraded_entry(&mut skipped, &mut examples, Some(&path), &error);
+                continue;
+            }
         };
 
         batch.push(entry);
@@ -192,7 +213,33 @@ fn stream_directory_inner(
             return;
         }
     }
+    if skipped > 0
+        && sender
+            .send_blocking(DirectoryUpdate::Degraded { skipped, examples })
+            .is_err()
+    {
+        return;
+    }
     let _ = sender.send_blocking(DirectoryUpdate::Done);
+}
+
+fn record_degraded_entry(
+    skipped: &mut usize,
+    examples: &mut Vec<String>,
+    path: Option<&Path>,
+    error: &io::Error,
+) {
+    const MAX_EXAMPLES: usize = 3;
+    const MAX_DETAIL_CHARS: usize = 240;
+    *skipped += 1;
+    if examples.len() == MAX_EXAMPLES {
+        return;
+    }
+    let detail = match path.and_then(Path::file_name) {
+        Some(name) => format!("{}: {error}", display_filename(name)),
+        None => error.to_string(),
+    };
+    examples.push(detail.chars().take(MAX_DETAIL_CHARS).collect());
 }
 
 pub fn merge_sorted_entries(left: Vec<FileEntry>, right: Vec<FileEntry>) -> Vec<FileEntry> {
@@ -219,13 +266,36 @@ pub(crate) fn sort_entries(entries: &mut [FileEntry]) {
 fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {
     b.navigable
         .cmp(&a.navigable)
-        .then_with(|| compare_names(&a.name, &b.name))
+        .then_with(|| a.folded_name.cmp(&b.folded_name))
+        .then_with(|| a.name_os.cmp(&b.name_os))
 }
 
-fn compare_names(a: &str, b: &str) -> Ordering {
-    a.to_lowercase()
-        .cmp(&b.to_lowercase())
-        .then_with(|| OsStr::new(a).cmp(OsStr::new(b)))
+pub fn display_filename(name: &OsStr) -> String {
+    if let Some(name) = name.to_str() {
+        if name.starts_with("⟦bytes:") || name.starts_with("⟦text:") {
+            return format!("⟦text:{name}⟧");
+        }
+        return name.to_string();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let bytes = name.as_bytes();
+        let mut display = String::with_capacity(bytes.len() * 2 + 10);
+        display.push_str("⟦bytes:");
+        for byte in bytes {
+            use std::fmt::Write as _;
+            let _ = write!(display, "{byte:02x}");
+        }
+        display.push('⟧');
+        display
+    }
+    #[cfg(not(unix))]
+    {
+        name.to_string_lossy().into_owned()
+    }
 }
 
 pub fn format_size(size: Option<u64>) -> String {
@@ -253,9 +323,12 @@ mod tests {
     use super::*;
 
     fn entry(name: &str, navigable: bool) -> FileEntry {
+        let name_os = OsString::from(name);
         FileEntry {
             path: PathBuf::from(name),
             name: name.to_string(),
+            name_os,
+            folded_name: name.to_lowercase().chars().collect(),
             kind: if navigable {
                 EntryKind::Directory
             } else {
@@ -317,5 +390,33 @@ mod tests {
         stream_directory_cancellable(Path::new("."), sender, cancelled);
 
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_names_keep_raw_identity_and_have_distinct_labels() {
+        use std::{collections::HashSet, os::unix::ffi::OsStringExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let mut icons = IconProvider::discover();
+        let mut displays = HashSet::new();
+        for byte in 0x80..=0xff {
+            let raw = OsString::from_vec(vec![b'n', byte]);
+            let path = root.path().join(&raw);
+            std::fs::write(&path, b"x").unwrap();
+            let entry = FileEntry::from_path(&path, &mut icons).unwrap();
+
+            assert_eq!(entry.name_os, raw);
+            assert!(displays.insert(entry.name));
+        }
+    }
+
+    #[test]
+    fn valid_names_cannot_impersonate_escaped_byte_labels() {
+        let invalid_label = "⟦bytes:6eff⟧";
+        assert_eq!(
+            display_filename(OsStr::new(invalid_label)),
+            "⟦text:⟦bytes:6eff⟧⟧"
+        );
     }
 }
