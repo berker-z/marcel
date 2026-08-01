@@ -1,5 +1,8 @@
 # Sprint 4 — Controller extraction and directory session
 
+**Status:** Implemented — both ownership extractions and their quality gate are
+complete. Large-directory manual acceptance is consolidated under Sprint 17.
+
 ## Goal
 
 Establish narrow ownership boundaries before adding filesystem watching and

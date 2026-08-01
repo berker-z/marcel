@@ -1,5 +1,9 @@
 # Sprint 8: permanent deletion and Empty Trash
 
+**Status:** Implemented — quarantined permanent deletion, Empty Trash, and
+automated safety coverage are complete. Destructive-UX and partial-error checks
+remain in the manual hardening matrix.
+
 ## Goal
 
 Add explicit, conventional permanent deletion without weakening Marcel's

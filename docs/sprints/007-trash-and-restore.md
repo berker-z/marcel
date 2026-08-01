@@ -1,5 +1,9 @@
 # Sprint 7: system Trash and restore
 
+**Status:** Implemented — Trash, restore, identity validation, and automated
+coverage are complete. Desktop interoperability and mounted-volume checks
+remain in the manual hardening matrix.
+
 ## Goal
 
 Make recoverable deletion a real Marcel operation: move selected items to the

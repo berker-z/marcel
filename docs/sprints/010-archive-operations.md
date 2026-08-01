@@ -1,8 +1,8 @@
 # Sprint 10: archive operations
 
-**Status:** Active — backend, safe publication, ZIP creation, extraction,
+**Status:** Implemented — backend, safe publication, ZIP creation, extraction,
 context actions, progress/cancellation, incremental results, and Undo/Redo are
-implemented. Portable release packaging and manual UI acceptance remain.
+delivered. Portable release packaging and manual UI acceptance remain.
 
 ## Goal
 

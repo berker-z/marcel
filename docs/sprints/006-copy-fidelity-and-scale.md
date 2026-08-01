@@ -1,5 +1,8 @@
 # Sprint 6 — Copy fidelity and scale
 
+**Status:** Implemented — the copy-fidelity contract, scale investigation, and
+automated quality gate are complete.
+
 ## Goal
 
 Make Marcel's successful-copy promise explicit and improve ordinary Linux copy

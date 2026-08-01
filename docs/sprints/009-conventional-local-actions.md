@@ -1,7 +1,7 @@
 # Sprint 9: conventional local actions
 
-**Status:** Active — safe inline Rename and Open in Terminal are implemented;
-New File and Properties remain.
+**Status:** Partially implemented — safe inline Rename and Open in Terminal are
+delivered. New File and Properties are explicitly parked feature work.
 
 ## Goal
 

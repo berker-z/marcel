@@ -1,7 +1,7 @@
 # Sprint 11: visual hierarchy polish
 
-**Status:** Active — the first shell, typography, and grid-density pass is
-implemented; manual visual acceptance remains.
+**Status:** Implemented — the shell, typography, and grid-density pass is
+delivered; manual visual acceptance remains.
 
 ## Goal
 

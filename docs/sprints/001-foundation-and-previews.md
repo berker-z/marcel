@@ -1,7 +1,8 @@
 # Sprint 1: Foundation and previews
 
-**Status:** Active — working alpha, core navigation and bounded previews
-implemented.
+**Status:** Implemented core — navigation and bounded previews are delivered.
+The preview/navigation manual matrix and parked media metadata/playback remain
+tracked below.
 
 ## Goal
 

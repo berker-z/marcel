@@ -1,6 +1,7 @@
 # Sprint 16: public release presentation and metadata
 
-**Status:** Planned
+**Status:** Planned — explicitly deferred until the hardening matrix is
+accepted.
 
 ## Goal
 

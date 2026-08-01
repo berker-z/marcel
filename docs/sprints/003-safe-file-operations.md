@@ -1,5 +1,9 @@
 # Sprint 3: Safe file operations
 
+**Status:** Implemented — the planned safe-operation slices and automated
+checks are complete. Later clipboard interoperability and conflict UX remain
+separate parked work.
+
 ## Goal
 
 Turn Marcel from a read-only browser into a trustworthy file manager. Every

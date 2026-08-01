@@ -1,5 +1,8 @@
 # Sprint 5 — Incremental directory watching
 
+**Status:** Implemented — native/polling watching, coalescing, reconciliation,
+and automated coverage are complete. The manual watcher matrix remains.
+
 ## Goal
 
 Keep the active directory current when other applications mutate it without

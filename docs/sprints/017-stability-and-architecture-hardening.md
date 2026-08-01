@@ -1,8 +1,8 @@
 # Sprint 17: stability and architecture hardening
 
-**Status:** Implemented — the automated hardening slice is complete. Feature
-and release work remain paused while the outstanding desktop/manual acceptance
-matrix is run.
+**Status:** Implemented — the automated hardening slice and post-migration
+Wayland drag validation are complete. Feature and release work remain paused
+while the outstanding desktop/manual acceptance matrix is run.
 
 ## Goal
 
@@ -93,19 +93,38 @@ and does not add features, distribution formats, or release automation.
   malformed-PDF, and hostile-image checks.
 - [ ] Manually exercise multi-window close/reopen, activation, and grouped
   `ShowItems` routing in a graphical session.
+- [x] Reconfirm bilateral Chrome/Marcel dragging on Wayland after migrating to
+  GPUI's upstream external-drag lifecycle.
+- [ ] Run the consolidated watcher, rapid-navigation, large-directory,
+  selection, thumbnail, corrupt-preview, and high-DPI checks retained by
+  Sprints 1, 2, 4, and 5.
+- [ ] Run the consolidated Trash/restore and permanent-delete matrix, including
+  mounted volumes, read-only failures, occupied children, confirmation
+  cancellation, partial results, and interoperability with external Trash
+  entries.
+- [ ] Test process interruption during permanent deletion and implement startup
+  discovery/recovery guidance for surviving `.marcel-delete-*` quarantines.
+- [ ] Add private-session-bus integration coverage for name ownership,
+  forwarding, typed errors, cold/warm activation, and primary-process exit;
+  manually verify generic-service opt-in and ordinary-package non-ownership.
+- [ ] Reproduce the known PDF resize problem with the maintainer and turn the
+  confirmed behavior into a focused fix and regression check.
+- [ ] Verify explicit thumbnail loading/failure/unsupported presentation and
+  close any remaining state or accessibility gap.
+- [ ] Run the remaining rename, location-bar, theme, unusual-filename,
+  non-Latin fallback, and scale-factor interaction checks retained by earlier
+  sprints.
 - [x] Pass `cargo fmt --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test --all-targets` in the declared development environment.
 
-## Deferred coordination and manual validation
+The checklist above is the canonical remaining hardening queue. Open manual
+boxes in earlier sprint documents retain their detailed procedures and history;
+they do not make those implementation sprints active again.
 
-- Run the consolidated destructive-operation, mounted-volume Trash,
-  read-only-mount, watcher, broken-symlink, process-interruption, and quarantine
-  recovery matrix retained by earlier sprints.
-- Reproduce the known PDF resize behavior with the maintainer before choosing
-  a UI fix.
-- Re-run outbound Wayland interoperability manually against browser and desktop
-  targets after the upstream GPUI migration. X11 outbound source support stays
-  deferred because upstream GPUI does not currently provide it.
+## Deferred coordination
+
+- X11 outbound source support stays deferred because upstream GPUI does not
+  currently provide it.
 - Keep mandatory hosted CI, release metadata, artwork, and public packaging in
   deferred Sprint 16.

@@ -5,6 +5,16 @@ under [`docs/sprints/`](sprints/) turn selected items into bounded deliverables
 and detailed acceptance checks. Finishing a sprint does not imply that every
 item here belongs in that sprint.
 
+Sprint status uses four consistent meanings:
+
+- **Implemented** means the planned code and automated checks are complete;
+  explicitly listed manual acceptance may still be pending.
+- **Implemented core** means the sprint's product foundation is complete while
+  a named follow-up remains in the hardening or parked-feature backlog.
+- **Partially implemented** means named deliverables were deliberately parked.
+- **Planned** means delivery has not started. Sprint 16 is also explicitly
+  deferred while hardening remains the priority.
+
 ## Current priorities
 
 - Keep feature and release work frozen. The automated implementation in
@@ -20,6 +30,8 @@ item here belongs in that sprint.
   watching, safe copy/move, Trash/restore, permanent deletion, archives,
   packaging, D-Bus activation, single-instance routing, and bilateral Wayland
   file drag-and-drop are implemented.
+- Bilateral Chrome/Marcel dragging was manually reconfirmed on Wayland after
+  replacing the private GPUI fork with the upstream drag lifecycle.
 - Sprint 16, mandatory hosted CI, public presentation, release metadata,
   branded artwork, distribution expansion, and a tagged `0.1.0` are explicitly
   deferred. Local fmt, Clippy, and all-target tests remain mandatory meanwhile.
@@ -233,8 +245,8 @@ The packaging contract, current dependency caveats, target formats, and
 - [x] Accept native local-file drops from desktop applications into Places,
   bookmarks, folders, and the current browser directory, using safe copy
   semantics.
-- [x] Confirm native file-drag source interoperability with browser/desktop
-  targets on Wayland.
+- [x] Reconfirm native file-drag source interoperability with Chrome on
+  Wayland after the upstream GPUI migration, in both directions.
 - [ ] Add and manually verify the corresponding X11 source path.
 - [x] Replace Marcel's private outbound Wayland drag patch with GPUI's upstream
   `ExternalDragPayload::Files` lifecycle. Marcel now accepts GPUI's standard

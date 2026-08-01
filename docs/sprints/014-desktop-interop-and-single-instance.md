@@ -1,7 +1,9 @@
 # Sprint 14: desktop interoperability and single-instance routing
 
-**Status:** In progress — branded D-Bus activation, single-instance routing,
-packaging, and Wayland file drag-and-drop are implemented.
+**Status:** Implemented core — branded D-Bus activation, single-instance
+routing, packaging, and bilateral Wayland file drag-and-drop are delivered.
+Private-bus/manual acceptance remains; Properties and X11 outbound drag are
+parked follow-ups.
 
 ## Goal
 

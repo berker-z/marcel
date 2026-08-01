@@ -1,8 +1,9 @@
 # Sprint 2: Selection and visual browsing
 
-**Status:** Active — shared list/grid selection, virtualized icon view, native
-icons, and progressive still-image thumbnails are implemented; visual
-validation and interaction cleanup remain.
+**Status:** Implemented core — shared list/grid selection, virtualized icon
+view, native icons, and progressive still-image thumbnails are delivered.
+Explicit thumbnail failure presentation and manual visual/interaction checks
+remain hardening work.
 
 ## Goal
 
