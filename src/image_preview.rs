@@ -289,4 +289,12 @@ mod tests {
 
         assert!(prepare_in(&source, &root.path().join("cache"), &AtomicBool::new(false)).is_err());
     }
+
+    #[test]
+    fn rejects_zero_and_oversized_dimensions() {
+        assert!(validate_dimensions((0, 10)).is_err());
+        assert!(validate_dimensions((10, 0)).is_err());
+        assert!(validate_dimensions((MAX_SOURCE_DIMENSION + 1, 1)).is_err());
+        assert!(validate_dimensions((10_000, 10_000)).is_err());
+    }
 }

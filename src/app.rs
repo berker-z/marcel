@@ -820,11 +820,9 @@ impl Marcel {
                 let Ok(mut entry) = FileEntry::from_path(record.backing_path(), &mut icons) else {
                     continue;
                 };
-                entry.name = record
-                    .original_path()
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| entry.name.clone());
+                if let Some(name) = record.original_path().file_name() {
+                    entry.set_name(name.to_os_string());
+                }
                 // The first Trash slice presents top-level items. Directories
                 // remain previewable, but nested virtual navigation follows
                 // after the location abstraction is generalized.

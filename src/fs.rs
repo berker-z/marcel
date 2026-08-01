@@ -111,6 +111,12 @@ impl FileEntry {
         }
     }
 
+    pub(crate) fn set_name(&mut self, name: OsString) {
+        self.name = display_filename(&name);
+        self.folded_name = self.name.to_lowercase().chars().collect();
+        self.name_os = name;
+    }
+
     pub fn display_kind(&self) -> &'static str {
         match self.kind {
             EntryKind::Directory => "Folder",
@@ -390,6 +396,29 @@ mod tests {
         stream_directory_cancellable(Path::new("."), sender, cancelled);
 
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn degraded_entry_details_are_counted_and_bounded() {
+        let mut skipped = 0;
+        let mut examples = Vec::new();
+        let error = io::Error::new(io::ErrorKind::PermissionDenied, "x".repeat(500));
+        for index in 0..10 {
+            record_degraded_entry(
+                &mut skipped,
+                &mut examples,
+                Some(Path::new(if index == 0 { "first" } else { "later" })),
+                &error,
+            );
+        }
+
+        assert_eq!(skipped, 10);
+        assert_eq!(examples.len(), 3);
+        assert!(
+            examples
+                .iter()
+                .all(|example| example.chars().count() <= 240)
+        );
     }
 
     #[cfg(unix)]

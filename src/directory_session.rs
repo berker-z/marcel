@@ -569,4 +569,20 @@ mod tests {
             vec!["folder", "selected.txt"]
         );
     }
+
+    #[test]
+    fn large_directory_filter_reuses_entry_folded_names() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.entries = (0..50_000)
+            .map(|index| entry(&format!("item-{index:05}.txt"), false, Some(1)))
+            .collect();
+        sort_entries(&mut session.entries);
+        session.rebuild_visible_entries();
+
+        let reconcile = session.set_filter_query("ITEM-49999".to_string());
+
+        assert!(reconcile.is_some());
+        assert_eq!(session.visible_entries.len(), 1);
+        assert_eq!(session.visible_entry(0).unwrap().name, "item-49999.txt");
+    }
 }
