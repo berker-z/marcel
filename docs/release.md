@@ -76,6 +76,43 @@ directory handler and does not take ownership of the generic
 `org.freedesktop.FileManager1` D-Bus service. Both remain separate, explicit
 system-integration choices.
 
+### Reproducibility, rebuilds, and binary delivery
+
+Nix reproducibility means that Marcel's source, lock file, compiler, libraries,
+build flags, and other declared inputs identify one exact derivation. Updating
+`flake.lock` changes that input graph and therefore intentionally creates a new
+derivation. Nix will not substitute an older build whose inputs no longer
+match, even when Marcel's own source is unchanged. This refusal is part of the
+reproducibility guarantee, not a failure of it.
+
+Reproducibility also does not make the selected compiler infallible. A fresh
+Rust 1.97/LLVM 21 thin-LTO build was observed terminating in `libLLVM.so` with
+a segmentation fault despite adequate disk, inode, and memory headroom and no
+kernel OOM event. Increasing rustc's worker-thread stack to 16 MiB allowed that
+package build to complete, so `nix/package.nix` declares
+`RUST_MIN_STACK=16777216`. Keep the setting local to Marcel and retain thin LTO
+unless the crash recurs with the larger stack; disabling thin LTO for Marcel is
+the next fallback.
+
+A Git tag or GitHub Release pins and presents a source version, but does not by
+itself stop Nix from compiling that source. Fast Nix installation requires a
+binary cache containing Marcel's exact Nix store output. The intended release
+pipeline is:
+
+```text
+immutable v* tag
+    -> hosted x86_64-linux and aarch64-linux builds
+    -> signed Nix binary-cache outputs
+    -> GitHub Release notes and any portable non-Nix artifacts
+```
+
+When the user's requested derivation exactly matches a cached output, Nix
+downloads the substitute and its closure instead of compiling Marcel. A local
+build remains the correct fallback when the cache lacks that derivation—for
+example after an input override or a lock-file update that the release builders
+have not built. The first implementation may use Cachix or Attic; selecting and
+documenting the cache endpoint belongs to Sprint 16 release automation.
+
 ## Current packaging audit
 
 ### Fonts

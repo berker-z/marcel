@@ -186,8 +186,9 @@ The packaging contract, current dependency caveats, target formats, and
   fixture directory, resolve baseline icons/fonts, render one PDF, extract one
   free archive, and verify installed desktop/AppStream/D-Bus metadata.
 - [ ] Establish tagged release sources, changelog/release notes, deterministic
-  versioning, release checks on `x86_64-linux` and `aarch64-linux`, and optional
-  Cachix/GitHub release automation.
+  versioning, release checks on `x86_64-linux` and `aarch64-linux`, and hosted
+  release automation that publishes exact derivations to a signed Nix binary
+  cache alongside the GitHub Release.
 - [ ] Submit `marcel` to nixpkgs as a tagged-source package with a free closure,
   a maintainer, complete `meta`, and a package test. Run `nixfmt`,
   `nixpkgs-review`, the package build/tests, and use the conventional

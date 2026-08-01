@@ -52,6 +52,9 @@ distribution formats already exist.
 - [ ] Add a contributor quickstart and automated Markdown-link checking.
 - [ ] Add mandatory hosted checks for `cargo fmt --check`, Clippy with warnings
   denied, all-target tests, and the declared Nix package build.
+- [ ] Build tagged `x86_64-linux` and `aarch64-linux` derivations in hosted CI,
+  publish them through a signed Nix binary cache, and document cache setup and
+  cache-miss behavior.
 - [ ] Audit all current docs for stale feature, limitation, sprint, version,
   and pinned-commit claims.
 - [ ] Run the release-only Nix build/check and clean installed-package smoke

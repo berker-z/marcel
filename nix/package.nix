@@ -45,6 +45,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
   pname = "marcel";
   version = "0.1.0";
 
+  # rustc recommends increasing its worker-thread stack when LLVM exhausts the
+  # default during code generation. Marcel's thin-LTO release build has
+  # otherwise produced a nondeterministic libLLVM.so crash with LLVM 21, while
+  # this size completed the same package build without changing optimization.
+  RUST_MIN_STACK = "16777216";
+
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
