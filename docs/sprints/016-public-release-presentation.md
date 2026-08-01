@@ -49,6 +49,8 @@ distribution formats already exist.
 - [ ] Add a platform support/install matrix with no fictional commands.
 - [ ] Separate install, default-handler, and generic FileManager1 instructions.
 - [ ] Add a contributor quickstart and automated Markdown-link checking.
+- [ ] Add mandatory hosted checks for `cargo fmt --check`, Clippy with warnings
+  denied, all-target tests, and the declared Nix package build.
 - [ ] Audit all current docs for stale feature, limitation, sprint, version,
   and pinned-commit claims.
 - [ ] Run the release-only Nix build/check and clean installed-package smoke

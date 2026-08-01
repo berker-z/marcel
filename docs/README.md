@@ -5,14 +5,15 @@ durable product, engineering, and release records used to build it.
 
 ## Current milestone
 
-Marcel has reached the personal daily-driver milestone. Sprint 15 completed the
-free archive baseline, private Iosevka/Nordzy identity bundle, declarative Nix
-visual settings, and persistent view/hidden-file interaction state.
+Marcel has reached the personal daily-driver milestone. Feature and release
+work are now paused for
+[Sprint 17: stability and architecture hardening](sprints/017-stability-and-architecture-hardening.md).
+It closes confirmed correctness and hostile-input problems, pays down manual
+validation debt, and mechanically extracts cohesive ownership from the
+application coordinator.
 
-The next planned milestone is
-[Sprint 16: public release presentation and metadata](sprints/016-public-release-presentation.md).
-It prepares the documentation, branded artwork, AppStream metadata, and
-platform-neutral installation structure required before `v0.1.0`.
+[Sprint 16: public release presentation and metadata](sprints/016-public-release-presentation.md)
+remains planned but deprioritized until the hardening sprint is complete.
 
 ## Source-of-truth documents
 

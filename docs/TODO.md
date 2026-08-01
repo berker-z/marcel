@@ -7,12 +7,21 @@ item here belongs in that sprint.
 
 ## Current priorities
 
+- Freeze feature and release work while
+  [`Sprint 17`](sprints/017-stability-and-architecture-hardening.md) closes the
+  confirmed PDF, watcher, D-Bus reveal, selection, window-lifecycle,
+  non-UTF-8 filename, hostile-image, enumeration, and hot-path allocation
+  problems found during external review.
+- Mechanically extract preview, sidebar, drag/drop, and cohesive window UI
+  ownership from `app.rs` during the same hardening sprint. Preserve behavior
+  and avoid an event bus or speculative trait architecture.
 - Marcel's local-filesystem core has reached the personal daily-driver
   milestone: browsing, previews, selection, filtering, bookmarks, incremental
   watching, safe copy/move, Trash/restore, permanent deletion, archives,
   packaging, D-Bus activation, single-instance routing, and bilateral Wayland
   file drag-and-drop are implemented.
-- Continue distribution hardening before adding more features: the free 7-Zip
+- After Sprint 17, continue distribution hardening before adding more features:
+  the free 7-Zip
   baseline and private font/icon identity bundle are complete; add Marcel's
   branded icon and AppStream metadata, audit every runtime subprocess/resource,
   and test from a clean minimal desktop.
@@ -80,20 +89,20 @@ personal release.
 This order favors daily-driver completeness over novelty while keeping new
 state machines out of Marcel's coordinator until they have clear ownership.
 
-1. Complete [Sprint 16](sprints/016-public-release-presentation.md): public
+1. Complete [Sprint 17](sprints/017-stability-and-architecture-hardening.md):
+   correctness fixes, hostile-input bounds, validation debt, and mechanical
+   coordinator extraction.
+2. Complete [Sprint 16](sprints/016-public-release-presentation.md): public
    documentation, branded artwork, AppStream metadata, and honest
    platform-neutral installation structure.
-2. Complete the distribution-hardening checklist below and test the flake
+3. Complete the distribution-hardening checklist below and test the flake
    install on a clean minimal NixOS environment.
-3. Cut `v0.1.0` and prepare the nixpkgs package.
-4. Close Sprint 14's remaining Properties surface without changing the user's
+4. Cut `v0.1.0` and prepare the nixpkgs package.
+5. Close Sprint 14's remaining Properties surface without changing the user's
    default directory handler merely by installing Marcel.
-5. Add New File, then finish the Sprint 7 and Sprint 8 destructive-operation
+6. Add New File, then finish the Sprint 7 and Sprint 8 destructive-operation
    smoke tests and record any discovered recovery or mounted-volume behavior.
-6. Add Duplicate and Move To.
-7. Mechanically extract preview, sidebar, and drag/drop lifecycle ownership
-   from `app.rs`, preserving current behavior and tests. Do not turn this into
-   an abstract architecture rewrite.
+7. Add Duplicate and Move To.
 8. Finish X11 source support and manual acceptance for the implemented
    bilateral native desktop drag-and-drop, then add desktop clipboard
    interoperability.
