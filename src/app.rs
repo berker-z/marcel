@@ -10,10 +10,11 @@ use std::{
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity,
-    ExternalPaths, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
-    ScrollStrategy, SharedString, Styled, TextRun, Timer, UniformListScrollHandle, Window, canvas,
-    div, font, img, prelude::*, px, relative, uniform_list,
+    ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Hsla, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Styled, TextRun,
+    UniformListScrollHandle, Window, canvas, div, font, img, prelude::*, px, relative,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Root, Sizable, WindowExt,
@@ -131,6 +132,7 @@ enum SelectionMotion {
 #[derive(Clone, Debug)]
 struct FileDrag {
     paths: Arc<[PathBuf]>,
+    native_paths: Arc<[(PathBuf, bool)]>,
     bookmark_candidates: Arc<[PathBuf]>,
 }
 
@@ -272,8 +274,8 @@ impl Marcel {
         this
     }
 
-    pub fn focus_browser(&self, window: &mut Window) {
-        self.browser_focus.focus(window);
+    pub fn focus_browser(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser_focus.focus(window, cx);
     }
 
     fn start_places_load(&mut self, home: PathBuf, cx: &mut Context<Self>) {
@@ -587,7 +589,7 @@ impl Marcel {
                         )
                         .when(active.cancellable, |this| this.child(cancel_button)),
                 )
-                .child(Progress::new().h_1().value(percentage))
+                .child(Progress::new("operation-progress").h_1().value(percentage))
                 .child(
                     h_flex()
                         .gap_2()
@@ -617,6 +619,7 @@ impl Marcel {
             return None;
         }
         let mut paths = Vec::with_capacity(selected.len());
+        let mut native_paths = Vec::with_capacity(selected.len());
         let mut bookmark_candidates = Vec::new();
         for index in &self.directory.visible_entries {
             let Some(entry) = self.directory.entries.get(*index) else {
@@ -624,6 +627,7 @@ impl Marcel {
             };
             if selected.contains(&entry.path) {
                 paths.push(entry.path.clone());
+                native_paths.push((entry.path.clone(), entry.kind == EntryKind::Directory));
                 if entry.navigable {
                     bookmark_candidates.push(entry.path.clone());
                 }
@@ -631,6 +635,7 @@ impl Marcel {
         }
         Some(FileDrag {
             paths: paths.into(),
+            native_paths: native_paths.into(),
             bookmark_candidates: bookmark_candidates.into(),
         })
     }
@@ -643,6 +648,7 @@ impl Marcel {
         };
         FileDrag {
             paths: vec![path.to_path_buf()].into(),
+            native_paths: vec![(path.to_path_buf(), navigable)].into(),
             bookmark_candidates: bookmark_candidates.into(),
         }
     }
@@ -958,7 +964,7 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         self.navigate_to_revealing(directory, reveal, true, cx);
-        self.focus_browser(window);
+        self.focus_browser(window, cx);
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
@@ -1403,7 +1409,7 @@ impl Marcel {
         self.ui.rename_path = None;
         self.ui.rename_input = None;
         self.ui.rename_subscription = None;
-        self.browser_focus.focus(window);
+        self.browser_focus.focus(window, cx);
         self.start_rename(path, name, window, cx);
     }
 
@@ -1411,7 +1417,7 @@ impl Marcel {
         self.ui.rename_path = None;
         self.ui.rename_input = None;
         self.ui.rename_subscription = None;
-        self.browser_focus.focus(window);
+        self.browser_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -1488,8 +1494,13 @@ impl Marcel {
             dialog
                 .title("New Folder")
                 .child(Input::new(&input_for_dialog))
-                .confirm()
-                .button_props(DialogButtonProps::default().ok_text("Create"))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Create")
+                        .show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, window, cx| {
                     let name = input_for_ok.read(cx).value().trim().to_string();
                     if let Err(error) = validate_entry_name(&name) {
@@ -1583,8 +1594,13 @@ impl Marcel {
             dialog
                 .title("Compress to ZIP")
                 .child(Input::new(&input_for_dialog))
-                .confirm()
-                .button_props(DialogButtonProps::default().ok_text("Compress"))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Compress")
+                        .show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, window, cx| {
                     let name = input_for_ok.read(cx).value().trim().to_string();
                     if let Err(error) = validate_entry_name(&name) {
@@ -2004,12 +2020,14 @@ impl Marcel {
                                 .child("This action cannot be undone."),
                         ),
                 )
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete Permanently")
-                        .ok_variant(ButtonVariant::Danger),
+                        .ok_variant(ButtonVariant::Danger)
+                        .show_cancel(true),
                 )
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, window, cx| {
                     view.update(cx, |this, cx| {
                         this.start_permanent_delete(
@@ -2060,12 +2078,14 @@ impl Marcel {
                                 .child("This action cannot be undone."),
                         ),
                 )
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Empty Trash")
-                        .ok_variant(ButtonVariant::Danger),
+                        .ok_variant(ButtonVariant::Danger)
+                        .show_cancel(true),
                 )
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, window, cx| {
                     view.update(cx, |this, cx| {
                         this.start_permanent_delete(
@@ -2198,7 +2218,9 @@ impl Marcel {
     fn start_operation_progress_refresh(&mut self, cx: &mut Context<Self>) {
         let progress_task = cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(Duration::from_millis(80)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(80))
+                    .await;
                 let keep_running = this
                     .update(cx, |this, cx| {
                         let keep_running = this.operations.progress().is_some();
@@ -2908,10 +2930,7 @@ impl Marcel {
                 cx,
                 move |_, event: &SelectEvent<Vec<SharedString>>, _, cx| {
                     let SelectEvent::Confirm(selected) = event;
-                    let Some(palette) = selected
-                        .as_deref()
-                        .and_then(|label| Palette::from_name(label.as_ref()))
-                    else {
+                    let Some(palette) = selected.as_deref().and_then(Palette::from_name) else {
                         return;
                     };
                     view.update(cx, |this, cx| {
@@ -2942,8 +2961,9 @@ impl Marcel {
                                 .child(Select::new(&theme_select).w(px(240.0))),
                         ),
                 )
-                .alert()
                 .button_props(DialogButtonProps::default().ok_text("Done"))
+                .overlay_closable(false)
+                .close_button(false)
         });
     }
 
@@ -3180,7 +3200,7 @@ impl Marcel {
                 let cleared = query.is_empty() && !self.directory.filter_query.is_empty();
                 self.set_filter_query(query, cx);
                 if cleared {
-                    self.browser_focus.focus(window);
+                    self.browser_focus.focus(window, cx);
                 }
             }
             InputEvent::PressEnter { .. } => self.activate_primary(cx),
@@ -3202,7 +3222,7 @@ impl Marcel {
 
     fn clear_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_search_text(String::new(), window, cx);
-        self.browser_focus.focus(window);
+        self.browser_focus.focus(window, cx);
     }
 
     fn on_location_input_event(
@@ -3259,7 +3279,7 @@ impl Marcel {
         self.ui.location_editing = false;
         self.ui.location_resolving = false;
         self.ui.location_error = None;
-        self.browser_focus.focus(window);
+        self.browser_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -3302,7 +3322,7 @@ impl Marcel {
                             true,
                             cx,
                         );
-                        this.browser_focus.focus(window);
+                        this.browser_focus.focus(window, cx);
                     }
                     Err(error) => {
                         this.ui.location_error = Some(error.clone());
@@ -3486,7 +3506,7 @@ impl Marcel {
     fn schedule_preview_wrap(&mut self, cx: &mut Context<Self>) {
         self.preview.resize_task.take();
         self.preview.resize_task = Some(cx.spawn(async move |this, cx| {
-            Timer::after(PREVIEW_WRAP_DEBOUNCE).await;
+            cx.background_executor().timer(PREVIEW_WRAP_DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| this.start_preview_wrap(cx));
         }));
     }
@@ -3662,9 +3682,9 @@ impl Marcel {
         };
         let separator = || div().h(px(1.0)).mx_1().my_1().bg(colors.border);
 
-        // gpui-component 0.5.1 hardcodes shadow_lg() in PopupMenu's private
-        // popover style. GPUI 0.2.2 renders that shadow as opaque bands on our
-        // Linux target and exposes no override, so this small shell is custom.
+        // gpui-component hardcodes shadow_lg() in PopupMenu's private popover
+        // style. It renders as opaque bands on our Linux target and exposes no
+        // override, so this small shell is custom.
         // The active command still goes through Marcel's shared dispatcher.
         if menu.target == ContextMenuTarget::CurrentDirectory {
             return Some(
@@ -4347,7 +4367,9 @@ impl Marcel {
         self.drag.marquee_scroll_task.take();
         self.drag.marquee_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(POINTER_EDGE_SCROLL_INTERVAL).await;
+                cx.background_executor()
+                    .timer(POINTER_EDGE_SCROLL_INTERVAL)
+                    .await;
                 let keep_running = this
                     .update(cx, |this, cx| this.tick_marquee_autoscroll(cx))
                     .unwrap_or(false);
@@ -4377,7 +4399,7 @@ impl Marcel {
         let handle = self.ui.directory_scroll.0.borrow().base_handle.clone();
         let mut offset = handle.offset();
         let old_offset = offset;
-        offset.y = (offset.y + delta).clamp(-handle.max_offset().height, px(0.0));
+        offset.y = (offset.y + delta).clamp(-handle.max_offset().y, px(0.0));
         if offset == old_offset {
             return true;
         }
@@ -4391,7 +4413,9 @@ impl Marcel {
         self.drag.file_scroll_task.take();
         self.drag.file_scroll_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(POINTER_EDGE_SCROLL_INTERVAL).await;
+                cx.background_executor()
+                    .timer(POINTER_EDGE_SCROLL_INTERVAL)
+                    .await;
                 let keep_running = this
                     .update(cx, |this, cx| this.tick_file_drag_autoscroll(cx))
                     .unwrap_or(false);
@@ -4425,7 +4449,7 @@ impl Marcel {
         let handle = self.ui.directory_scroll.0.borrow().base_handle.clone();
         let mut offset = handle.offset();
         let old_offset = offset;
-        offset.y = (offset.y + delta).clamp(-handle.max_offset().height, px(0.0));
+        offset.y = (offset.y + delta).clamp(-handle.max_offset().y, px(0.0));
         if offset != old_offset {
             handle.set_offset(offset);
         }
@@ -5127,8 +5151,7 @@ impl Marcel {
                                     .border_color(colors.list_active_border)
                             })
                             .when(dragging_enabled, |this| {
-                                this.on_drag(drag, |drag, _, window, cx| {
-                                    start_native_file_drag(drag, window);
+                                this.on_drag(drag, |drag, _, _, cx| {
                                     let count = drag.paths.len();
                                     let label = if count == 1 {
                                         drag.paths[0]
@@ -5143,6 +5166,9 @@ impl Marcel {
                                         detail: "Move",
                                     })
                                 })
+                                .external_drag_payload(
+                                    |drag: &FileDrag, _, _| native_file_drag_payload(drag),
+                                )
                             })
                             .on_drag_move::<FileDrag>(cx.listener(|this, event, window, cx| {
                                 this.update_file_drag_cursor(event, window, cx);
@@ -5182,7 +5208,7 @@ impl Marcel {
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    this.browser_focus.focus(window);
+                                    this.browser_focus.focus(window, cx);
                                     this.prepare_entry_context_menu(
                                         &context_path,
                                         event.position,
@@ -5235,7 +5261,7 @@ impl Marcel {
                     .collect::<Vec<_>>()
             }),
         )
-        .track_scroll(self.ui.directory_scroll.clone())
+        .track_scroll(&self.ui.directory_scroll)
         .h_full()
         .into_any_element()
     }
@@ -5394,8 +5420,7 @@ impl Marcel {
                                             .border_color(colors.list_active_border)
                                     })
                                     .when(dragging_enabled, |this| {
-                                        this.on_drag(drag, |drag, _, window, cx| {
-                                            start_native_file_drag(drag, window);
+                                        this.on_drag(drag, |drag, _, _, cx| {
                                             let count = drag.paths.len();
                                             let label = if count == 1 {
                                                 drag.paths[0]
@@ -5411,6 +5436,9 @@ impl Marcel {
                                                 label,
                                                 detail: "Move",
                                             })
+                                        })
+                                        .external_drag_payload(|drag: &FileDrag, _, _| {
+                                            native_file_drag_payload(drag)
                                         })
                                     })
                                     .on_drag_move::<FileDrag>(cx.listener(
@@ -5465,7 +5493,7 @@ impl Marcel {
                                         MouseButton::Right,
                                         cx.listener(
                                             move |this, event: &MouseDownEvent, window, cx| {
-                                                this.browser_focus.focus(window);
+                                                this.browser_focus.focus(window, cx);
                                                 this.prepare_entry_context_menu(
                                                     &context_path,
                                                     event.position,
@@ -5520,7 +5548,7 @@ impl Marcel {
                 .collect::<Vec<_>>()
             }),
         )
-        .track_scroll(self.ui.directory_scroll.clone())
+        .track_scroll(&self.ui.directory_scroll)
         .h_full()
         .into_any_element()
     }
@@ -5790,7 +5818,7 @@ impl Marcel {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .track_scroll(scroll.clone())
+                .track_scroll(&scroll)
                 .size_full()
                 .py_2(),
             )
@@ -5902,7 +5930,7 @@ impl Marcel {
                                     .collect::<Vec<_>>()
                             }),
                         )
-                        .track_scroll(scroll.clone())
+                        .track_scroll(&scroll)
                         .size_full(),
                     )
                     .vertical_scrollbar(&scroll)
@@ -5921,7 +5949,7 @@ impl Marcel {
                     } else {
                         code_fence(contents, language)
                     };
-                    TextView::markdown(("preview-text", self.preview.ticket), source, window, cx)
+                    TextView::markdown(("preview-text", self.preview.ticket), source)
                         .selectable(true)
                         .scrollable(true)
                         .size_full()
@@ -5988,7 +6016,7 @@ impl Marcel {
                                         .collect::<Vec<_>>()
                                 },
                             )
-                            .track_scroll(scroll.clone())
+                            .track_scroll(&scroll)
                             .size_full()
                             .px_3()
                             .py_2(),
@@ -6314,7 +6342,7 @@ impl Render for Marcel {
             .on_action(cx.listener(Self::on_redo_file_operation))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, _| this.browser_focus.focus(window)),
+                cx.listener(|this, _, window, cx| this.browser_focus.focus(window, cx)),
             )
             .flex()
             .flex_col()
@@ -6647,12 +6675,12 @@ impl Render for Marcel {
         let pane_view = cx.entity();
         let entry_menu = self.render_entry_menu(window, cx);
         let bookmark_menu = self.render_bookmark_menu(window, cx);
-        // gpui-component 0.5.1's Root stores dialog and notification state but
+        // gpui-component's Root stores dialog and notification state but
         // does not attach those layers in Root::render. Mount its public layer
         // renderers here so WindowExt dialogs/notifications are actually
         // visible while retaining the component implementations.
         let dialog_layer = Root::render_dialog_layer(window, cx);
-        // gpui-component 0.5.1 hardcodes NotificationList to top-right and
+        // gpui-component hardcodes NotificationList to top-right and
         // exposes no placement option. Keep the component notifications and
         // lifecycle, but mount their public entities in Marcel's bottom-right
         // stack until the component supports configurable placement.
@@ -6840,12 +6868,11 @@ fn can_move_files_to(paths: &[PathBuf], destination: &Path) -> bool {
         })
 }
 
-fn start_native_file_drag(drag: &FileDrag, window: &mut Window) {
-    if drag.paths.len() <= MAX_EXTERNAL_DROP_PATHS
-        && drag.paths.iter().all(|path| path.is_absolute())
-    {
-        let _ = window.start_file_drag(drag.paths.to_vec());
-    }
+fn native_file_drag_payload(drag: &FileDrag) -> Option<ExternalDragPayload> {
+    (!drag.native_paths.is_empty()
+        && drag.native_paths.len() <= MAX_EXTERNAL_DROP_PATHS
+        && drag.native_paths.iter().all(|(path, _)| path.is_absolute()))
+    .then(|| ExternalDragPayload::Files(FileDragPaths::new(drag.native_paths.iter().cloned())))
 }
 
 fn can_accept_external_drop(paths: &[PathBuf], destination: &Path) -> bool {
@@ -7289,6 +7316,31 @@ mod tests {
             &vec![PathBuf::from("/downloads/item"); MAX_EXTERNAL_DROP_PATHS + 1],
             destination,
         ));
+    }
+
+    #[test]
+    fn outbound_drag_preserves_paths_and_directory_metadata() {
+        let drag = FileDrag {
+            paths: Arc::from([
+                PathBuf::from("/downloads/report.pdf"),
+                PathBuf::from("/downloads/photos"),
+            ]),
+            native_paths: Arc::from([
+                (PathBuf::from("/downloads/report.pdf"), false),
+                (PathBuf::from("/downloads/photos"), true),
+            ]),
+            bookmark_candidates: Arc::from([]),
+        };
+        let Some(ExternalDragPayload::Files(paths)) = native_file_drag_payload(&drag) else {
+            panic!("expected an outbound file payload");
+        };
+        assert_eq!(paths.entries(), drag.native_paths.as_ref());
+
+        let mut invalid = drag.clone();
+        invalid.native_paths = Arc::from([(PathBuf::from("relative.txt"), false)]);
+        assert!(native_file_drag_payload(&invalid).is_none());
+        invalid.native_paths = Arc::from([]);
+        assert!(native_file_drag_payload(&invalid).is_none());
     }
 
     #[test]

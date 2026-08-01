@@ -1,9 +1,6 @@
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
-use gpui::{
-    App, AppContext, Application, Bounds, Entity, WindowBounds, WindowHandle, WindowOptions, px,
-    size,
-};
+use gpui::{App, AppContext, Bounds, Entity, WindowBounds, WindowHandle, WindowOptions, px, size};
 use gpui_component::Root;
 use marcel::Marcel;
 
@@ -31,7 +28,7 @@ fn main() {
         }
     };
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         marcel::identity::init(cx);
         marcel::theme::init(cx);
@@ -44,14 +41,14 @@ fn main() {
             let requests = runtime.requests();
             let windows = Rc::new(RefCell::new(vec![initial_window]));
             let windows_on_close = windows.clone();
-            let window_close_subscription = cx.on_window_closed(move |cx| {
+            let window_close_subscription = cx.on_window_closed(move |cx, _| {
                 prune_closed_windows(&mut windows_on_close.borrow_mut(), cx);
             });
             cx.spawn(async move |cx| {
                 let _runtime = runtime;
                 let _window_close_subscription = window_close_subscription;
                 while let Ok(request) = requests.recv().await {
-                    cx.update(|cx| handle_desktop_request(request, &mut windows.borrow_mut(), cx))?;
+                    cx.update(|cx| handle_desktop_request(request, &mut windows.borrow_mut(), cx));
                 }
                 Ok::<_, anyhow::Error>(())
             })
@@ -84,7 +81,7 @@ fn open_marcel_window(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindo
         |window, cx| {
             window.set_window_title("Marcel");
             let marcel = cx.new(|cx| Marcel::new(path, window, cx));
-            marcel.update(cx, |view, _| view.focus_browser(window));
+            marcel.update(cx, |view, cx| view.focus_browser(window, cx));
             view = Some(marcel.clone());
             cx.new(|cx| Root::new(marcel, window, cx))
         },

@@ -27,10 +27,10 @@ Desktop clipboard exchange remains a later, separate slice.
   native Wayland applications, including browsers, can receive them.
 - Preserve Marcel's existing move behavior when the native drag returns to a
   Marcel-owned drop target.
-- GPUI 0.2.2 only implements the target half of native Linux file drag-and-drop.
-  Marcel therefore carries a narrow Apache-2.0 GPUI patch exposing the Wayland
-  data-device source primitive. X11 source support remains an explicit
-  follow-up; X11 and Wayland inbound drops both use GPUI's existing support.
+- Marcel uses GPUI's upstream external-file-drag lifecycle. On Wayland the
+  source advertises the standard Copy-or-Move action set and the target chooses
+  the result; X11 source support remains an explicit follow-up. X11 and Wayland
+  inbound drops both use GPUI's existing support.
 
 ## Standards and ownership contract
 

@@ -204,15 +204,12 @@ assuming tools happen to exist on the host. The audit must cover PATH lookup,
 dynamic libraries, D-Bus search paths, `XDG_DATA_DIRS`, portals, icon lookup,
 thumbnail caches, Trash paths, and subprocess behavior.
 
-### Vendored GPUI
+### Pinned GPUI
 
-Marcel carries a narrow Apache-2.0 GPUI 0.2.2 adaptation that adds a native
-Wayland file-drag source. The source and license are included under
-`vendor/gpui` and documented in `THIRD_PARTY_NOTICES.md`.
-
-Release source archives must retain that directory and its license. The
-adaptation should be proposed upstream independently, but its upstreaming is
-not a blocker for the first Marcel release.
+Marcel consumes GPUI's upstream native external-drag API directly. The exact
+Zed and gpui-component revisions are recorded in `Cargo.lock`; Marcel no longer
+ships a locally modified GPUI tree. Release and downstream builds must fetch or
+prefetch those immutable Git sources and retain their upstream license notices.
 
 ## Distribution targets
 
@@ -231,7 +228,7 @@ The package should live under the appropriate `pkgs/by-name` path and:
 
 - fetch the immutable GitHub tag with a fixed source hash;
 - use `rustPlatform.buildRustPackage` and the committed Cargo lock;
-- include vendored GPUI in the source;
+- prefetch the Git dependencies pinned by `Cargo.lock`;
 - declare every build and runtime dependency;
 - use free `7zz` by default;
 - install the desktop entry, branded icon, AppStream file, D-Bus service, and

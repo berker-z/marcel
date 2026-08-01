@@ -236,11 +236,9 @@ The packaging contract, current dependency caveats, target formats, and
 - [x] Confirm native file-drag source interoperability with browser/desktop
   targets on Wayland.
 - [ ] Add and manually verify the corresponding X11 source path.
-- [ ] Upstream Marcel's outbound Wayland file-drag primitive to GPUI after
-  this desktop-interoperability slice lands: port the patch from GPUI 0.2.2 to
-  current Zed `main`, separate drag-source payload ownership from clipboard
-  state, add URI serialization tests and a minimal example, and submit a
-  Marcel-independent PR with its Wayland/copy-only scope documented.
+- [x] Replace Marcel's private outbound Wayland drag patch with GPUI's upstream
+  `ExternalDragPayload::Files` lifecycle. Marcel now accepts GPUI's standard
+  Copy-or-Move source negotiation; `Cargo.lock` pins the integrated revisions.
 - [x] Add a non-overlapping bottom-right progress/cancellation card for active
   copy and move operations, with item/byte accounting.
 - [x] Add ZIP creation and broad-format extraction through the shared background

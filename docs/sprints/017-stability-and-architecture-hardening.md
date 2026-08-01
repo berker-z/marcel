@@ -85,6 +85,8 @@ and does not add features, distribution formats, or release automation.
   regression coverage unchanged.
 - [x] Extract preview, drag/drop, sidebar, and cohesive window UI ownership
   mechanically from `app.rs`.
+- [x] Replace the private GPUI Wayland drag fork with the pinned upstream
+  external-file-drag lifecycle and remove the vendored framework tree.
 - [x] Run automated large-directory, invalid-filename, watcher-error,
   malformed-PDF, and hostile-image checks.
 - [ ] Manually exercise multi-window close/reopen, activation, and grouped
@@ -100,7 +102,8 @@ and does not add features, distribution formats, or release automation.
   recovery matrix retained by earlier sprints.
 - Reproduce the known PDF resize behavior with the maintainer before choosing
   a UI fix.
-- Port and upstream the narrowly documented Wayland drag-source primitive when
-  external GPUI coordination resumes. This is not a local hardening change.
+- Re-run outbound Wayland interoperability manually against browser and desktop
+  targets after the upstream GPUI migration. X11 outbound source support stays
+  deferred because upstream GPUI does not currently provide it.
 - Keep mandatory hosted CI, release metadata, artwork, and public packaging in
   deferred Sprint 16.
