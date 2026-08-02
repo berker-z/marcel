@@ -109,7 +109,7 @@ and does not add features, distribution formats, or release automation.
   manually verify generic-service opt-in and ordinary-package non-ownership.
 - [ ] Reproduce the known PDF resize problem with the maintainer and turn the
   confirmed behavior into a focused fix and regression check.
-- [ ] Verify explicit thumbnail loading/failure/unsupported presentation and
+- [x] Verify explicit thumbnail loading/failure/unsupported presentation and
   close any remaining state or accessibility gap.
 - [ ] Run the remaining rename, location-bar, theme, unusual-filename,
   non-Latin fallback, and scale-factor interaction checks retained by earlier
@@ -153,6 +153,11 @@ Verified:
 - Custom palettes now update gpui-component's resolved theme tokens as well as
   its legacy color table, so dialogs, switches, and other token-based controls
   inherit Marcel's active palette instead of retaining default black surfaces.
+- Grid thumbnails now distinguish pending work with a muted ellipsis badge,
+  decode failure with a danger badge, and unsupported files with their normal
+  MIME icon. State selection has direct regression coverage; the graphical run
+  confirmed ready, failed, and unsupported rendering against isolated cache
+  and corrupt-image fixtures.
 - A permission-induced partial permanent deletion retained its child in the
   reported quarantine. Killing Marcel immediately after quarantine publication
   left all 20,000 test files intact. Opening that parent in a new process now
@@ -160,9 +165,8 @@ Verified:
   quarantined directory to a free destination.
 
 Still open from this matrix: high-DPI repetition, token-bearing activation,
-explicit thumbnail loading/failure presentation, private-bus automation, the
-maintainer's PDF resize reproduction, and the remaining
-unusual-filename/theme/location checks.
+private-bus automation, the maintainer's PDF resize reproduction, and the
+remaining unusual-filename/theme/location checks.
 
 ## Deferred coordination
 

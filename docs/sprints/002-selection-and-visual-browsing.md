@@ -2,8 +2,7 @@
 
 **Status:** Implemented core — shared list/grid selection, virtualized icon
 view, native icons, and progressive still-image thumbnails are delivered.
-Explicit thumbnail failure presentation and manual visual/interaction checks
-remain hardening work.
+Manual visual/interaction checks remain hardening work.
 
 ## Goal
 
@@ -38,7 +37,7 @@ must arrive progressively without blocking navigation.
   visible-index layer for both views.
 - [x] A shared Show Hidden toggle for the Places footer and empty-space menu,
   with Unix dotfile filtering and selection pruning.
-- [ ] Explicit loading, failure, and unsupported-thumbnail states.
+- [x] Explicit loading, failure, and unsupported-thumbnail states.
 
 File move/copy drag-and-drop is a later sprint. This sprint must leave a clean
 gesture boundary for it.

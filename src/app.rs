@@ -129,6 +129,14 @@ enum SelectionMotion {
     PageDown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThumbnailPresentation {
+    Ready,
+    Loading,
+    Failed,
+    Unsupported,
+}
+
 #[derive(Clone, Debug)]
 struct FileDrag {
     paths: Arc<[PathBuf]>,
@@ -5382,48 +5390,94 @@ impl Marcel {
                             let browser_bounds = this.drag.browser_bounds.clone();
                             let directory_scroll = this.ui.directory_scroll.clone();
 
-                            let visual = match this.preview.thumbnails.get(&path) {
-                                Some(ThumbnailState::Ready(thumbnail)) => div()
+                            let thumbnail_state = this.preview.thumbnails.get(&path);
+                            let thumbnail_supported = !navigable && thumbnails::supports(&path);
+                            let thumbnail_presentation = thumbnail_presentation(
+                                thumbnail_state,
+                                this.preview.thumbnail_pending.contains(&path),
+                                thumbnail_supported,
+                            );
+                            let fallback_visual = |opacity: f32| {
+                                if let Some(icon_path) = entry.icon_path.clone() {
+                                    div()
+                                        .flex()
+                                        .flex_none()
+                                        .size(px(GRID_VISUAL_SIZE))
+                                        .items_center()
+                                        .justify_center()
+                                        .opacity(opacity)
+                                        .child(
+                                            img(icon_path)
+                                                .size(px(GRID_ICON_SIZE))
+                                                .object_fit(ObjectFit::Contain),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex()
+                                        .flex_none()
+                                        .size(px(GRID_VISUAL_SIZE))
+                                        .items_center()
+                                        .justify_center()
+                                        .opacity(opacity)
+                                        .text_3xl()
+                                        .text_color(colors.primary)
+                                        .child(entry.icon())
+                                        .into_any_element()
+                                }
+                            };
+                            let state_badge = |label: &'static str, color: Hsla| {
+                                div()
+                                    .absolute()
+                                    .right_1()
+                                    .bottom_1()
                                     .flex()
-                                    .flex_none()
-                                    .size(px(GRID_VISUAL_SIZE))
+                                    .size_5()
                                     .items_center()
                                     .justify_center()
-                                    .overflow_hidden()
-                                    .rounded(radius)
-                                    .child(
-                                        img(thumbnail.clone())
-                                            .size_full()
-                                            .object_fit(ObjectFit::Contain),
-                                    )
-                                    .into_any_element(),
-                                Some(ThumbnailState::Failed) | None => {
-                                    if let Some(icon_path) = entry.icon_path.clone() {
-                                        div()
-                                            .flex()
-                                            .flex_none()
-                                            .size(px(GRID_VISUAL_SIZE))
-                                            .items_center()
-                                            .justify_center()
-                                            .child(
-                                                img(icon_path)
-                                                    .size(px(GRID_ICON_SIZE))
-                                                    .object_fit(ObjectFit::Contain),
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .flex()
-                                            .flex_none()
-                                            .size(px(GRID_VISUAL_SIZE))
-                                            .items_center()
-                                            .justify_center()
-                                            .text_3xl()
-                                            .text_color(colors.primary)
-                                            .child(entry.icon())
-                                            .into_any_element()
-                                    }
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(colors.background)
+                                    .bg(color)
+                                    .text_color(colors.background)
+                                    .text_sm()
+                                    .child(label)
+                            };
+
+                            let visual = match thumbnail_presentation {
+                                ThumbnailPresentation::Ready => {
+                                    let Some(ThumbnailState::Ready(thumbnail)) = thumbnail_state
+                                    else {
+                                        unreachable!("ready thumbnail presentation needs a path")
+                                    };
+                                    div()
+                                        .flex()
+                                        .flex_none()
+                                        .size(px(GRID_VISUAL_SIZE))
+                                        .items_center()
+                                        .justify_center()
+                                        .overflow_hidden()
+                                        .rounded(radius)
+                                        .child(
+                                            img(thumbnail.clone())
+                                                .size_full()
+                                                .object_fit(ObjectFit::Contain),
+                                        )
+                                        .into_any_element()
                                 }
+                                ThumbnailPresentation::Loading => div()
+                                    .relative()
+                                    .size(px(GRID_VISUAL_SIZE))
+                                    .child(fallback_visual(0.5))
+                                    .child(state_badge("…", colors.muted_foreground))
+                                    .into_any_element(),
+                                ThumbnailPresentation::Failed => div()
+                                    .relative()
+                                    .size(px(GRID_VISUAL_SIZE))
+                                    .child(fallback_visual(0.72))
+                                    .child(state_badge("!", colors.danger))
+                                    .into_any_element(),
+                                ThumbnailPresentation::Unsupported => fallback_visual(1.0),
                             };
                             let name = if let Some(input) = rename_input {
                                 div()
@@ -7122,6 +7176,19 @@ fn prioritize_pdf_pages(visible: Range<usize>, pages: usize) -> Vec<usize> {
         .collect()
 }
 
+fn thumbnail_presentation(
+    state: Option<&ThumbnailState>,
+    pending: bool,
+    supported: bool,
+) -> ThumbnailPresentation {
+    match state {
+        Some(ThumbnailState::Ready(_)) => ThumbnailPresentation::Ready,
+        Some(ThumbnailState::Failed) => ThumbnailPresentation::Failed,
+        None if supported && pending => ThumbnailPresentation::Loading,
+        None => ThumbnailPresentation::Unsupported,
+    }
+}
+
 fn selection_target(
     current: Option<usize>,
     item_count: usize,
@@ -7636,6 +7703,33 @@ mod tests {
         assert_eq!(
             prioritize_thumbnail_indices(10..13, 8..15),
             vec![10, 11, 12, 8, 9, 13, 14]
+        );
+    }
+
+    #[test]
+    fn thumbnail_presentation_distinguishes_work_failure_and_fallback() {
+        let ready = ThumbnailState::Ready(PathBuf::from("/cache/thumbnail.png"));
+        let failed = ThumbnailState::Failed;
+
+        assert_eq!(
+            thumbnail_presentation(Some(&ready), false, true),
+            ThumbnailPresentation::Ready
+        );
+        assert_eq!(
+            thumbnail_presentation(None, true, true),
+            ThumbnailPresentation::Loading
+        );
+        assert_eq!(
+            thumbnail_presentation(Some(&failed), false, true),
+            ThumbnailPresentation::Failed
+        );
+        assert_eq!(
+            thumbnail_presentation(None, false, false),
+            ThumbnailPresentation::Unsupported
+        );
+        assert_eq!(
+            thumbnail_presentation(None, true, false),
+            ThumbnailPresentation::Unsupported
         );
     }
 
