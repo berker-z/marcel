@@ -10,7 +10,9 @@ use zbus::{self, zvariant::OwnedValue};
 
 pub const APPLICATION_ID: &str = "io.github.berker_z.Marcel";
 pub const APPLICATION_OBJECT_PATH: &str = "/io/github/berker_z/Marcel";
+pub const FILE_MANAGER_BUS_NAME: &str = "org.freedesktop.FileManager1";
 pub const FILE_MANAGER_OBJECT_PATH: &str = "/org/freedesktop/FileManager1";
+pub const CLAIM_FILE_MANAGER_ENV: &str = "MARCEL_CLAIM_FILE_MANAGER1";
 
 const MAX_REQUEST_URIS: usize = 64;
 const MAX_REQUEST_URI_BYTES: usize = 64 * 1024;
@@ -84,6 +86,17 @@ impl fmt::Display for DesktopRequestError {
 impl std::error::Error for DesktopRequestError {}
 
 pub async fn acquire_or_forward(initial_uris: Option<Vec<String>>) -> InstanceStartup {
+    acquire_or_forward_with_generic_name(
+        initial_uris,
+        std::env::var_os(CLAIM_FILE_MANAGER_ENV).is_some(),
+    )
+    .await
+}
+
+async fn acquire_or_forward_with_generic_name(
+    initial_uris: Option<Vec<String>>,
+    claim_file_manager_name: bool,
+) -> InstanceStartup {
     let (sender, receiver) = async_channel::bounded(REQUEST_QUEUE_CAPACITY);
     let builder = match zbus::connection::Builder::session() {
         Ok(builder) => builder,
@@ -108,6 +121,14 @@ pub async fn acquire_or_forward(initial_uris: Option<Vec<String>>) -> InstanceSt
             .allow_name_replacements(false)
             .replace_existing_names(false),
         Err(error) => return InstanceStartup::Unavailable(error.to_string()),
+    };
+    let builder = if claim_file_manager_name {
+        match builder.name(FILE_MANAGER_BUS_NAME) {
+            Ok(builder) => builder,
+            Err(error) => return InstanceStartup::Unavailable(error.to_string()),
+        }
+    } else {
+        builder
     };
 
     match builder.build().await {
@@ -375,6 +396,7 @@ mod tests {
     use tempfile::tempdir;
 
     const PRIVATE_BUS_CHILD: &str = "MARCEL_PRIVATE_BUS_TEST_CHILD";
+    const PRIVATE_BUS_CONFIG: &str = "MARCEL_TEST_DBUS_SESSION_CONFIG";
 
     fn uri(path: &Path) -> String {
         Url::from_file_path(path).unwrap().into()
@@ -485,7 +507,11 @@ mod tests {
             return;
         }
 
-        let status = Command::new("dbus-run-session")
+        let mut command = Command::new("dbus-run-session");
+        if let Some(config) = std::env::var_os(PRIVATE_BUS_CONFIG) {
+            command.arg("--config-file").arg(config);
+        }
+        let status = command
             .arg("--")
             .arg(std::env::current_exe().expect("test executable must have a path"))
             .arg("--exact")
@@ -599,7 +625,7 @@ mod tests {
             let mut last_error = None;
             let mut replacement = None;
             for _ in 0..80 {
-                match acquire_or_forward(None).await {
+                match acquire_or_forward_with_generic_name(None, true).await {
                     InstanceStartup::Primary(runtime) => {
                         replacement = Some(runtime);
                         break;
@@ -615,6 +641,14 @@ mod tests {
             assert!(
                 replacement.requests().is_empty(),
                 "replacement primary must start with an empty queue; last error: {last_error:?}"
+            );
+            assert!(
+                bus.list_names()
+                    .await
+                    .expect("bus names must remain readable")
+                    .iter()
+                    .any(|name| name.as_str() == FILE_MANAGER_BUS_NAME),
+                "the opt-in primary must own the generic file-manager name"
             );
         });
     }

@@ -7,6 +7,7 @@
   makeWrapper,
   pkg-config,
   cmake,
+  dbus,
   alsa-lib,
   expat,
   fontconfig,
@@ -81,11 +82,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
     cmake
   ];
 
+  nativeCheckInputs = [ dbus ];
+
   buildInputs = runtimeLibraries;
 
   preCheck = ''
     export HOME="$TMPDIR"
     export XDG_DATA_HOME="$TMPDIR/.local/share"
+    export MARCEL_TEST_DBUS_SESSION_CONFIG=${dbus}/share/dbus-1/session.conf
     mkdir -p "$XDG_DATA_HOME/Trash/files" "$XDG_DATA_HOME/Trash/info"
   '';
 
