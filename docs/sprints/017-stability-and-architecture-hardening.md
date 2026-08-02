@@ -150,6 +150,9 @@ Verified:
   writes and then confirmed successfully. The run exposed missing dialog
   footers after the gpui-component API migration; every affected dialog now
   has explicit visible action buttons.
+- Custom palettes now update gpui-component's resolved theme tokens as well as
+  its legacy color table, so dialogs, switches, and other token-based controls
+  inherit Marcel's active palette instead of retaining default black surfaces.
 - A permission-induced partial permanent deletion retained its child in the
   reported quarantine. Killing Marcel immediately after quarantine publication
   left all 20,000 test files intact. Opening that parent in a new process now

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use gpui::{App, Hsla, rgb};
-use gpui_component::{Colorize, Theme, ThemeColor, ThemeMode, scroll::ScrollbarShow};
+use gpui_component::{Colorize, Theme, ThemeColor, ThemeMode, ThemeTokens, scroll::ScrollbarShow};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -131,6 +131,7 @@ pub fn apply(palette: Palette, cx: &mut App) {
     let theme = Theme::global_mut(cx);
     if let Some(colors) = colors_for(palette) {
         theme.colors = colors;
+        theme.tokens = ThemeTokens::from(colors);
     }
     theme.scrollbar_show = ScrollbarShow::Always;
     theme.font_family = typography.0;
@@ -565,5 +566,16 @@ mod tests {
                 assert_ne!(colors.list_active, colors.popover, "{}", palette.label());
             }
         }
+    }
+
+    #[test]
+    fn custom_palette_tokens_match_the_declared_component_colors() {
+        let colors = colors_for(Palette::Nord).unwrap();
+        let tokens = ThemeTokens::from(colors);
+
+        assert_eq!(tokens.background.color, colors.background);
+        assert_eq!(tokens.primary.color, colors.primary);
+        assert_eq!(tokens.switch.color, colors.switch);
+        assert_eq!(tokens.switch_thumb.color, colors.switch_thumb);
     }
 }
