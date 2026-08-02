@@ -56,8 +56,8 @@ Sprint status uses four consistent meanings:
   rename, filtering, hidden entries, watcher replacement, rapid navigation,
   and large-directory responsiveness pass.
 - Complete Sprint 1 preview and navigation acceptance runs.
-- Ask Berker to demonstrate the known PDF preview resize problem and describe
-  the expected behavior before choosing a fix.
+- Keep the working but visually imperfect PDF resize behavior parked until the
+  remaining hardening and feature queues are exhausted.
 - [x] Add interactive breadcrumb navigation and a `Ctrl+L` editable location
   mode for paths and local file URIs.
 - Finish Sprint 2 visual-browsing acceptance checks and thumbnail failure
@@ -95,8 +95,8 @@ This order favors evidence-driven hardening over novelty. Steps after the
 manual acceptance phase are intentionally parked, not current commitments.
 
 1. Accept [Sprint 17](sprints/017-stability-and-architecture-hardening.md) by
-   finishing its now-narrow high-DPI, token-bearing activation, thumbnail-state,
-   PDF-resize, and remaining interaction matrix.
+   finishing its now-narrow high-DPI, token-bearing activation, and remaining
+   interaction matrix.
 2. Fix any correctness, recovery, diagnostics, or ownership problems exposed
    by that matrix, with focused regression coverage.
 3. When release work resumes, complete
@@ -120,10 +120,10 @@ manual acceptance phase are intentionally parked, not current commitments.
 13. Add media playback and optional ebook previews after the file-manager and
    desktop-integration foundation is complete.
 
-The known PDF resize problem, interrupted permanent-delete quarantine
-recovery, large-directory benchmarks, thumbnail failure presentation, and
-manual sprint acceptance checks remain cross-cutting quality work rather than
-optional feature ideas.
+Interrupted permanent-delete quarantine recovery, large-directory benchmarks,
+thumbnail failure presentation, and manual sprint acceptance checks remain
+cross-cutting quality work rather than optional feature ideas. The working PDF
+resize quirk is explicitly deferred until higher-value work is exhausted.
 
 ## Desktop integration and distribution
 

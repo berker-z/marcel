@@ -369,9 +369,9 @@ Marcel is not ready to replace a mature system file manager for every workflow:
   still roadmap work; visual identity is declaratively configurable on Nix.
 - Sorting, grouping, zoom, and complete accessibility coverage remain roadmap
   work.
-- PDF resizing has a known behavior problem that still needs a reproducible
-  report and UX decision. Thumbnail failure/loading presentation and the full
-  large-directory/manual fixture matrix also need polish.
+- PDF resizing has a non-blocking visual quirk that is explicitly parked.
+  Thumbnail failure/loading presentation is complete; the remaining manual
+  fixture matrix still needs closure.
 
 ## Roadmap
 
@@ -380,8 +380,8 @@ hardening phase: new features and public-release work are parked while the
 remaining filesystem, desktop-integration, and recovery acceptance matrix is
 run.
 
-1. Finish Sprint 17's remaining high-DPI, token-bearing activation,
-   thumbnail-state, PDF-resize, and interaction acceptance passes.
+1. Finish Sprint 17's remaining high-DPI, token-bearing activation, and
+   interaction acceptance passes.
 2. Fix any correctness, recovery, diagnostics, or ownership defects those
    checks expose, with focused regression tests.
 3. Resume Sprint 16 only when public release work is wanted; it owns hosted CI,

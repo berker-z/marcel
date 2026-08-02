@@ -47,9 +47,8 @@ types.
 ## Remaining work
 
 - PDF fixture and rapid-page-change acceptance runs.
-- Ask Berker for the PDF preview resize bug reproduction and expected behavior;
-  a resize problem is known but intentionally left undescribed until they can
-  demonstrate it.
+- Keep the working but visually imperfect PDF resize behavior parked until the
+  remaining hardening and feature queues are exhausted.
 - Audio/video metadata plus an explicit contextual play action.
 - Large-directory, rapid-selection, corrupt-file, and complete preview-fixture
   acceptance runs.

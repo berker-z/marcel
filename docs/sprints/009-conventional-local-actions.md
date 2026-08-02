@@ -91,5 +91,5 @@ Linux `RENAME_NOREPLACE`; an occupied destination is always refused.
 ## UI-fix handoff
 
 After these four conventional actions, stop adding filesystem features and run
-a dedicated UI-fix pass. Begin with the recorded PDF resize problem, then
-triage new visual and interaction reports from alpha testing.
+a dedicated UI-fix pass. Triage actionable visual and interaction reports from
+alpha testing; the non-blocking PDF resize quirk remains explicitly parked.

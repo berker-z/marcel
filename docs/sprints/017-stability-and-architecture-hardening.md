@@ -109,8 +109,8 @@ and does not add features, distribution formats, or release automation.
   activation, and primary-process exit recovery.
 - [ ] Manually verify cold service activation, the generic-service opt-in, and
   ordinary-package non-activation of the generic name.
-- [ ] Reproduce the known PDF resize problem with the maintainer and turn the
-  confirmed behavior into a focused fix and regression check.
+- [x] Defer the non-blocking PDF resize rendering quirk until the remaining
+  hardening and feature queues are exhausted; it is not a Sprint 17 blocker.
 - [x] Verify explicit thumbnail loading/failure/unsupported presentation and
   close any remaining state or accessibility gap.
 - [ ] Run the remaining rename, location-bar, theme, unusual-filename,
@@ -171,12 +171,14 @@ Verified:
   quarantined directory to a free destination.
 
 Still open from this matrix: high-DPI repetition, token-bearing and cold
-activation, generic-service packaging acceptance, the maintainer's PDF resize
-reproduction, and the remaining unusual-filename/theme/location checks.
+activation, generic-service packaging acceptance, and the remaining
+unusual-filename/theme/location checks.
 
 ## Deferred coordination
 
 - X11 outbound source support stays deferred because upstream GPUI does not
   currently provide it.
+- The working but visually imperfect PDF resize behavior is parked indefinitely
+  and should be revisited only after higher-value work is exhausted.
 - Keep mandatory hosted CI, release metadata, artwork, and public packaging in
   deferred Sprint 16.
