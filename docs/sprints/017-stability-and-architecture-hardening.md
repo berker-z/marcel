@@ -104,9 +104,11 @@ and does not add features, distribution formats, or release automation.
   entries.
 - [x] Test process interruption during permanent deletion and implement startup
   discovery/recovery guidance for surviving `.marcel-delete-*` quarantines.
-- [ ] Add private-session-bus integration coverage for name ownership,
-  forwarding, typed errors, cold/warm activation, and primary-process exit;
-  manually verify generic-service opt-in and ordinary-package non-ownership.
+- [x] Add private-session-bus integration coverage for branded name ownership,
+  ordinary-process generic-name non-ownership, forwarding, typed errors, warm
+  activation, and primary-process exit recovery.
+- [ ] Manually verify cold service activation, the generic-service opt-in, and
+  ordinary-package non-activation of the generic name.
 - [ ] Reproduce the known PDF resize problem with the maintainer and turn the
   confirmed behavior into a focused fix and regression check.
 - [x] Verify explicit thumbnail loading/failure/unsupported presentation and
@@ -158,15 +160,19 @@ Verified:
   MIME icon. State selection has direct regression coverage; the graphical run
   confirmed ready, failed, and unsupported rendering against isolated cache
   and corrupt-image fixtures.
+- A nested `dbus-run-session` regression test now proves branded name
+  ownership, generic-name non-ownership, warm activation/forwarding,
+  `ShowItems`, typed `InvalidArgs`, and name reacquisition after the primary
+  runtime exits without touching the user's session bus.
 - A permission-induced partial permanent deletion retained its child in the
   reported quarantine. Killing Marcel immediately after quarantine publication
   left all 20,000 test files intact. Opening that parent in a new process now
   presents recovery guidance, and the fixture was recoverable by moving the
   quarantined directory to a free destination.
 
-Still open from this matrix: high-DPI repetition, token-bearing activation,
-private-bus automation, the maintainer's PDF resize reproduction, and the
-remaining unusual-filename/theme/location checks.
+Still open from this matrix: high-DPI repetition, token-bearing and cold
+activation, generic-service packaging acceptance, the maintainer's PDF resize
+reproduction, and the remaining unusual-filename/theme/location checks.
 
 ## Deferred coordination
 

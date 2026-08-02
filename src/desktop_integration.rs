@@ -371,7 +371,10 @@ fn group_revealed_items(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>, De
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{process::Command, time::Duration};
     use tempfile::tempdir;
+
+    const PRIVATE_BUS_CHILD: &str = "MARCEL_PRIVATE_BUS_TEST_CHILD";
 
     fn uri(path: &Path) -> String {
         Url::from_file_path(path).unwrap().into()
@@ -474,5 +477,161 @@ mod tests {
             format!("/{}", APPLICATION_ID.replace('.', "/")),
             APPLICATION_OBJECT_PATH
         );
+    }
+
+    #[test]
+    fn private_session_bus_integration() {
+        if std::env::var_os(PRIVATE_BUS_CHILD).is_some() {
+            return;
+        }
+
+        let status = Command::new("dbus-run-session")
+            .arg("--")
+            .arg(std::env::current_exe().expect("test executable must have a path"))
+            .arg("--exact")
+            .arg("desktop_integration::tests::private_session_bus_child")
+            .arg("--nocapture")
+            .env(PRIVATE_BUS_CHILD, "1")
+            .status()
+            .expect("dbus-run-session must be available in Marcel's development environment");
+
+        assert!(status.success(), "private session-bus child failed");
+    }
+
+    #[test]
+    fn private_session_bus_child() {
+        if std::env::var_os(PRIVATE_BUS_CHILD).is_none() {
+            return;
+        }
+
+        smol::block_on(async {
+            let primary = match acquire_or_forward(None).await {
+                InstanceStartup::Primary(runtime) => runtime,
+                InstanceStartup::Forwarded => panic!("fresh private bus unexpectedly had an owner"),
+                InstanceStartup::Unavailable(error) => {
+                    panic!("failed to own the application name: {error}")
+                }
+            };
+            let requests = primary.requests();
+            let client = zbus::Connection::session()
+                .await
+                .expect("client must connect to the private bus");
+            let bus = zbus::fdo::DBusProxy::new(&client)
+                .await
+                .expect("bus proxy must initialize");
+            let owned_names = bus.list_names().await.expect("bus names must be readable");
+            assert!(
+                owned_names
+                    .iter()
+                    .any(|name| name.as_str() == APPLICATION_ID),
+                "primary must own Marcel's application name"
+            );
+            assert!(
+                owned_names
+                    .iter()
+                    .all(|name| name.as_str() != "org.freedesktop.FileManager1"),
+                "the ordinary process must not claim the generic file-manager name"
+            );
+
+            let temp = tempdir().expect("fixture directory must be created");
+            let folder = temp.path().join("folder");
+            let file = folder.join("file.txt");
+            fs::create_dir(&folder).expect("fixture folder must be created");
+            fs::write(&file, b"hello").expect("fixture file must be created");
+
+            assert!(matches!(
+                acquire_or_forward(Some(vec![uri(&file)])).await,
+                InstanceStartup::Forwarded
+            ));
+            assert_eq!(
+                receive_request(&requests).await,
+                DesktopRequest::Open(vec![RevealedLocation {
+                    directory: folder.canonicalize().unwrap(),
+                    items: vec![file.canonicalize().unwrap()],
+                }])
+            );
+
+            let application = zbus::Proxy::new(
+                &client,
+                APPLICATION_ID,
+                APPLICATION_OBJECT_PATH,
+                "org.freedesktop.Application",
+            )
+            .await
+            .expect("application proxy must initialize");
+            application
+                .call::<_, _, ()>("Activate", &(HashMap::<String, OwnedValue>::new(),))
+                .await
+                .expect("warm activation must succeed");
+            assert_eq!(receive_request(&requests).await, DesktopRequest::Activate);
+
+            let file_manager = zbus::Proxy::new(
+                &client,
+                APPLICATION_ID,
+                FILE_MANAGER_OBJECT_PATH,
+                "org.freedesktop.FileManager1",
+            )
+            .await
+            .expect("file-manager proxy must initialize");
+            let invalid: zbus::Result<()> = file_manager
+                .call("ShowFolders", &(vec![uri(&file)], String::new()))
+                .await;
+            match invalid.expect_err("a regular file is not a ShowFolders target") {
+                zbus::Error::MethodError(name, _, _) => {
+                    assert_eq!(name.as_str(), "org.freedesktop.DBus.Error.InvalidArgs")
+                }
+                error => panic!("expected a typed InvalidArgs reply, got {error}"),
+            }
+
+            file_manager
+                .call::<_, _, ()>("ShowItems", &(vec![uri(&file)], String::new()))
+                .await
+                .expect("ShowItems must accept a local file");
+            assert_eq!(
+                receive_request(&requests).await,
+                DesktopRequest::ShowItems(vec![RevealedLocation {
+                    directory: folder.canonicalize().unwrap(),
+                    items: vec![file.canonicalize().unwrap()],
+                }])
+            );
+
+            drop(primary);
+            let mut last_error = None;
+            let mut replacement = None;
+            for _ in 0..80 {
+                match acquire_or_forward(None).await {
+                    InstanceStartup::Primary(runtime) => {
+                        replacement = Some(runtime);
+                        break;
+                    }
+                    InstanceStartup::Forwarded => {}
+                    InstanceStartup::Unavailable(error) => last_error = Some(error),
+                }
+                smol::Timer::after(Duration::from_millis(25)).await;
+            }
+            let replacement = replacement.unwrap_or_else(|| {
+                panic!("application name was not released after primary exit: {last_error:?}")
+            });
+            assert!(
+                replacement.requests().is_empty(),
+                "replacement primary must start with an empty queue; last error: {last_error:?}"
+            );
+        });
+    }
+
+    async fn receive_request(requests: &Receiver<DesktopRequest>) -> DesktopRequest {
+        smol::future::race(
+            async {
+                requests
+                    .recv()
+                    .await
+                    .expect("request channel must stay open")
+            },
+            async {
+                smol::Timer::after(Duration::from_secs(3)).await;
+                panic!("timed out waiting for a desktop request")
+            },
+        )
+        .await
     }
 }

@@ -110,7 +110,7 @@ Desktop clipboard exchange remains a later, separate slice.
 
 - [x] Add unit tests for request validation, URI limits, type checks, grouping,
   and application-ID/object-path derivation.
-- [ ] Add integration tests against a private session bus for name ownership,
+- [x] Add integration tests against a private session bus for name ownership,
   activation, forwarding, typed errors, and primary-process exit recovery.
 - [x] Confirm a second `marcel PATH` forwards to the existing process and
   reveals the requested target.
@@ -118,7 +118,7 @@ Desktop clipboard exchange remains a later, separate slice.
   warm process.
 - [x] Confirm `ShowFolders` rejects regular files, remote URIs, and malformed
   batches without opening or executing anything.
-- [ ] Confirm `ShowItems` reveals files requested by a browser-style “Show in
+- [x] Confirm `ShowItems` reveals files requested by a browser-style “Show in
   folder” call.
 - [ ] Confirm `ShowItemProperties` and the in-app Properties command share one
   read-only implementation.
