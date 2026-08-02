@@ -39,10 +39,10 @@ Sprint status uses four consistent meanings:
 - New File, Properties, Duplicate, Move To, media playback, remote locations,
   X11 outbound drag, and other feature work are parked until this hardening
   phase is accepted.
-- Finish the remaining read-only mounted-volume and list-view repetitions from
-  the Trash/restore matrix in [`Sprint 7`](sprints/007-trash-and-restore.md).
-  Home and mounted Trash, identity-validating Undo/Redo and Restore, occupied
-  restore refusal, and external freedesktop Trash interoperability pass.
+- Finish the remaining list-view repetition from the Trash/restore matrix in
+  [`Sprint 7`](sprints/007-trash-and-restore.md). Home and mounted Trash,
+  read-only failure, identity-validating Undo/Redo and Restore, occupied restore
+  refusal, and external freedesktop Trash interoperability pass.
 - Finish the remaining list-view/item-menu repetition from
   [`Sprint 8`](sprints/008-permanent-deletion.md). Confirmation cancellation,
   confirmed deletion, Empty Trash, partial failure, process interruption, and
@@ -95,8 +95,8 @@ This order favors evidence-driven hardening over novelty. Steps after the
 manual acceptance phase are intentionally parked, not current commitments.
 
 1. Accept [Sprint 17](sprints/017-stability-and-architecture-hardening.md) by
-   finishing its now-narrow high-DPI, read-only mount, token-bearing activation,
-   thumbnail-state, PDF-resize, and remaining interaction matrix.
+   finishing its now-narrow high-DPI, token-bearing activation, thumbnail-state,
+   PDF-resize, and remaining interaction matrix.
 2. Fix any correctness, recovery, diagnostics, or ownership problems exposed
    by that matrix, with focused regression coverage.
 3. When release work resumes, complete

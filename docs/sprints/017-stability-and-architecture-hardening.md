@@ -98,7 +98,7 @@ and does not add features, distribution formats, or release automation.
 - [ ] Run the consolidated watcher, rapid-navigation, large-directory,
   selection, thumbnail, corrupt-preview, and high-DPI checks retained by
   Sprints 1, 2, 4, and 5.
-- [ ] Run the consolidated Trash/restore and permanent-delete matrix, including
+- [x] Run the consolidated Trash/restore and permanent-delete matrix, including
   mounted volumes, read-only failures, occupied children, confirmation
   cancellation, partial results, and interoperability with external Trash
   entries.
@@ -156,10 +156,10 @@ Verified:
   presents recovery guidance, and the fixture was recoverable by moving the
   quarantined directory to a free destination.
 
-Still open from this matrix: the read-only mounted-volume failure path,
-high-DPI repetition, token-bearing activation, explicit thumbnail
-loading/failure presentation, private-bus automation, the maintainer's PDF
-resize reproduction, and the remaining unusual-filename/theme/location checks.
+Still open from this matrix: high-DPI repetition, token-bearing activation,
+explicit thumbnail loading/failure presentation, private-bus automation, the
+maintainer's PDF resize reproduction, and the remaining
+unusual-filename/theme/location checks.
 
 ## Deferred coordination
 
