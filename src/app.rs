@@ -19,7 +19,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Root, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
-    dialog::DialogButtonProps,
+    dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter},
     h_flex,
     input::{
         Input, InputEvent, InputState, Position, SelectAll as InputSelectAll,
@@ -788,6 +788,18 @@ impl Marcel {
                             }
                             DirectoryUpdate::Done => {
                                 this.directory.finish_load();
+                                if let Some(quarantine_warning) =
+                                    quarantine_recovery_warning(&this.directory.entries)
+                                {
+                                    this.directory.warning = Some(
+                                        this.directory
+                                            .warning
+                                            .take()
+                                            .map_or(quarantine_warning.clone(), |warning| {
+                                                format!("{warning}. {quarantine_warning}")
+                                            }),
+                                    );
+                                }
                                 this.start_directory_watcher(ticket, path.clone(), cx);
                             }
                             DirectoryUpdate::Error(error) => {
@@ -940,7 +952,8 @@ impl Marcel {
         if !self.sidebar.browsing_trash && path == self.directory.current_dir {
             if !reveal.is_empty() {
                 self.set_filter_query(String::new(), cx);
-                self.directory.pending_reveal = reveal;
+                self.directory.replace_pending_reveal(reveal);
+                self.clear_preview();
                 self.select_pending_loaded_entries(cx);
                 cx.notify();
             }
@@ -1499,6 +1512,12 @@ impl Marcel {
                         .ok_text("Create")
                         .show_cancel(true),
                 )
+                .footer(dialog_footer(
+                    "create",
+                    "Create",
+                    ButtonVariant::Primary,
+                    true,
+                ))
                 .overlay_closable(false)
                 .close_button(false)
                 .on_ok(move |_, window, cx| {
@@ -1599,6 +1618,12 @@ impl Marcel {
                         .ok_text("Compress")
                         .show_cancel(true),
                 )
+                .footer(dialog_footer(
+                    "compress",
+                    "Compress",
+                    ButtonVariant::Primary,
+                    true,
+                ))
                 .overlay_closable(false)
                 .close_button(false)
                 .on_ok(move |_, window, cx| {
@@ -2026,6 +2051,12 @@ impl Marcel {
                         .ok_variant(ButtonVariant::Danger)
                         .show_cancel(true),
                 )
+                .footer(dialog_footer(
+                    "delete-permanently",
+                    "Delete Permanently",
+                    ButtonVariant::Danger,
+                    true,
+                ))
                 .overlay_closable(false)
                 .close_button(false)
                 .on_ok(move |_, window, cx| {
@@ -2084,6 +2115,12 @@ impl Marcel {
                         .ok_variant(ButtonVariant::Danger)
                         .show_cancel(true),
                 )
+                .footer(dialog_footer(
+                    "empty-trash",
+                    "Empty Trash",
+                    ButtonVariant::Danger,
+                    true,
+                ))
                 .overlay_closable(false)
                 .close_button(false)
                 .on_ok(move |_, window, cx| {
@@ -2720,6 +2757,17 @@ impl Marcel {
         self.drag.marquee_scroll_task.take();
         self.drag.entry_content_bounds.borrow_mut().clear();
         self.ui.directory_scroll = UniformListScrollHandle::new();
+        if let Some(scroll_row) = selected_scroll_row(
+            self.directory.selection.primary(),
+            &self.directory.entries,
+            &self.directory.visible_entries,
+            mode,
+            self.grid_columns(),
+        ) {
+            self.ui
+                .directory_scroll
+                .scroll_to_item(scroll_row, ScrollStrategy::Center);
+        }
         cx.notify();
     }
 
@@ -2962,6 +3010,7 @@ impl Marcel {
                         ),
                 )
                 .button_props(DialogButtonProps::default().ok_text("Done"))
+                .footer(dialog_footer("done", "Done", ButtonVariant::Primary, false))
                 .overlay_closable(false)
                 .close_button(false)
         });
@@ -7124,6 +7173,84 @@ fn selection_target(
     })
 }
 
+fn selected_scroll_row(
+    primary: Option<&PathBuf>,
+    entries: &[FileEntry],
+    visible_entries: &[usize],
+    view_mode: ViewMode,
+    columns: usize,
+) -> Option<usize> {
+    let primary = primary?;
+    let index = visible_entries.iter().position(|entry_index| {
+        entries
+            .get(*entry_index)
+            .is_some_and(|entry| &entry.path == primary)
+    })?;
+    Some(match view_mode {
+        ViewMode::List => index,
+        ViewMode::Grid => index / columns.max(1),
+    })
+}
+
+fn dialog_footer(
+    action_id: &'static str,
+    action_label: &'static str,
+    action_variant: ButtonVariant,
+    show_cancel: bool,
+) -> DialogFooter {
+    DialogFooter::new()
+        .when(show_cancel, |footer| {
+            footer.child(DialogClose::new().child(Button::new("cancel").label("Cancel").outline()))
+        })
+        .child(
+            DialogAction::new().child(
+                Button::new(action_id)
+                    .label(action_label)
+                    .with_variant(action_variant),
+            ),
+        )
+}
+
+fn quarantine_recovery_warning(entries: &[FileEntry]) -> Option<String> {
+    let current_process_prefix = format!(".marcel-delete-{}-", std::process::id());
+    let mut remnants = entries
+        .iter()
+        .filter(|entry| {
+            is_delete_quarantine_name(&entry.name)
+                && !entry.name.starts_with(&current_process_prefix)
+        })
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    remnants.sort();
+    let first = remnants.first()?;
+    Some(if remnants.len() == 1 {
+        format!(
+            "An interrupted permanent deletion left data quarantined at “{}”. Inspect this hidden path and move anything you want to recover to a free destination",
+            first.display()
+        )
+    } else {
+        format!(
+            "{} interrupted permanent deletions left quarantined data here (first: “{}”). Inspect these hidden paths and move anything you want to recover to free destinations",
+            remnants.len(),
+            first.display()
+        )
+    })
+}
+
+fn is_delete_quarantine_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".marcel-delete-") else {
+        return false;
+    };
+    let mut fields = rest.splitn(3, '-');
+    fields
+        .next()
+        .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+        && fields.next().is_some_and(|sequence| {
+            !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && fields.next().is_some_and(|original| !original.is_empty())
+}
+
 fn marquee_bounds(a: Point<Pixels>, b: Point<Pixels>) -> Bounds<Pixels> {
     Bounds::from_corners(
         Point::new(a.x.min(b.x), a.y.min(b.y)),
@@ -7171,6 +7298,21 @@ mod tests {
     use super::*;
     use crate::directory_session::{fuzzy_score, is_hidden_name};
 
+    fn test_file_entry(path: &str) -> FileEntry {
+        let path = PathBuf::from(path);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        FileEntry {
+            path,
+            name: name.clone(),
+            name_os: name.clone().into(),
+            folded_name: name.to_lowercase().chars().collect(),
+            kind: EntryKind::File,
+            navigable: false,
+            size: Some(0),
+            icon_path: None,
+        }
+    }
+
     #[test]
     fn code_fence_grows_past_fences_in_content() {
         let rendered = code_fence("contains ``` here", "text");
@@ -7182,6 +7324,47 @@ mod tests {
     fn start_path_falls_back_to_parent_for_files() {
         let path = PathBuf::from("/tmp/file.txt");
         assert_eq!(normalize_start_directory(path), PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn view_switch_scrolls_the_primary_selection_into_view() {
+        let entries = (0..12)
+            .map(|index| test_file_entry(&format!("/folder/{index}.txt")))
+            .collect::<Vec<_>>();
+        let visible = (0..entries.len()).collect::<Vec<_>>();
+        let primary = Some(&entries[11].path);
+
+        assert_eq!(
+            selected_scroll_row(primary, &entries, &visible, ViewMode::List, 4),
+            Some(11)
+        );
+        assert_eq!(
+            selected_scroll_row(primary, &entries, &visible, ViewMode::Grid, 4),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn completed_load_warns_about_an_interrupted_delete_quarantine() {
+        let old_process = std::process::id().saturating_add(1);
+        let remnant = test_file_entry(&format!("/folder/.marcel-delete-{old_process}-4-thesis"));
+        let warning = quarantine_recovery_warning(&[remnant]).unwrap();
+
+        assert!(warning.contains("interrupted permanent deletion"));
+        assert!(warning.contains(".marcel-delete-"));
+        assert!(warning.contains("move anything you want to recover"));
+    }
+
+    #[test]
+    fn active_delete_quarantines_do_not_trigger_recovery_guidance() {
+        let active = test_file_entry(&format!(
+            "/folder/.marcel-delete-{}-0-active",
+            std::process::id()
+        ));
+        let ordinary = test_file_entry("/folder/.marcel-delete-not-a-quarantine");
+
+        assert!(quarantine_recovery_warning(&[active]).is_none());
+        assert!(quarantine_recovery_warning(&[ordinary]).is_none());
     }
 
     #[test]

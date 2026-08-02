@@ -196,6 +196,11 @@ impl DirectorySession {
         revealed
     }
 
+    pub fn replace_pending_reveal(&mut self, paths: Vec<PathBuf>) {
+        self.selection.clear();
+        self.pending_reveal = paths;
+    }
+
     pub fn visible_entry(&self, index: usize) -> Option<&FileEntry> {
         self.visible_entries
             .get(index)
@@ -532,6 +537,30 @@ mod tests {
         assert!(session.pending_reveal.is_empty());
         assert_eq!(session.selection.selected().len(), 2);
         assert!(session.selection.primary().is_some());
+    }
+
+    #[test]
+    fn pending_reveal_can_replace_an_existing_selection_before_streaming() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.entries = vec![
+            entry("old.txt", false, Some(1)),
+            entry("first.txt", false, Some(1)),
+            entry("second.txt", false, Some(1)),
+        ];
+        sort_entries(&mut session.entries);
+        session.rebuild_visible_entries();
+        session
+            .selection
+            .select_only(PathBuf::from("/folder/old.txt"));
+
+        session.replace_pending_reveal(vec![
+            PathBuf::from("/folder/first.txt"),
+            PathBuf::from("/folder/second.txt"),
+        ]);
+        session.take_pending_visible_entries();
+
+        assert_eq!(session.selection.selected().len(), 2);
+        assert!(!session.selection.is_selected(Path::new("/folder/old.txt")));
     }
 
     #[test]
