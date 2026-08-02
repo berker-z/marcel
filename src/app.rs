@@ -6854,7 +6854,7 @@ fn location_breadcrumbs(path: &Path) -> Vec<LocationBreadcrumb> {
     for component in path.components() {
         current.push(component.as_os_str());
         let label = match component {
-            std::path::Component::RootDir => "/".to_string(),
+            std::path::Component::RootDir => "root".to_string(),
             std::path::Component::Prefix(prefix) => {
                 prefix.as_os_str().to_string_lossy().into_owned()
             }
@@ -7440,7 +7440,7 @@ mod tests {
             location_breadcrumbs(Path::new("/home/test/Projects/marcel")),
             vec![
                 LocationBreadcrumb {
-                    label: "/".to_string(),
+                    label: "root".to_string(),
                     path: Some(PathBuf::from("/")),
                 },
                 LocationBreadcrumb {
@@ -7473,7 +7473,7 @@ mod tests {
             compact,
             vec![
                 LocationBreadcrumb {
-                    label: "/".to_string(),
+                    label: "root".to_string(),
                     path: Some(PathBuf::from("/")),
                 },
                 LocationBreadcrumb {
