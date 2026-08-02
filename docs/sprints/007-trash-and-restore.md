@@ -80,9 +80,9 @@ copied.
   metadata cleanup.
 - [ ] Manually verify multi-selection Trash, Undo, Redo, explicit Restore, and
   collision refusal in both list and icon views.
-- [ ] Manually verify interoperability with Trash entries produced by another
+- [x] Manually verify interoperability with Trash entries produced by another
   freedesktop file manager.
-- [ ] Manually verify a mounted-volume Trash on a disposable test volume.
+- [x] Manually verify a mounted-volume Trash on a disposable test volume.
 
 ## Follow-up
 

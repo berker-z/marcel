@@ -39,20 +39,22 @@ Sprint status uses four consistent meanings:
 - New File, Properties, Duplicate, Move To, media playback, remote locations,
   X11 outbound drag, and other feature work are parked until this hardening
   phase is accepted.
-- Complete the manual Trash/restore checks in
-  [`Sprint 7`](sprints/007-trash-and-restore.md). The implementation uses the
-  native freedesktop Trash, identity-validating undo/redo, and an aggregated
-  bottom-most Places entry.
-- Complete the permanent-delete and Empty Trash manual checks in
-  [`Sprint 8`](sprints/008-permanent-deletion.md).
+- Finish the remaining read-only mounted-volume and list-view repetitions from
+  the Trash/restore matrix in [`Sprint 7`](sprints/007-trash-and-restore.md).
+  Home and mounted Trash, identity-validating Undo/Redo and Restore, occupied
+  restore refusal, and external freedesktop Trash interoperability pass.
+- Finish the remaining list-view/item-menu repetition from
+  [`Sprint 8`](sprints/008-permanent-deletion.md). Confirmation cancellation,
+  confirmed deletion, Empty Trash, partial failure, process interruption, and
+  startup quarantine guidance pass.
 - Retain New File and Properties in
   [`Sprint 9`](sprints/009-conventional-local-actions.md) as parked feature
   work; safe inline Rename and Open in Terminal are implemented.
-- Run Sprint 4's final manual 10,000-entry list/icon responsiveness check; the
-  operation-controller and directory-session extractions are complete.
-- Run Sprint 5's manual watcher acceptance checks. Incremental active-directory
-  watching is connected through the extracted session reducer, with native and
-  polling backends plus bounded rescan fallback.
+- The Sprint 4 large-directory check passes at 50,000 entries in list and grid
+  views, including viewport retention across view switches.
+- Finish only the unchecked watcher edge cases in Sprint 5. External create,
+  rename, filtering, hidden entries, watcher replacement, rapid navigation,
+  and large-directory responsiveness pass.
 - Complete Sprint 1 preview and navigation acceptance runs.
 - Ask Berker to demonstrate the known PDF preview resize problem and describe
   the expected behavior before choosing a fix.
@@ -93,9 +95,8 @@ This order favors evidence-driven hardening over novelty. Steps after the
 manual acceptance phase are intentionally parked, not current commitments.
 
 1. Accept [Sprint 17](sprints/017-stability-and-architecture-hardening.md) by
-   running its graphical multi-window checks and the consolidated outstanding
-   watcher, preview, large-directory, Trash, permanent-delete, mount, and
-   interrupted-operation matrix from earlier sprints.
+   finishing its now-narrow high-DPI, read-only mount, token-bearing activation,
+   thumbnail-state, PDF-resize, and remaining interaction matrix.
 2. Fix any correctness, recovery, diagnostics, or ownership problems exposed
    by that matrix, with focused regression coverage.
 3. When release work resumes, complete

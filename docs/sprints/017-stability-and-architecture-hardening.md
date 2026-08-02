@@ -102,7 +102,7 @@ and does not add features, distribution formats, or release automation.
   mounted volumes, read-only failures, occupied children, confirmation
   cancellation, partial results, and interoperability with external Trash
   entries.
-- [ ] Test process interruption during permanent deletion and implement startup
+- [x] Test process interruption during permanent deletion and implement startup
   discovery/recovery guidance for surviving `.marcel-delete-*` quarantines.
 - [ ] Add private-session-bus integration coverage for name ownership,
   forwarding, typed errors, cold/warm activation, and primary-process exit;
@@ -121,6 +121,45 @@ and does not add features, distribution formats, or release automation.
 The checklist above is the canonical remaining hardening queue. Open manual
 boxes in earlier sprint documents retain their detailed procedures and history;
 they do not make those implementation sprints active again.
+
+## 2026-08-01 graphical acceptance run
+
+This run used Hyprland 0.56.1 on Wayland at scale 1.0, a private session bus,
+isolated XDG data/config/cache roots, and disposable fixtures under `/tmp`.
+No user files or the user's real Trash were used.
+
+Verified:
+
+- A 50,000-entry directory remained responsive in list and grid views, near
+  both ends of the directory. Switching views now keeps the primary selection
+  visible instead of resetting the viewport to the beginning.
+- External create, rename, filtering, hidden-file toggling, active-directory
+  replacement, and rapid navigation reconciled without stale publication.
+  Valid, corrupt, and unsupported preview inputs rendered, failed explicitly,
+  or reported unsupported format without crashing.
+- Multi-window open, close, reopen, warm single-instance forwarding, typed
+  D-Bus errors, and grouped same-directory `ShowItems` were exercised on the
+  private bus. Grouped reveal now replaces a stale unrelated selection and
+  retains every requested item. A tokenless `Activate` request correctly did
+  not steal focus; a token-bearing launcher activation remains to be tested.
+- Home Trash multi-selection, Undo, Redo, explicit Restore, occupied restore
+  refusal, external `gio trash` interoperability, mounted-volume `.Trash-1000`
+  placement, and mounted restore all preserved their declared identities and
+  destinations.
+- Permanent-delete and Empty Trash confirmations were cancelled without
+  writes and then confirmed successfully. The run exposed missing dialog
+  footers after the gpui-component API migration; every affected dialog now
+  has explicit visible action buttons.
+- A permission-induced partial permanent deletion retained its child in the
+  reported quarantine. Killing Marcel immediately after quarantine publication
+  left all 20,000 test files intact. Opening that parent in a new process now
+  presents recovery guidance, and the fixture was recoverable by moving the
+  quarantined directory to a free destination.
+
+Still open from this matrix: the read-only mounted-volume failure path,
+high-DPI repetition, token-bearing activation, explicit thumbnail
+loading/failure presentation, private-bus automation, the maintainer's PDF
+resize reproduction, and the remaining unusual-filename/theme/location checks.
 
 ## Deferred coordination
 

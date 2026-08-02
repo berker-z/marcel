@@ -355,12 +355,12 @@ Marcel is not ready to replace a mature system file manager for every workflow:
   conflict decisions are parked; occupied destinations are safely refused.
 - New File, Duplicate, Move To, and Properties are not implemented yet.
 - Removable-volume navigation, mount management, and remote locations are not
-  implemented. Mounted-volume Trash behavior still needs its manual acceptance
-  pass.
+  implemented. Disposable mounted-volume Trash and restore pass; the read-only
+  mounted-volume failure path still needs its manual acceptance pass.
 - Trashed directories can be previewed but not navigated as virtual locations.
-- Startup discovery and recovery UI for interrupted `.marcel-delete-*`
-  quarantine remnants is not implemented. Partial failures report the remnant
-  path.
+- Loaded folders warn about interrupted `.marcel-delete-*` quarantine remnants
+  and give conservative recovery guidance. Partial failures also report the
+  exact remnant path; a one-click recovery UI is not implemented.
 - Recursive filename/content search is not implemented.
 - Audio/video metadata, explicit playback, and ebook previews are not
   implemented.
@@ -380,9 +380,8 @@ hardening phase: new features and public-release work are parked while the
 remaining filesystem, desktop-integration, and recovery acceptance matrix is
 run.
 
-1. Finish Sprint 17's graphical multi-window checks and the outstanding
-   watcher, preview, large-directory, mounted-Trash, permanent-delete, and
-   interrupted-operation acceptance passes.
+1. Finish Sprint 17's remaining high-DPI, read-only mount, token-bearing
+   activation, thumbnail-state, PDF-resize, and interaction acceptance passes.
 2. Fix any correctness, recovery, diagnostics, or ownership defects those
    checks expose, with focused regression tests.
 3. Resume Sprint 16 only when public release work is wanted; it owns hosted CI,

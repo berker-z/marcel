@@ -83,15 +83,16 @@ background-worker interface. No Yazi code was copied.
   selections, quarantine collisions, and paired Trash purge.
 - [ ] Manually verify `Shift+Delete`, both item-menu variants, and their
   confirmation wording in list and icon views.
-- [ ] Manually verify Empty Trash from the Trash empty-space menu.
-- [ ] Manually verify that cancelling the confirmation performs no writes.
-- [ ] Manually induce an occupied/read-only child and verify the partial-error
+- [x] Manually verify Empty Trash from the Trash empty-space menu.
+- [x] Manually verify that cancelling the confirmation performs no writes.
+- [x] Manually induce an occupied/read-only child and verify the partial-error
   message identifies a recoverable quarantine remnant.
 
 ## Follow-up
 
-- Add crash-startup discovery and a recovery UI for `.marcel-delete-*`
-  quarantine remnants.
+- Recovery guidance now appears when a loaded folder contains quarantine
+  remnants from a previous process. A richer inspect/restore action remains a
+  possible follow-up.
 - Consider a typed-confirmation preference for unusually broad deletions, but
   do not normalize confirmation fatigue by prompting more than the risk
   requires.
