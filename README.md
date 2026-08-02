@@ -213,9 +213,12 @@ environment.systemPackages = [
 ];
 ```
 
-The flake separately exposes `packages.<system>.file-manager1-service` for a
-downstream configuration that explicitly wants Marcel to own the generic
-`org.freedesktop.FileManager1` activation service.
+The flake separately exposes `packages.<system>.file-manager1-service` as a
+complete wrapped Marcel package for a downstream configuration that explicitly
+wants Marcel to own the generic `org.freedesktop.FileManager1` activation
+service. Install this variant instead of the ordinary `marcel` output; its
+wrapper and both activation files consistently request the branded and generic
+names.
 
 For Home Manager, make Marcel the default directory handler declaratively:
 

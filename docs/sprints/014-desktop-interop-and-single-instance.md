@@ -114,7 +114,7 @@ Desktop clipboard exchange remains a later, separate slice.
   activation, forwarding, typed errors, and primary-process exit recovery.
 - [x] Confirm a second `marcel PATH` forwards to the existing process and
   reveals the requested target.
-- [ ] Confirm application-specific `Activate` and `Open` work from a cold and
+- [x] Confirm application-specific `Activate` and `Open` work from a cold and
   warm process.
 - [x] Confirm `ShowFolders` rejects regular files, remote URIs, and malformed
   batches without opening or executing anything.
@@ -122,9 +122,9 @@ Desktop clipboard exchange remains a later, separate slice.
   folder” call.
 - [ ] Confirm `ShowItemProperties` and the in-app Properties command share one
   read-only implementation.
-- [ ] Confirm installing the ordinary package leaves the current generic file
+- [x] Confirm installing the ordinary package leaves the current generic file
   manager service and MIME defaults untouched.
-- [ ] Confirm the explicit generic-service opt-in routes
+- [x] Confirm the explicit generic-service opt-in routes
   `org.freedesktop.FileManager1` calls to Marcel.
 - [ ] Test both Wayland and X11 activation/focus behavior, including startup ID
   and activation-token handling where the compositor supports it.

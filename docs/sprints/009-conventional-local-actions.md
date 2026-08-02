@@ -79,8 +79,8 @@ Linux `RENAME_NOREPLACE`; an occupied destination is always refused.
   reporting instead of a full directory reload.
 - [ ] Manually verify Enter, focus-loss submission, and Escape cancellation in
   both list and icon views.
-- [ ] Manually verify names containing spaces, dots, and non-ASCII characters.
-- [ ] Manually verify watcher reconciliation and selection reveal after Rename,
+- [x] Manually verify names containing spaces, dots, and non-ASCII characters.
+- [x] Manually verify watcher reconciliation and selection reveal after Rename,
   Undo, and Redo.
 - [ ] Implement New File.
 - [x] Implement Open in Terminal through `xdg-terminal-exec`, `TERMINAL`, and

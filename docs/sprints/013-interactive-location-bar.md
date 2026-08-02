@@ -46,5 +46,5 @@ editable location mode without creating a second navigation implementation.
   targets, remote-URI refusal, and missing paths.
 - [x] Manually verify normal pointer interaction, slash visibility, and
   keyboard address editing.
-- [ ] Manually verify invalid-input presentation and narrow-window compaction.
-- [ ] Manually verify paths containing spaces and non-ASCII characters.
+- [x] Manually verify invalid-input presentation and narrow-window compaction.
+- [x] Manually verify paths containing spaces and non-ASCII characters.

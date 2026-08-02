@@ -414,9 +414,11 @@ usr/
     └── licenses/...
 ```
 
-The package may additionally expose the generic
-`org.freedesktop.FileManager1.service`, but installing the ordinary application
-must not take that generic name automatically.
+The package may additionally expose a complete wrapped variant with the generic
+`org.freedesktop.FileManager1.service`. That variant must route both branded and
+generic activation through its wrapper so every launch requests both names;
+installing the ordinary application must not take the generic name
+automatically.
 
 The AppImage, Debian, and RPM jobs should begin from this same staged contract.
 Nix and AUR build from source independently but install equivalent files.

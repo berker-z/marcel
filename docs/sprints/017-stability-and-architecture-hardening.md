@@ -91,13 +91,15 @@ and does not add features, distribution formats, or release automation.
   external-file-drag lifecycle and remove the vendored framework tree.
 - [x] Run automated large-directory, invalid-filename, watcher-error,
   malformed-PDF, and hostile-image checks.
-- [ ] Manually exercise multi-window close/reopen, activation, and grouped
+- [x] Manually exercise multi-window close/reopen, activation, and grouped
   `ShowItems` routing in a graphical session.
 - [x] Reconfirm bilateral Chrome/Marcel dragging on Wayland after migrating to
   GPUI's upstream external-drag lifecycle.
-- [ ] Run the consolidated watcher, rapid-navigation, large-directory,
-  selection, thumbnail, corrupt-preview, and high-DPI checks retained by
-  Sprints 1, 2, 4, and 5.
+- [x] Run the consolidated watcher, rapid-navigation, large-directory,
+  thumbnail, corrupt-preview, and high-DPI checks retained by Sprints 1, 2, 4,
+  and 5.
+- [ ] Finish the remaining pointer-selection and marquee checks retained by
+  Sprint 2.
 - [x] Run the consolidated Trash/restore and permanent-delete matrix, including
   mounted volumes, read-only failures, occupied children, confirmation
   cancellation, partial results, and interoperability with external Trash
@@ -107,13 +109,13 @@ and does not add features, distribution formats, or release automation.
 - [x] Add private-session-bus integration coverage for branded name ownership,
   ordinary-process generic-name non-ownership, forwarding, typed errors, warm
   activation, and primary-process exit recovery.
-- [ ] Manually verify cold service activation, the generic-service opt-in, and
+- [x] Manually verify cold service activation, the generic-service opt-in, and
   ordinary-package non-activation of the generic name.
 - [x] Defer the non-blocking PDF resize rendering quirk until the remaining
   hardening and feature queues are exhausted; it is not a Sprint 17 blocker.
 - [x] Verify explicit thumbnail loading/failure/unsupported presentation and
   close any remaining state or accessibility gap.
-- [ ] Run the remaining rename, location-bar, theme, unusual-filename,
+- [x] Run the remaining rename, location-bar, theme, unusual-filename,
   non-Latin fallback, and scale-factor interaction checks retained by earlier
   sprints.
 - [x] Pass `cargo fmt --check`,
@@ -170,9 +172,38 @@ Verified:
   presents recovery guidance, and the fixture was recoverable by moving the
   quarantined directory to a free destination.
 
-Still open from this matrix: high-DPI repetition, token-bearing and cold
-activation, generic-service packaging acceptance, and the remaining
-unusual-filename/theme/location checks.
+Still open from this matrix: token-bearing compositor activation and the
+remaining detailed pointer-selection/marquee checks.
+
+## 2026-08-02 isolated scale and activation run
+
+This run used a private D-Bus daemon and a headless Sway 1.12 Wayland output at
+physical 1600×1000, logical 800×500, and scale 2. Input and screenshots stayed
+inside the nested compositor and could not target the maintainer's live
+desktop.
+
+Verified:
+
+- The real ordinary flake output cold-activated through branded `Activate` and
+  `Open`, installed no generic activation file, and returned `ServiceUnknown`
+  for a generic FileManager1 request on a minimal bus.
+- The generic opt-in initially exposed a real ownership defect: its service
+  launched Marcel without requesting `org.freedesktop.FileManager1`. It is now
+  a complete wrapped package variant whose CLI, branded service, and generic
+  service all request both names. A cold `ShowFolders` call activated the
+  rebuilt output and the same process owned both names.
+- The Nix builder now supplies D-Bus as a check-only dependency and gives the
+  private-bus integration test an explicit hermetic session configuration.
+- Nord, Gruvbox Dark, and System Light rendered consistently at scale 2. Text,
+  bundled icons, thumbnails, switches, separators, and the thumbnail failure
+  badge remained sharp and correctly colored.
+- Invalid input retained the current directory and rendered a visible error;
+  paths with spaces navigated correctly; a non-Latin folder and filename
+  rendered and navigated correctly; narrow breadcrumbs compacted to
+  `root / … / tail`.
+- An invalid-UTF-8 source renamed to a valid name, and Undo/Redo restored and
+  reapplied its exact raw identity. A valid non-ASCII name renamed to another
+  Unicode name and remained selected.
 
 ## Deferred coordination
 

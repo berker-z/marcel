@@ -154,15 +154,15 @@ decoding must be cached and stay off the foreground executor.
 - [ ] Releasing outside the browser always ends the marquee.
 - [ ] Edge dragging scrolls and can select items that began off-screen.
 - [ ] Double-click activation still works and does not leave a marquee active.
-- [ ] Switching view mode retains selected and primary paths.
+- [x] Switching view mode retains selected and primary paths.
 - [ ] Keyboard navigation follows the documented interaction model, keeps the
   primary item visible, and does not steal keys while another control owns
   focus.
-- [ ] Opening a directory with 50,000 entries does not eagerly decode icons or
+- [x] Opening a directory with 50,000 entries does not eagerly decode icons or
   thumbnails for every entry.
-- [ ] Rapid navigation cannot publish stale thumbnails into the new directory.
+- [x] Rapid navigation cannot publish stale thumbnails into the new directory.
 - [ ] Missing themes and corrupt icons degrade to a visible fallback.
-- [ ] Theme icons and thumbnails remain sharp at scale factors greater than one.
+- [x] Theme icons and thumbnails remain sharp at scale factors greater than one.
 - [ ] Direct typing starts filtering regardless of whether browser, preview,
   Places, or toolbar focus was active.
 - [x] Filtering prunes hidden selections and Select All affects only visible
