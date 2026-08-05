@@ -9,7 +9,9 @@ use std::{
 
 use gpui::Task;
 
-use crate::file_ops::{OperationJournal, OperationRecord, TransferMode, TransferProgress};
+use crate::file_ops::{
+    CompletedTransfer, OperationJournal, OperationRecord, TransferMode, TransferProgress,
+};
 
 #[derive(Clone, Debug)]
 pub struct FileClipboard {
@@ -67,27 +69,24 @@ impl OperationController {
         self.clipboard = clipboard;
     }
 
+    /// Drop the sources that actually moved, matched by exact recorded path.
+    ///
+    /// Reconstructing this from file names conflates same-named sources as
+    /// soon as one transfer can span directories, silently dropping a failed
+    /// item from the clipboard and making it unretryable through Paste.
     pub fn retain_uncompleted_move(
         &mut self,
         clipboard: FileClipboard,
-        completed_destinations: &[PathBuf],
+        completed: &[CompletedTransfer],
     ) {
-        let completed_sources = clipboard
-            .paths
+        let completed_sources = completed
             .iter()
-            .filter(|source| {
-                source.file_name().is_some_and(|name| {
-                    completed_destinations
-                        .iter()
-                        .any(|path| path.file_name() == Some(name))
-                })
-            })
-            .cloned()
+            .map(|transfer| transfer.source.as_path())
             .collect::<HashSet<_>>();
         let remaining = clipboard
             .paths
             .into_iter()
-            .filter(|path| !completed_sources.contains(path))
+            .filter(|path| !completed_sources.contains(path.as_path()))
             .collect::<Vec<_>>();
         self.clipboard = (!remaining.is_empty()).then_some(FileClipboard {
             mode: clipboard.mode,
@@ -283,7 +282,10 @@ mod tests {
     #[test]
     fn undo_and_redo_reserve_the_controller_until_finished() {
         let root = tempfile::tempdir().unwrap();
-        let operation = create_directory(root.path(), "created").unwrap();
+        let operation = create_directory(root.path(), "created")
+            .unwrap()
+            .into_record()
+            .expect("creating a directory retains undo");
         let mut controller = OperationController::default();
         controller.record(operation.clone());
 
@@ -304,13 +306,49 @@ mod tests {
             paths: vec![PathBuf::from("/source/a"), PathBuf::from("/source/b")],
         };
 
-        controller.retain_uncompleted_move(clipboard, &[PathBuf::from("/destination/a")]);
+        controller.retain_uncompleted_move(
+            clipboard,
+            &[CompletedTransfer {
+                source: PathBuf::from("/source/a"),
+                destination: PathBuf::from("/destination/a"),
+            }],
+        );
 
         assert_eq!(
             controller
                 .clipboard()
                 .map(|clipboard| clipboard.paths.clone()),
             Some(vec![PathBuf::from("/source/b")])
+        );
+    }
+
+    /// Same-named sources from different directories must be reconciled by
+    /// exact path. Basename matching retired the failed item too, making it
+    /// unretryable through Paste.
+    #[test]
+    fn same_named_sources_are_reconciled_by_exact_path() {
+        let mut controller = OperationController::default();
+        let clipboard = FileClipboard {
+            mode: TransferMode::Move,
+            paths: vec![
+                PathBuf::from("/a/report.pdf"),
+                PathBuf::from("/b/report.pdf"),
+            ],
+        };
+
+        controller.retain_uncompleted_move(
+            clipboard,
+            &[CompletedTransfer {
+                source: PathBuf::from("/a/report.pdf"),
+                destination: PathBuf::from("/destination/report.pdf"),
+            }],
+        );
+
+        assert_eq!(
+            controller
+                .clipboard()
+                .map(|clipboard| clipboard.paths.clone()),
+            Some(vec![PathBuf::from("/b/report.pdf")])
         );
     }
 }

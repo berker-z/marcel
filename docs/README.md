@@ -27,6 +27,9 @@ remains planned but deprioritized until the hardening sprint is complete.
   policy.
 - [`external-review.md`](external-review.md): external architectural review
   retained as design input, not an implementation specification.
+- [`review-2026-08-05.md`](review-2026-08-05.md): two cross-checked operation
+  layer reviews with per-finding verdicts, reproductions, and remediation
+  status. Unlike `external-review.md`, its confirmed findings were defects.
 - [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md): upstream reuse,
   bundled assets, adaptations, and license notices.
 - [`sprints/`](sprints/): numbered implementation plans and acceptance history.

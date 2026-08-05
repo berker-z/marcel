@@ -58,28 +58,41 @@ pub fn save(path: &Path, state: BrowserState) -> Result<()> {
         .context("State file has no parent directory")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("Could not create “{}”", parent.display()))?;
-    let temporary = parent.join(format!(".state.conf.tmp-{}", std::process::id()));
-    let result = (|| {
-        let mut file = fs::File::create(&temporary)
-            .with_context(|| format!("Could not create “{}”", temporary.display()))?;
-        writeln!(file, "version={STATE_VERSION}")?;
-        writeln!(
-            file,
-            "view={}",
-            match state.view {
-                BrowserView::List => "list",
-                BrowserView::Grid => "grid",
-            }
-        )?;
-        writeln!(file, "show_hidden={}", state.show_hidden)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("Could not update “{}”", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    // A per-process temporary name collided between windows, because every
+    // window runs its own writer. Reserve the temporary file atomically so
+    // concurrent saves cannot truncate or rename each other's work.
+    let mut file = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "Could not create a temporary file in “{}”",
+            parent.display()
+        )
+    })?;
+    writeln!(file, "version={STATE_VERSION}")?;
+    writeln!(
+        file,
+        "view={}",
+        match state.view {
+            BrowserView::List => "list",
+            BrowserView::Grid => "grid",
+        }
+    )?;
+    writeln!(file, "show_hidden={}", state.show_hidden)?;
+    file.as_file()
+        .sync_all()
+        .with_context(|| format!("Could not flush state for “{}”", path.display()))?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Could not update “{}”", path.display()))?;
+    sync_directory(parent);
+    Ok(())
+}
+
+/// Flush the rename itself, not only the file contents. Without this the
+/// publication is atomic but not crash-durable.
+pub(crate) fn sync_directory(path: &Path) {
+    if let Ok(directory) = fs::File::open(path) {
+        let _ = directory.sync_all();
     }
-    result
 }
 
 fn parse(contents: &str) -> Result<BrowserState> {

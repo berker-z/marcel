@@ -131,6 +131,74 @@ pub struct MoveRecord {
     expected_state: Vec<PathSnapshot>,
 }
 
+/// The outcome of a mutation that has already committed to the filesystem.
+///
+/// Marcel's mutation APIs follow one rule: every fallible traversal,
+/// validation, and journal construction happens *before* the filesystem is
+/// touched (prepare), the mutation itself is one minimal call (commit), and
+/// everything afterwards is infallible in-memory work (finalize).
+///
+/// `record` is `None` when the mutation succeeded but its undo bookkeeping
+/// could not be captured. Callers must present that as success without undo.
+/// Returning `Err` after a commit would tell the caller "nothing happened"
+/// while the disk says otherwise, leaving the browser projection, the
+/// clipboard, the operation journal, and the user's notification in
+/// disagreement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedOperation {
+    path: PathBuf,
+    changes: DirectoryChanges,
+    record: Option<OperationRecord>,
+}
+
+impl CommittedOperation {
+    /// A commit whose undo record was captured successfully.
+    pub fn recorded(record: OperationRecord) -> Self {
+        Self {
+            path: record.path().to_path_buf(),
+            changes: record.forward_directory_changes(),
+            record: Some(record),
+        }
+    }
+
+    /// A commit whose observable effect is known even when `record` is `None`.
+    pub fn new(path: PathBuf, changes: DirectoryChanges, record: Option<OperationRecord>) -> Self {
+        Self {
+            path,
+            changes,
+            record,
+        }
+    }
+
+    /// The published path, which is known whether or not undo was retained.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The directory-reducer effect of the commit. Always populated, so the
+    /// browser stays consistent with the disk even when undo was lost.
+    pub fn changes(&self) -> &DirectoryChanges {
+        &self.changes
+    }
+
+    pub fn is_undoable(&self) -> bool {
+        self.record.is_some()
+    }
+
+    pub fn into_record(self) -> Option<OperationRecord> {
+        self.record
+    }
+}
+
+/// One source that reached one destination. Recorded exactly rather than
+/// reconstructed from file names: basename reconciliation silently conflates
+/// same-named sources the moment a transfer can span directories.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletedTransfer {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DirectoryChanges {
     pub removed: Vec<PathBuf>,
@@ -152,9 +220,25 @@ pub struct TransferFailure {
 #[derive(Debug)]
 pub struct TransferOutcome {
     pub operation: Option<OperationRecord>,
-    pub completed: Vec<PathBuf>,
+    pub completed: Vec<CompletedTransfer>,
     pub failures: Vec<TransferFailure>,
     pub undo_unavailable: bool,
+}
+
+impl TransferOutcome {
+    pub fn completed_destinations(&self) -> Vec<PathBuf> {
+        self.completed
+            .iter()
+            .map(|transfer| transfer.destination.clone())
+            .collect()
+    }
+
+    pub fn completed_sources(&self) -> Vec<PathBuf> {
+        self.completed
+            .iter()
+            .map(|transfer| transfer.source.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -404,7 +488,7 @@ pub fn validate_entry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn create_directory(parent: &Path, name: &str) -> Result<OperationRecord> {
+pub fn create_directory(parent: &Path, name: &str) -> Result<CommittedOperation> {
     validate_entry_name(name)?;
     create_directory_at(parent.join(name))
 }
@@ -414,7 +498,8 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<OperationRecord> {
 // Marcel keeps those interaction principles but owns this stricter
 // RENAME_NOREPLACE and identity-validating Undo/Redo implementation. No Yazi
 // code is copied.
-pub fn rename_entry(source: &Path, name: &str) -> Result<OperationRecord> {
+pub fn rename_entry(source: &Path, name: &str) -> Result<CommittedOperation> {
+    // Prepare.
     validate_entry_name(name)?;
     let parent = source.parent().context("Rename source has no parent")?;
     let current_name = source.file_name().context("Rename source has no name")?;
@@ -427,6 +512,7 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<OperationRecord> {
         .with_context(|| format!("Could not inspect “{}”", source.display()))?;
     let expected = file_identity(&metadata);
     validate_file_identity(source, &expected, "rename")?;
+    // Commit.
     rename_no_replace(source, &destination).with_context(|| {
         format!(
             "Could not rename “{}” to “{}”",
@@ -434,20 +520,27 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<OperationRecord> {
             destination.display()
         )
     })?;
-    let metadata = fs::symlink_metadata(&destination).with_context(|| {
-        format!(
-            "Renamed “{}” but could not inspect the result",
-            destination.display()
-        )
-    })?;
-    Ok(OperationRecord::Rename {
-        source: source.to_path_buf(),
-        destination,
-        identity: file_identity(&metadata),
-    })
+    // Finalize: the entry is renamed on disk. A failed inspection costs undo,
+    // never the rename itself.
+    let record = fs::symlink_metadata(&destination)
+        .ok()
+        .map(|metadata| OperationRecord::Rename {
+            source: source.to_path_buf(),
+            destination: destination.clone(),
+            identity: file_identity(&metadata),
+        });
+    Ok(CommittedOperation::new(
+        destination.clone(),
+        DirectoryChanges {
+            removed: vec![source.to_path_buf()],
+            upserted: vec![destination],
+        },
+        record,
+    ))
 }
 
-pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
+pub fn undo_operation(operation: &OperationRecord) -> Result<CommittedOperation> {
+    let reversed = operation.reverse_directory_changes();
     match operation {
         OperationRecord::CreateDirectory { path, identity } => {
             let metadata = fs::symlink_metadata(path)
@@ -467,19 +560,32 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
             }
             fs::remove_dir(path)
                 .with_context(|| format!("Could not remove “{}”", path.display()))?;
-            Ok(operation.clone())
+            Ok(CommittedOperation::new(
+                path.clone(),
+                reversed,
+                Some(operation.clone()),
+            ))
         }
         OperationRecord::Copy { created, .. } => {
             remove_snapshotted_tree(created)?;
-            Ok(operation.clone())
+            Ok(CommittedOperation::new(
+                operation.path().to_path_buf(),
+                reversed,
+                Some(operation.clone()),
+            ))
         }
         OperationRecord::Move { transfers } => {
+            // Prepare: validating every transfer also produces the snapshots
+            // this undo needs, so no traversal is required after a rename
+            // commits.
             for transfer in transfers {
                 validate_snapshot_tree(&transfer.expected_state)?;
                 ensure_unoccupied(&transfer.source)?;
             }
             let mut undone = Vec::with_capacity(transfers.len());
+            let mut undoable = true;
             for transfer in transfers.iter().rev() {
+                // Commit.
                 if let Err(error) = rename_no_replace(&transfer.destination, &transfer.source) {
                     let rollback_error = rollback_undone_moves(&undone).err();
                     let message = format!(
@@ -494,31 +600,59 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
                         None => Err(anyhow::anyhow!("{message}; earlier moves were rolled back")),
                     };
                 }
+                // Finalize: rebasing the already-validated snapshots cannot
+                // fail, and only the renamed root's identity needs re-reading.
+                let mut expected_state = transfer.expected_state.clone();
+                rebase_snapshots(&mut expected_state, &transfer.destination, &transfer.source);
+                undoable &= refresh_snapshot_identities(&mut expected_state);
                 undone.push(MoveRecord {
                     source: transfer.source.clone(),
                     destination: transfer.destination.clone(),
-                    expected_state: snapshot_tree(&transfer.source)?,
+                    expected_state,
                 });
             }
             undone.reverse();
-            Ok(OperationRecord::Move { transfers: undone })
+            Ok(CommittedOperation::new(
+                undone
+                    .first()
+                    .map(|transfer| transfer.source.clone())
+                    .unwrap_or_default(),
+                reversed,
+                undoable.then_some(OperationRecord::Move { transfers: undone }),
+            ))
         }
-        OperationRecord::Trash { records } => Ok(OperationRecord::Trash {
-            records: restore_trash_records(records)?,
-        }),
-        OperationRecord::Restore { records } => Ok(OperationRecord::Restore {
-            records: retrash_records(records)?,
-        }),
+        OperationRecord::Trash { records } => {
+            let restored = restore_trash_records(records)?;
+            Ok(CommittedOperation::new(
+                operation.path().to_path_buf(),
+                reversed,
+                restored.undoable.then_some(OperationRecord::Trash {
+                    records: restored.records,
+                }),
+            ))
+        }
+        OperationRecord::Restore { records } => Ok(CommittedOperation::new(
+            operation.path().to_path_buf(),
+            reversed,
+            Some(OperationRecord::Restore {
+                records: retrash_records(records)?,
+            }),
+        )),
         OperationRecord::Rename { .. } => reverse_rename(operation),
         OperationRecord::ArchiveCreate { created, .. }
         | OperationRecord::ArchiveExtract { created, .. } => {
             remove_snapshotted_tree(created)?;
-            Ok(operation.clone())
+            Ok(CommittedOperation::new(
+                operation.path().to_path_buf(),
+                reversed,
+                Some(operation.clone()),
+            ))
         }
     }
 }
 
-pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
+pub fn redo_operation(operation: &OperationRecord) -> Result<CommittedOperation> {
+    let forward = operation.forward_directory_changes();
     match operation {
         OperationRecord::CreateDirectory { path, .. } => create_directory_at(path.clone()),
         OperationRecord::Copy {
@@ -537,9 +671,7 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
             if !outcome.failures.is_empty() {
                 return rollback_failed_redo(outcome);
             }
-            outcome
-                .operation
-                .context("Redo did not produce a copy operation")
+            Ok(redone_transfer(outcome, destination.clone()))
         }
         OperationRecord::Move { transfers } => {
             for transfer in transfers {
@@ -562,16 +694,25 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
             if !outcome.failures.is_empty() {
                 return rollback_failed_redo(outcome);
             }
-            outcome
-                .operation
-                .context("Redo did not produce a move operation")
+            Ok(redone_transfer(outcome, destination.to_path_buf()))
         }
-        OperationRecord::Trash { records } => Ok(OperationRecord::Trash {
-            records: retrash_records(records)?,
-        }),
-        OperationRecord::Restore { records } => Ok(OperationRecord::Restore {
-            records: restore_trash_records(records)?,
-        }),
+        OperationRecord::Trash { records } => Ok(CommittedOperation::new(
+            operation.path().to_path_buf(),
+            forward,
+            Some(OperationRecord::Trash {
+                records: retrash_records(records)?,
+            }),
+        )),
+        OperationRecord::Restore { records } => {
+            let restored = restore_trash_records(records)?;
+            Ok(CommittedOperation::new(
+                operation.path().to_path_buf(),
+                forward,
+                restored.undoable.then_some(OperationRecord::Restore {
+                    records: restored.records,
+                }),
+            ))
+        }
         OperationRecord::Rename { .. } => reverse_rename(operation),
         OperationRecord::ArchiveCreate {
             sources,
@@ -596,36 +737,81 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<OperationRecord> {
     }
 }
 
+/// Turn a redone transfer into a committed outcome. The transfer itself has
+/// already applied its own prepare/commit/finalize discipline, so a missing
+/// operation here means undo bookkeeping was lost, not that the redo failed.
+fn redone_transfer(outcome: TransferOutcome, destination: PathBuf) -> CommittedOperation {
+    let path = outcome
+        .completed
+        .first()
+        .map(|transfer| transfer.destination.clone())
+        .unwrap_or(destination.clone());
+    let changes = outcome.operation.as_ref().map_or_else(
+        || DirectoryChanges {
+            removed: outcome.completed_sources(),
+            upserted: outcome.completed_destinations(),
+        },
+        OperationRecord::forward_directory_changes,
+    );
+    CommittedOperation::new(path, changes, outcome.operation)
+}
+
 pub fn create_zip_operation(
     sources: &[PathBuf],
     destination: &Path,
     cancelled: Arc<AtomicBool>,
-) -> Result<OperationRecord> {
+) -> Result<CommittedOperation> {
+    // Prepare.
     let source_snapshots = snapshot_paths_cancellable(sources, &cancelled)?;
+    // Commit: the archive is published by `create_zip_archive`.
     let outcome = create_zip_archive(sources, destination, cancelled)?;
-    let created = snapshot_tree(&outcome.published)?;
-    Ok(OperationRecord::ArchiveCreate {
-        sources: source_snapshots,
-        destination: outcome.published,
-        created,
-    })
+    // Finalize: a failed snapshot loses undo, it does not unpublish the ZIP.
+    let record =
+        snapshot_tree(&outcome.published)
+            .ok()
+            .map(|created| OperationRecord::ArchiveCreate {
+                sources: source_snapshots,
+                destination: outcome.published.clone(),
+                created,
+            });
+    Ok(CommittedOperation::new(
+        outcome.published.clone(),
+        DirectoryChanges {
+            upserted: vec![outcome.published],
+            ..DirectoryChanges::default()
+        },
+        record,
+    ))
 }
 
 pub fn extract_archive_operation(
     archive: &Path,
     cancelled: Arc<AtomicBool>,
-) -> Result<OperationRecord> {
+) -> Result<CommittedOperation> {
     if cancelled.load(Ordering::Acquire) {
         bail!("Archive operation cancelled");
     }
+    // Prepare.
     let source = snapshot_tree(archive)?;
+    // Commit.
     let outcome = extract_archive(archive, cancelled)?;
-    let created = snapshot_tree(&outcome.published)?;
-    Ok(OperationRecord::ArchiveExtract {
-        source,
-        output: outcome.published,
-        created,
-    })
+    // Finalize.
+    let record =
+        snapshot_tree(&outcome.published)
+            .ok()
+            .map(|created| OperationRecord::ArchiveExtract {
+                source,
+                output: outcome.published.clone(),
+                created,
+            });
+    Ok(CommittedOperation::new(
+        outcome.published.clone(),
+        DirectoryChanges {
+            upserted: vec![outcome.published],
+            ..DirectoryChanges::default()
+        },
+        record,
+    ))
 }
 
 fn snapshot_paths_cancellable(
@@ -658,7 +844,7 @@ fn snapshot_paths_cancellable(
     Ok(snapshots)
 }
 
-fn reverse_rename(operation: &OperationRecord) -> Result<OperationRecord> {
+fn reverse_rename(operation: &OperationRecord) -> Result<CommittedOperation> {
     let OperationRecord::Rename {
         source,
         destination,
@@ -667,8 +853,10 @@ fn reverse_rename(operation: &OperationRecord) -> Result<OperationRecord> {
     else {
         bail!("Operation is not a rename");
     };
+    // Prepare.
     validate_file_identity(destination, identity, "reverse rename")?;
     ensure_unoccupied(source)?;
+    // Commit.
     rename_no_replace(destination, source).with_context(|| {
         format!(
             "Could not rename “{}” back to “{}”",
@@ -676,20 +864,25 @@ fn reverse_rename(operation: &OperationRecord) -> Result<OperationRecord> {
             source.display()
         )
     })?;
-    let metadata = fs::symlink_metadata(source).with_context(|| {
-        format!(
-            "Renamed “{}” but could not inspect the result",
-            source.display()
-        )
-    })?;
-    Ok(OperationRecord::Rename {
-        source: destination.clone(),
-        destination: source.clone(),
-        identity: file_identity(&metadata),
-    })
+    // Finalize: the rename happened, so a failed inspection only costs undo.
+    let record = fs::symlink_metadata(source)
+        .ok()
+        .map(|metadata| OperationRecord::Rename {
+            source: destination.clone(),
+            destination: source.clone(),
+            identity: file_identity(&metadata),
+        });
+    Ok(CommittedOperation::new(
+        source.clone(),
+        DirectoryChanges {
+            removed: vec![destination.clone()],
+            upserted: vec![source.clone()],
+        },
+        record,
+    ))
 }
 
-fn rollback_failed_redo(outcome: TransferOutcome) -> Result<OperationRecord> {
+fn rollback_failed_redo(outcome: TransferOutcome) -> Result<CommittedOperation> {
     let failure = summarize_failures(&outcome.failures);
     if let Some(partial) = outcome.operation {
         match undo_operation(&partial) {
@@ -769,6 +962,7 @@ fn transfer_paths_impl(
     let mut copied_sources = Vec::new();
     let mut copied_created = Vec::new();
     let mut copy_undo_unavailable = false;
+    let mut move_undo_unavailable = false;
     let mut moved = Vec::new();
 
     if let Some(progress) = &progress {
@@ -822,19 +1016,23 @@ fn transfer_paths_impl(
                     progress.as_deref(),
                     remaining / 2,
                 )
-                .map(|(source, created, overflowed)| {
-                    if overflowed {
+                .map(|copied| {
+                    if copied.overflowed || !copied.undoable {
                         copy_undo_unavailable = true;
                         copied_sources.clear();
                         copied_created.clear();
                     } else if !copy_undo_unavailable {
-                        copied_sources.extend(source);
-                        copied_created.extend(created);
+                        copied_sources.extend(copied.sources);
+                        copied_created.extend(copied.created);
                     }
                 })
             }
             TransferMode::Move => move_one(source, &target).map(|record| {
-                moved.push(record);
+                match record {
+                    Some(record) => moved.push(record),
+                    // The rename committed; only its undo record was lost.
+                    None => move_undo_unavailable = true,
+                }
                 if let Some(progress) = &progress {
                     progress.complete_item();
                 }
@@ -842,7 +1040,10 @@ fn transfer_paths_impl(
         };
 
         match result {
-            Ok(()) => completed.push(target),
+            Ok(()) => completed.push(CompletedTransfer {
+                source: source.clone(),
+                destination: target,
+            }),
             Err(error) => failures.push(TransferFailure {
                 path: source.clone(),
                 message: error.to_string(),
@@ -867,32 +1068,28 @@ fn transfer_paths_impl(
         operation,
         completed,
         failures,
-        undo_unavailable: copy_undo_unavailable,
+        undo_unavailable: copy_undo_unavailable || move_undo_unavailable,
     }
 }
 
 fn measure_entry(path: &Path, cancelled: &AtomicBool, progress: &TransferProgress) {
-    if cancelled.load(Ordering::Acquire) {
-        return;
-    }
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
-    };
-    let kind = metadata.file_type();
-    progress.add_total(1, if kind.is_file() { metadata.len() } else { 0 });
-    if !kind.is_dir() {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries {
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
         if cancelled.load(Ordering::Acquire) {
             return;
         }
-        if let Ok(entry) = entry {
-            measure_entry(&entry.path(), cancelled, progress);
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let kind = metadata.file_type();
+        progress.add_total(1, if kind.is_file() { metadata.len() } else { 0 });
+        if !kind.is_dir() {
+            continue;
         }
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        pending.extend(entries.flatten().map(|entry| entry.path()));
     }
 }
 
@@ -908,53 +1105,115 @@ pub fn summarize_failures(failures: &[TransferFailure]) -> String {
     }
 }
 
+struct CopiedItem {
+    sources: Vec<PathSnapshot>,
+    created: Vec<PathSnapshot>,
+    overflowed: bool,
+    undoable: bool,
+}
+
 fn copy_one(
     source: &Path,
     destination: &Path,
     cancelled: &AtomicBool,
     progress: Option<&TransferProgress>,
     snapshot_limit: usize,
-) -> Result<(Vec<PathSnapshot>, Vec<PathSnapshot>, bool)> {
+) -> Result<CopiedItem> {
+    // Prepare.
     ensure_unoccupied(destination)?;
-    if source.is_dir() && destination.starts_with(source) {
-        bail!(
-            "Cannot copy “{}” into itself",
-            source.file_name().unwrap_or_default().to_string_lossy()
-        );
-    }
-    let staging = staging_path(destination)?;
+    ensure_not_self_containing(source, destination, "copy")?;
+    let name = destination
+        .file_name()
+        .context("Copy destination has no file name")?;
+    let staging = reserve_staging_directory(destination)?;
+    let staged = staging.path().join(name);
     let mut context = CopyContext::default();
     let mut source_state = SnapshotCollector::new(snapshot_limit);
     let mut created_state = SnapshotCollector::new(snapshot_limit);
-    if let Err(error) = copy_entry(
+    copy_entry(
         source,
-        &staging,
+        &staged,
         cancelled,
         progress,
         &mut context,
         &mut source_state,
         &mut created_state,
-    ) {
-        cleanup_staging(&staging);
-        return Err(error);
-    }
-    if let Err(error) = rename_no_replace(&staging, destination) {
-        cleanup_staging(&staging);
-        return Err(error).with_context(|| {
-            format!(
-                "Could not publish copy at “{}”; nothing was overwritten",
-                destination.display()
-            )
-        });
-    }
-    rebase_and_refresh_snapshots(&mut created_state.snapshots, &staging, destination)?;
-    Ok((
-        source_state.snapshots,
-        created_state.snapshots,
-        source_state.overflowed || created_state.overflowed,
-    ))
+    )?;
+    // Commit. The staging directory is removed when `staging` drops, taking
+    // any partially copied tree with it; only the published entry survives.
+    rename_no_replace(&staged, destination).with_context(|| {
+        format!(
+            "Could not publish copy at “{}”; nothing was overwritten",
+            destination.display()
+        )
+    })?;
+    // Finalize: the copy is published. Re-reading identities can only cost
+    // undo, because publication renames the staged root and bumps its ctime.
+    rebase_snapshots(&mut created_state.snapshots, &staged, destination);
+    let undoable = refresh_snapshot_identities(&mut created_state.snapshots);
+    Ok(CopiedItem {
+        sources: source_state.snapshots,
+        created: created_state.snapshots,
+        overflowed: source_state.overflowed || created_state.overflowed,
+        undoable,
+    })
 }
 
+/// Reject a copy or move whose destination resolves back inside its own
+/// source. A lexical prefix test misses a symlinked destination, which would
+/// place Marcel's staging directory inside the tree being walked and make the
+/// copy enumerate and re-copy its own output until `PATH_MAX` stops it.
+fn ensure_not_self_containing(source: &Path, destination: &Path, action: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("Could not inspect “{}”", source.display()))?;
+    if !metadata.file_type().is_dir() {
+        // Symbolic links are recreated as links rather than traversed, so a
+        // link resolving into the destination cannot recurse.
+        return Ok(());
+    }
+    let source_real = source
+        .canonicalize()
+        .with_context(|| format!("Could not resolve “{}”", source.display()))?;
+    let parent = destination
+        .parent()
+        .context("Destination has no parent directory")?;
+    let parent_real = parent
+        .canonicalize()
+        .with_context(|| format!("Could not resolve “{}”", parent.display()))?;
+    let name = destination
+        .file_name()
+        .context("Destination has no file name")?;
+    if parent_real.join(name).starts_with(&source_real) {
+        bail!(
+            "Cannot {action} “{}” into itself",
+            source.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    Ok(())
+}
+
+/// One unit of copy work. Directories are visited twice so their metadata is
+/// applied after their children exist, which an explicit stack expresses
+/// directly.
+enum CopyStep {
+    Visit {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    FinishDirectory {
+        source: PathBuf,
+        destination: PathBuf,
+        metadata: fs::Metadata,
+        created_index: Option<usize>,
+    },
+}
+
+/// Copy one entry using an explicit work stack.
+///
+/// Recursion here was bounded only by the thread stack: Marcel runs transfers
+/// on `blocking` pool threads with Rust's 2 MiB default, so a deep enough tree
+/// aborted the whole process with a stack overflow mid-mutation. The archive
+/// and delete walkers already used explicit stacks; this matches them.
 fn copy_entry(
     source: &Path,
     destination: &Path,
@@ -964,80 +1223,116 @@ fn copy_entry(
     source_state: &mut SnapshotCollector,
     created_state: &mut SnapshotCollector,
 ) -> Result<()> {
-    if cancelled.load(Ordering::Acquire) {
-        bail!("Operation cancelled");
-    }
-    let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("Could not inspect “{}”", source.display()))?;
-    source_state.push(source, &metadata)?;
-    let kind = metadata.file_type();
-    if let Some(progress) = progress {
-        progress.set_current_path(Some(source.to_path_buf()));
-    }
+    let mut steps = vec![CopyStep::Visit {
+        source: source.to_path_buf(),
+        destination: destination.to_path_buf(),
+    }];
 
-    if kind.is_dir() {
-        fs::create_dir(destination)
-            .with_context(|| format!("Could not create “{}”", destination.display()))?;
-        let created_index = created_state.push(
-            destination,
-            &fs::symlink_metadata(destination)
-                .with_context(|| format!("Could not inspect “{}”", destination.display()))?,
-        )?;
-        for entry in fs::read_dir(source)
-            .with_context(|| format!("Could not read “{}”", source.display()))?
-        {
-            let entry = entry
-                .with_context(|| format!("Could not read an entry in “{}”", source.display()))?;
-            copy_entry(
-                &entry.path(),
-                &destination.join(entry.file_name()),
-                cancelled,
-                progress,
-                context,
-                source_state,
-                created_state,
-            )?;
+    while let Some(step) = steps.pop() {
+        match step {
+            CopyStep::Visit {
+                source,
+                destination,
+            } => {
+                if cancelled.load(Ordering::Acquire) {
+                    bail!("Operation cancelled");
+                }
+                let metadata = fs::symlink_metadata(&source)
+                    .with_context(|| format!("Could not inspect “{}”", source.display()))?;
+                source_state.push(&source, &metadata)?;
+                let kind = metadata.file_type();
+                if let Some(progress) = progress {
+                    progress.set_current_path(Some(source.clone()));
+                }
+
+                if kind.is_dir() {
+                    fs::create_dir(&destination)
+                        .with_context(|| format!("Could not create “{}”", destination.display()))?;
+                    let created_index = created_state.push(
+                        &destination,
+                        &fs::symlink_metadata(&destination).with_context(|| {
+                            format!("Could not inspect “{}”", destination.display())
+                        })?,
+                    )?;
+                    let children = fs::read_dir(&source)
+                        .with_context(|| format!("Could not read “{}”", source.display()))?
+                        .collect::<io::Result<Vec<_>>>()
+                        .with_context(|| {
+                            format!("Could not read an entry in “{}”", source.display())
+                        })?;
+                    steps.push(CopyStep::FinishDirectory {
+                        source,
+                        destination: destination.clone(),
+                        metadata,
+                        created_index,
+                    });
+                    // Reversed so children pop in enumeration order.
+                    for child in children.into_iter().rev() {
+                        steps.push(CopyStep::Visit {
+                            destination: destination.join(child.file_name()),
+                            source: child.path(),
+                        });
+                    }
+                } else if kind.is_file() {
+                    copy_regular_file(
+                        &source,
+                        &destination,
+                        &metadata,
+                        cancelled,
+                        progress,
+                        context,
+                    )?;
+                    preserve_metadata(&source, &destination, &metadata)?;
+                    created_state.push(
+                        &destination,
+                        &fs::symlink_metadata(&destination).with_context(|| {
+                            format!("Could not inspect “{}”", destination.display())
+                        })?,
+                    )?;
+                    if let Some(progress) = progress {
+                        progress.complete_item();
+                    }
+                } else if kind.is_symlink() {
+                    let target = fs::read_link(&source)
+                        .with_context(|| format!("Could not read link “{}”", source.display()))?;
+                    std::os::unix::fs::symlink(target, &destination)
+                        .with_context(|| format!("Could not copy link “{}”", source.display()))?;
+                    preserve_supported_xattrs(&source, &destination)?;
+                    created_state.push(
+                        &destination,
+                        &fs::symlink_metadata(&destination).with_context(|| {
+                            format!("Could not inspect “{}”", destination.display())
+                        })?,
+                    )?;
+                    if let Some(progress) = progress {
+                        progress.complete_item();
+                    }
+                } else {
+                    bail!(
+                        "Special files are not supported yet: “{}”",
+                        source.display()
+                    );
+                }
+            }
+            CopyStep::FinishDirectory {
+                source,
+                destination,
+                metadata,
+                created_index,
+            } => {
+                preserve_metadata(&source, &destination, &metadata)?;
+                created_state.refresh(
+                    created_index,
+                    &destination,
+                    &fs::symlink_metadata(&destination).with_context(|| {
+                        format!("Could not inspect “{}”", destination.display())
+                    })?,
+                )?;
+                if let Some(progress) = progress {
+                    progress.complete_item();
+                }
+            }
         }
-        preserve_metadata(source, destination, &metadata)?;
-        created_state.refresh(
-            created_index,
-            destination,
-            &fs::symlink_metadata(destination)
-                .with_context(|| format!("Could not inspect “{}”", destination.display()))?,
-        )?;
-        if let Some(progress) = progress {
-            progress.complete_item();
-        }
-    } else if kind.is_file() {
-        copy_regular_file(source, destination, &metadata, cancelled, progress, context)?;
-        preserve_metadata(source, destination, &metadata)?;
-        created_state.push(
-            destination,
-            &fs::symlink_metadata(destination)
-                .with_context(|| format!("Could not inspect “{}”", destination.display()))?,
-        )?;
-        if let Some(progress) = progress {
-            progress.complete_item();
-        }
-    } else if kind.is_symlink() {
-        let target = fs::read_link(source)
-            .with_context(|| format!("Could not read link “{}”", source.display()))?;
-        std::os::unix::fs::symlink(target, destination)
-            .with_context(|| format!("Could not copy link “{}”", source.display()))?;
-        preserve_supported_xattrs(source, destination)?;
-        created_state.push(
-            destination,
-            &fs::symlink_metadata(destination)
-                .with_context(|| format!("Could not inspect “{}”", destination.display()))?,
-        )?;
-        if let Some(progress) = progress {
-            progress.complete_item();
-        }
-    } else {
-        bail!(
-            "Special files are not supported yet: “{}”",
-            source.display()
-        );
     }
     Ok(())
 }
@@ -1331,51 +1626,74 @@ fn xattrs_unsupported(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::Unsupported || matches!(error.raw_os_error(), Some(45 | 95))
 }
 
-fn move_one(source: &Path, destination: &Path) -> Result<MoveRecord> {
+/// Move one entry, returning `Ok(None)` when the rename committed but its undo
+/// record could not be captured. A committed move must never be reported as a
+/// failure: the caller would leave a vanished source in the browser, keep a
+/// dangling cut clipboard, and tell the user nothing happened.
+fn move_one(source: &Path, destination: &Path) -> Result<Option<MoveRecord>> {
     ensure_unoccupied(destination)?;
-    if source.is_dir() && destination.starts_with(source) {
-        bail!(
-            "Cannot move “{}” into itself",
-            source.file_name().unwrap_or_default().to_string_lossy()
-        );
+    ensure_not_self_containing(source, destination, "move")?;
+    // Prepare: walk the tree before the rename, not after, and treat the walk
+    // as bookkeeping rather than a precondition. `snapshot_tree` rejects
+    // sockets and FIFOs, but a rename does not care what a directory holds —
+    // such a tree is still movable, it just cannot be described for undo.
+    // Snapshotting it after the commit instead turned every such move into a
+    // deterministic phantom failure.
+    let prepared = snapshot_tree(source).ok();
+    // Commit.
+    rename_no_replace(source, destination)
+        .map_err(|error| move_error(&error, source, destination))?;
+    // Finalize: a same-filesystem rename preserves every descendant's identity
+    // but bumps the renamed root's ctime, so refresh before recording.
+    let Some(mut expected_state) = prepared else {
+        return Ok(None);
+    };
+    rebase_snapshots(&mut expected_state, source, destination);
+    if !refresh_snapshot_identities(&mut expected_state) {
+        return Ok(None);
     }
-    rename_no_replace(source, destination).with_context(|| {
-        format!(
-            "Could not move “{}” to “{}”; cross-filesystem moves are not supported yet",
-            source.display(),
-            destination.display()
-        )
-    })?;
-    Ok(MoveRecord {
+    Ok(Some(MoveRecord {
         source: source.to_path_buf(),
         destination: destination.to_path_buf(),
-        expected_state: snapshot_tree(destination)?,
-    })
+        expected_state,
+    }))
 }
 
-fn staging_path(destination: &Path) -> Result<PathBuf> {
+fn move_error(error: &io::Error, source: &Path, destination: &Path) -> anyhow::Error {
+    // Only report the parked cross-filesystem limitation when that is actually
+    // what happened; attaching it to every rename error hid the real cause.
+    let detail = if error.kind() == io::ErrorKind::CrossesDevices {
+        "; cross-filesystem moves are not supported yet"
+    } else {
+        ""
+    };
+    anyhow::anyhow!(
+        "Could not move “{}” to “{}”: {error}{detail}",
+        source.display(),
+        destination.display()
+    )
+}
+
+/// Reserve a private staging directory beside the destination.
+///
+/// This matches `archive_ops`' staging model: the directory is created
+/// atomically with a unique name instead of being probed for and created
+/// later, so Marcel can never adopt — and then recursively delete — a path
+/// another process created in the gap.
+fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
     let parent = destination
         .parent()
         .context("Copy destination has no parent directory")?;
-    for _ in 0..100 {
-        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(".marcel-copy-{}-{sequence}", std::process::id()));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    bail!("Could not reserve a temporary copy path")
-}
-
-fn cleanup_staging(path: &Path) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if metadata.file_type().is_dir() {
-        let _ = fs::remove_dir_all(path);
-    } else {
-        let _ = fs::remove_file(path);
-    }
+    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    tempfile::Builder::new()
+        .prefix(&format!(".marcel-copy-{}-{sequence}-", std::process::id()))
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "Could not reserve a temporary copy directory in “{}”",
+                parent.display()
+            )
+        })
 }
 
 fn snapshot_tree(root: &Path) -> Result<Vec<PathSnapshot>> {
@@ -1384,20 +1702,23 @@ fn snapshot_tree(root: &Path) -> Result<Vec<PathSnapshot>> {
     Ok(snapshots)
 }
 
+/// Snapshot a tree in pre-order using an explicit stack. Parents must precede
+/// their children so `remove_snapshotted_tree` can delete in reverse.
 fn snapshot_entry(path: &Path, snapshots: &mut Vec<PathSnapshot>) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("Could not inspect “{}”", path.display()))?;
-    let snapshot = snapshot_from_metadata(path, &metadata)?;
-    let kind = snapshot.kind;
-    snapshots.push(snapshot);
-    if kind == SnapshotKind::Directory {
-        let mut children = fs::read_dir(path)
-            .with_context(|| format!("Could not read “{}”", path.display()))?
-            .collect::<io::Result<Vec<_>>>()
-            .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            snapshot_entry(&child.path(), snapshots)?;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("Could not inspect “{}”", path.display()))?;
+        let snapshot = snapshot_from_metadata(&path, &metadata)?;
+        let kind = snapshot.kind;
+        snapshots.push(snapshot);
+        if kind == SnapshotKind::Directory {
+            let mut children = fs::read_dir(&path)
+                .with_context(|| format!("Could not read “{}”", path.display()))?
+                .collect::<io::Result<Vec<_>>>()
+                .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
+            children.sort_by_key(|entry| entry.file_name());
+            pending.extend(children.into_iter().rev().map(|entry| entry.path()));
         }
     }
     Ok(())
@@ -1420,29 +1741,37 @@ fn snapshot_from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<PathSn
     })
 }
 
-fn rebase_and_refresh_snapshots(
-    snapshots: &mut [PathSnapshot],
-    staging: &Path,
-    destination: &Path,
-) -> Result<()> {
+/// Rebase recorded paths from one root to another.
+///
+/// Infallible by construction: every snapshot in a tree is rooted at `from`,
+/// so this runs after a commit without being able to fail it.
+fn rebase_snapshots(snapshots: &mut [PathSnapshot], from: &Path, to: &Path) {
     for snapshot in snapshots {
-        let relative = snapshot.path.strip_prefix(staging).with_context(|| {
-            format!(
-                "Could not map staged path “{}” to “{}”",
-                snapshot.path.display(),
-                destination.display()
-            )
-        })?;
-        snapshot.path = if relative.as_os_str().is_empty() {
-            destination.to_path_buf()
-        } else {
-            destination.join(relative)
+        let Ok(relative) = snapshot.path.strip_prefix(from) else {
+            continue;
         };
-        let metadata = fs::symlink_metadata(&snapshot.path)
-            .with_context(|| format!("Could not inspect “{}”", snapshot.path.display()))?;
-        snapshot.identity = file_identity(&metadata);
+        snapshot.path = if relative.as_os_str().is_empty() {
+            to.to_path_buf()
+        } else {
+            to.join(relative)
+        };
     }
-    Ok(())
+}
+
+/// Re-read recorded identities after a commit.
+///
+/// Returns `false` when any entry could not be inspected. Callers downgrade
+/// that to success-without-undo rather than failing a mutation that already
+/// happened.
+fn refresh_snapshot_identities(snapshots: &mut [PathSnapshot]) -> bool {
+    let mut complete = true;
+    for snapshot in snapshots {
+        match fs::symlink_metadata(&snapshot.path) {
+            Ok(metadata) => snapshot.identity = file_identity(&metadata),
+            Err(_) => complete = false,
+        }
+    }
+    complete
 }
 
 fn validate_snapshot_tree(snapshots: &[PathSnapshot]) -> Result<()> {
@@ -1531,21 +1860,26 @@ fn top_level_paths(snapshots: &[PathSnapshot]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn create_directory_at(path: PathBuf) -> Result<OperationRecord> {
+fn create_directory_at(path: PathBuf) -> Result<CommittedOperation> {
+    // Commit.
     fs::create_dir(&path).with_context(|| format!("Could not create “{}”", path.display()))?;
-    let metadata = fs::symlink_metadata(&path)
-        .with_context(|| format!("Created “{}” but could not inspect it", path.display()))?;
-    if !metadata.file_type().is_dir() {
-        bail!(
-            "Created path “{}” is not a directory; refusing to record it",
-            path.display()
-        );
-    }
-
-    Ok(OperationRecord::CreateDirectory {
-        path,
-        identity: file_identity(&metadata),
-    })
+    // Finalize: the directory exists. Refusing to record an unexpected result
+    // costs undo, but must not report the creation as failed.
+    let record = fs::symlink_metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_dir())
+        .map(|metadata| OperationRecord::CreateDirectory {
+            path: path.clone(),
+            identity: file_identity(&metadata),
+        });
+    Ok(CommittedOperation::new(
+        path.clone(),
+        DirectoryChanges {
+            upserted: vec![path],
+            ..DirectoryChanges::default()
+        },
+        record,
+    ))
 }
 
 #[cfg(unix)]
@@ -1567,6 +1901,167 @@ compile_error!("Marcel's safe file-operation identity checks currently require U
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    /// Unwrap a committed operation that the test expects to have retained
+    /// undo. Failing here means bookkeeping was lost, not that the mutation
+    /// failed.
+    fn recorded(committed: CommittedOperation) -> OperationRecord {
+        committed
+            .into_record()
+            .expect("operation should have retained an undo record")
+    }
+
+    fn destinations(outcome: &TransferOutcome) -> Vec<PathBuf> {
+        outcome.completed_destinations()
+    }
+
+    /// A lexical prefix test misses a symlinked destination. Marcel then placed
+    /// its staging directory inside the tree it was walking and re-copied its
+    /// own output once per path component until `PATH_MAX` stopped it, writing
+    /// roughly 156x the source size into the user's own directory.
+    #[test]
+    fn copy_refuses_a_destination_that_resolves_inside_the_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("src");
+        let sub = source.join("sub");
+        let alias = root.path().join("alias");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("payload.bin"), vec![7_u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(&sub, &alias).unwrap();
+        let before = tree_size(&source);
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&source),
+            &alias,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(
+            outcome.failures[0].message.contains("into itself"),
+            "{:?}",
+            outcome.failures
+        );
+        assert!(outcome.operation.is_none());
+        assert_eq!(tree_size(&source), before, "the copy amplified the source");
+    }
+
+    #[test]
+    fn move_refuses_a_destination_that_resolves_inside_the_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("src");
+        let sub = source.join("sub");
+        let alias = root.path().join("alias");
+        fs::create_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(&sub, &alias).unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&source),
+            &alias,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(source.is_dir());
+    }
+
+    /// `snapshot_tree` rejects sockets and FIFOs, so snapshotting after the
+    /// rename turned any directory containing one into a phantom failure: the
+    /// move had happened, but the caller was told it had not.
+    #[test]
+    fn a_committed_move_is_never_reported_as_a_failure() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let source_parent = root.path().join("source");
+        let destination = root.path().join("destination");
+        let project = source_parent.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(project.join("notes.txt"), b"important").unwrap();
+        let _listener = UnixListener::bind(project.join("daemon.sock")).unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&project),
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(destinations(&outcome), [destination.join("project")]);
+        assert!(!project.exists());
+        assert_eq!(
+            fs::read(destination.join("project/notes.txt")).unwrap(),
+            b"important"
+        );
+        // The tree holds a socket, so it cannot be snapshotted for undo. The
+        // move still succeeded and must be reported that way.
+        assert!(outcome.undo_unavailable);
+        assert!(outcome.operation.is_none());
+    }
+
+    /// Marcel runs transfers on `blocking` pool threads with Rust's 2 MiB
+    /// default stack. Recursive walkers aborted the whole process with a stack
+    /// overflow rather than reporting a failure.
+    #[test]
+    fn deep_directory_trees_do_not_exhaust_the_worker_stack() {
+        let worker = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let root = tempfile::tempdir().unwrap();
+                let source = root.path().join("deep");
+                let destination = root.path().join("destination");
+                let mut current = source.clone();
+                fs::create_dir(&current).unwrap();
+                for _ in 0..1_500 {
+                    current = current.join("d");
+                    fs::create_dir(&current).unwrap();
+                }
+                fs::write(current.join("leaf.txt"), b"leaf").unwrap();
+                fs::create_dir(&destination).unwrap();
+
+                let outcome = transfer_paths_with_progress(
+                    std::slice::from_ref(&source),
+                    &destination,
+                    TransferMode::Copy,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(TransferProgress::default()),
+                );
+                assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+
+                // Permanent deletion walks the same shape.
+                crate::delete_ops::delete_paths(
+                    std::slice::from_ref(&source),
+                    Arc::new(TransferProgress::default()),
+                );
+            })
+            .unwrap();
+        worker.join().expect("deep tree work must not abort");
+    }
+
+    fn tree_size(root: &Path) -> u64 {
+        let mut bytes = 0;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    pending.push(entry.path());
+                } else if metadata.is_file() {
+                    bytes += metadata.len();
+                }
+            }
+        }
+        bytes
+    }
 
     #[test]
     fn rejects_names_that_escape_the_parent_or_have_no_name() {
@@ -1593,7 +2088,7 @@ mod tests {
         let destination = root.path().join("final.txt");
         fs::write(&source, b"contents").unwrap();
 
-        let operation = rename_entry(&source, "final.txt").unwrap();
+        let operation = recorded(rename_entry(&source, "final.txt").unwrap());
         assert!(!source.exists());
         assert_eq!(fs::read(&destination).unwrap(), b"contents");
         assert_eq!(
@@ -1611,11 +2106,11 @@ mod tests {
             }
         );
 
-        let redo_record = undo_operation(&operation).unwrap();
+        let redo_record = recorded(undo_operation(&operation).unwrap());
         assert_eq!(fs::read(&source).unwrap(), b"contents");
         assert!(!destination.exists());
 
-        let redone = redo_operation(&redo_record).unwrap();
+        let redone = recorded(redo_operation(&redo_record).unwrap());
         assert_eq!(redone.path(), destination);
         assert_eq!(fs::read(&destination).unwrap(), b"contents");
     }
@@ -1630,7 +2125,7 @@ mod tests {
         let destination = root.path().join("readable.txt");
         fs::write(&source, b"contents").unwrap();
 
-        let operation = rename_entry(&source, "readable.txt").unwrap();
+        let operation = recorded(rename_entry(&source, "readable.txt").unwrap());
 
         assert!(!source.exists());
         assert_eq!(operation.path(), destination);
@@ -1656,7 +2151,7 @@ mod tests {
         let source = root.path().join("draft.txt");
         let destination = root.path().join("final.txt");
         fs::write(&source, b"original").unwrap();
-        let operation = rename_entry(&source, "final.txt").unwrap();
+        let operation = recorded(rename_entry(&source, "final.txt").unwrap());
         fs::write(&destination, b"modified").unwrap();
 
         assert!(undo_operation(&operation).is_err());
@@ -1667,19 +2162,19 @@ mod tests {
     #[test]
     fn create_undo_and_redo_validate_the_path() {
         let root = tempfile::tempdir().unwrap();
-        let created = create_directory(root.path(), "photos").unwrap();
+        let created = recorded(create_directory(root.path(), "photos").unwrap());
 
         undo_operation(&created).unwrap();
         assert!(!created.path().exists());
 
-        let recreated = redo_operation(&created).unwrap();
+        let recreated = recorded(redo_operation(&created).unwrap());
         assert!(recreated.path().is_dir());
     }
 
     #[test]
     fn undo_refuses_a_non_empty_created_directory() {
         let root = tempfile::tempdir().unwrap();
-        let created = create_directory(root.path(), "work").unwrap();
+        let created = recorded(create_directory(root.path(), "work").unwrap());
         fs::write(created.path().join("important.txt"), b"data").unwrap();
 
         assert!(undo_operation(&created).is_err());
@@ -1692,7 +2187,7 @@ mod tests {
     #[test]
     fn undo_refuses_a_replacement_at_the_same_path() {
         let root = tempfile::tempdir().unwrap();
-        let created = create_directory(root.path(), "replace-me").unwrap();
+        let created = recorded(create_directory(root.path(), "replace-me").unwrap());
         fs::remove_dir(created.path()).unwrap();
         fs::create_dir(created.path()).unwrap();
 
@@ -1704,9 +2199,9 @@ mod tests {
     fn history_is_bounded_and_new_work_clears_redo() {
         let root = tempfile::tempdir().unwrap();
         let mut journal = OperationJournal::new(2);
-        let first = create_directory(root.path(), "first").unwrap();
-        let second = create_directory(root.path(), "second").unwrap();
-        let third = create_directory(root.path(), "third").unwrap();
+        let first = recorded(create_directory(root.path(), "first").unwrap());
+        let second = recorded(create_directory(root.path(), "second").unwrap());
+        let third = recorded(create_directory(root.path(), "third").unwrap());
         journal.record(first);
         journal.record(second.clone());
         journal.record(third.clone());
@@ -1759,9 +2254,9 @@ mod tests {
                 upserted: vec![destination.join("album")],
             }
         );
-        let redo_record = undo_operation(&operation).unwrap();
+        let redo_record = recorded(undo_operation(&operation).unwrap());
         assert!(!destination.join("album").exists());
-        let redone = redo_operation(&redo_record).unwrap();
+        let redone = recorded(redo_operation(&redo_record).unwrap());
         assert_eq!(fs::read(redone.path().join("notes.txt")).unwrap(), b"hello");
     }
 
@@ -1845,7 +2340,7 @@ mod tests {
             TransferMode::Copy,
             Arc::new(AtomicBool::new(false)),
         );
-        let redo_record = undo_operation(&outcome.operation.unwrap()).unwrap();
+        let redo_record = recorded(undo_operation(&outcome.operation.unwrap()).unwrap());
         fs::write(source.join("added-later.txt"), b"new").unwrap();
 
         assert!(redo_operation(&redo_record).is_err());
@@ -1879,9 +2374,9 @@ mod tests {
             }
         );
 
-        let redo_record = undo_operation(&operation).unwrap();
+        let redo_record = recorded(undo_operation(&operation).unwrap());
         assert_eq!(fs::read(&source).unwrap(), b"contents");
-        let redone = redo_operation(&redo_record).unwrap();
+        let redone = recorded(redo_operation(&redo_record).unwrap());
         assert_eq!(fs::read(redone.path()).unwrap(), b"contents");
         assert!(!source.exists());
     }
@@ -2095,7 +2590,7 @@ mod tests {
         assert_eq!(first.dev(), second.dev());
         assert_eq!(first.ino(), second.ino());
         assert_eq!(first.nlink(), 2);
-        undo_operation(&outcome.operation.unwrap()).unwrap();
+        recorded(undo_operation(&outcome.operation.unwrap()).unwrap());
         assert!(!destination.join("tree").exists());
     }
 
@@ -2207,25 +2702,28 @@ mod tests {
         let archive = root.path().join("report.zip");
         fs::write(&source, b"archive history").unwrap();
 
-        let created = create_zip_operation(
-            std::slice::from_ref(&source),
-            &archive,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
+        let created = recorded(
+            create_zip_operation(
+                std::slice::from_ref(&source),
+                &archive,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap(),
+        );
         assert!(archive.is_file());
-        let undone = undo_operation(&created).unwrap();
+        let undone = recorded(undo_operation(&created).unwrap());
         assert!(!archive.exists());
-        let recreated = redo_operation(&undone).unwrap();
+        let recreated = recorded(redo_operation(&undone).unwrap());
         assert!(archive.is_file());
 
         fs::remove_file(&source).unwrap();
-        let extracted =
-            extract_archive_operation(&archive, Arc::new(AtomicBool::new(false))).unwrap();
+        let extracted = recorded(
+            extract_archive_operation(&archive, Arc::new(AtomicBool::new(false))).unwrap(),
+        );
         assert_eq!(fs::read(&source).unwrap(), b"archive history");
-        let undone = undo_operation(&extracted).unwrap();
+        let undone = recorded(undo_operation(&extracted).unwrap());
         assert!(!source.exists());
-        let redone = redo_operation(&undone).unwrap();
+        let redone = recorded(redo_operation(&undone).unwrap());
         assert_eq!(fs::read(redone.path()).unwrap(), b"archive history");
 
         fs::write(redone.path(), b"changed").unwrap();

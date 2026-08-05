@@ -58,29 +58,34 @@ pub fn save(path: &Path, bookmarks: &[Bookmark]) -> Result<()> {
         .context("Bookmark file has no parent directory")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("Could not create “{}”", parent.display()))?;
-    let temporary = parent.join(format!(".bookmarks.tmp-{}", std::process::id()));
-    let result = (|| {
-        let mut file = fs::File::create(&temporary)
-            .with_context(|| format!("Could not create “{}”", temporary.display()))?;
-        for bookmark in bookmarks {
-            if !bookmark.path.is_absolute() {
-                bail!(
-                    "Cannot save relative bookmark “{}”",
-                    bookmark.path.display()
-                );
-            }
-            let url = Url::from_file_path(&bookmark.path)
-                .map_err(|_| anyhow::anyhow!("Invalid bookmark “{}”", bookmark.path.display()))?;
-            writeln!(file, "{url}")?;
+    // Bookmarks are user data, and every window runs its own save task under
+    // the same process id. Reserve the temporary file atomically so two
+    // windows cannot interleave writes into one predictable path.
+    let mut file = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "Could not create a temporary file in “{}”",
+            parent.display()
+        )
+    })?;
+    for bookmark in bookmarks {
+        if !bookmark.path.is_absolute() {
+            bail!(
+                "Cannot save relative bookmark “{}”",
+                bookmark.path.display()
+            );
         }
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("Could not update “{}”", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let url = Url::from_file_path(&bookmark.path)
+            .map_err(|_| anyhow::anyhow!("Invalid bookmark “{}”", bookmark.path.display()))?;
+        writeln!(file, "{url}")?;
     }
-    result
+    file.as_file()
+        .sync_all()
+        .with_context(|| format!("Could not flush bookmarks for “{}”", path.display()))?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Could not update “{}”", path.display()))?;
+    crate::state::sync_directory(parent);
+    Ok(())
 }
 
 pub fn add(bookmarks: &mut Vec<Bookmark>, path: PathBuf) -> bool {

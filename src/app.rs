@@ -57,9 +57,9 @@ use crate::{
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
     file_ops::{
-        DirectoryChanges, OperationRecord, TransferMode, create_directory, create_zip_operation,
-        extract_archive_operation, redo_operation, rename_entry, summarize_failures,
-        transfer_paths_with_progress, undo_operation, validate_entry_name,
+        CommittedOperation, DirectoryChanges, OperationRecord, TransferMode, create_directory,
+        create_zip_operation, extract_archive_operation, redo_operation, rename_entry,
+        summarize_failures, transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -1464,17 +1464,19 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(operation) => {
-                        let destination = operation.path().to_path_buf();
+                    Ok(committed) => {
+                        let destination = committed.path().to_path_buf();
                         let display_name = destination
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let changes = operation.forward_directory_changes();
-                        this.operations.record(operation);
-                        this.apply_directory_changes(changes, Some(destination), cx);
+                        let undoable =
+                            this.apply_committed_operation(committed, Some(destination), cx);
                         window.push_notification(
-                            Notification::success(format!("Renamed to “{display_name}”")),
+                            Notification::success(format!(
+                                "Renamed to “{display_name}”{}",
+                                undo_note(undoable)
+                            )),
                             cx,
                         );
                     }
@@ -1564,17 +1566,17 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(operation) => {
-                        let path = operation.path().to_path_buf();
-                        let changes = operation.forward_directory_changes();
-                        this.operations.record(operation);
-                        this.apply_directory_changes(changes, Some(path.clone()), cx);
+                    Ok(committed) => {
+                        let path = committed.path().to_path_buf();
+                        let undoable =
+                            this.apply_committed_operation(committed, Some(path.clone()), cx);
                         window.push_notification(
                             Notification::success(format!(
-                                "Created folder “{}”",
+                                "Created folder “{}”{}",
                                 path.file_name()
                                     .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
+                                undo_note(undoable)
                             )),
                             cx,
                         );
@@ -1680,17 +1682,17 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(operation) => {
-                        let path = operation.path().to_path_buf();
-                        let changes = operation.forward_directory_changes();
-                        this.operations.record(operation);
-                        this.apply_directory_changes(changes, Some(path.clone()), cx);
+                    Ok(committed) => {
+                        let path = committed.path().to_path_buf();
+                        let undoable =
+                            this.apply_committed_operation(committed, Some(path.clone()), cx);
                         window.push_notification(
                             Notification::success(format!(
-                                "Created ZIP “{}”",
+                                "Created ZIP “{}”{}",
                                 path.file_name()
                                     .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
+                                undo_note(undoable)
                             )),
                             cx,
                         );
@@ -1727,17 +1729,17 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(operation) => {
-                        let path = operation.path().to_path_buf();
-                        let changes = operation.forward_directory_changes();
-                        this.operations.record(operation);
-                        this.apply_directory_changes(changes, Some(path.clone()), cx);
+                    Ok(committed) => {
+                        let path = committed.path().to_path_buf();
+                        let undoable =
+                            this.apply_committed_operation(committed, Some(path.clone()), cx);
                         window.push_notification(
                             Notification::success(format!(
-                                "Extracted “{}”",
+                                "Extracted “{}”{}",
                                 path.file_name()
                                     .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
+                                undo_note(undoable)
                             )),
                             cx,
                         );
@@ -1768,15 +1770,17 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(undone) => {
+                    Ok(committed) => {
                         let reveal = matches!(&operation, OperationRecord::Rename { .. });
                         let path = if reveal {
-                            undone.path().to_path_buf()
+                            committed.path().to_path_buf()
                         } else {
                             operation.path().to_path_buf()
                         };
-                        let changes = operation.reverse_directory_changes();
+                        let changes = committed.changes().clone();
                         let message = operation_history_message(&operation, false);
+                        let redoable = committed.is_undoable();
+                        let redo_record = committed.into_record();
                         if this.sidebar.browsing_trash {
                             match &operation {
                                 OperationRecord::Trash { records } => this.remove_trash_entries(
@@ -1788,7 +1792,11 @@ impl Marcel {
                                 ),
                                 OperationRecord::Restore { .. } => {
                                     this.upsert_trash_entries(
-                                        undone.trash_records().unwrap_or_default().to_vec(),
+                                        redo_record
+                                            .as_ref()
+                                            .and_then(OperationRecord::trash_records)
+                                            .unwrap_or_default()
+                                            .to_vec(),
                                         cx,
                                     );
                                 }
@@ -1797,8 +1805,15 @@ impl Marcel {
                         } else {
                             this.apply_directory_changes(changes, reveal.then_some(path), cx);
                         }
-                        this.operations.finish_undo(undone);
-                        window.push_notification(Notification::success(message), cx);
+                        // The undo committed. Losing its record only costs
+                        // Redo, so never report the undo itself as failed.
+                        if let Some(record) = redo_record {
+                            this.operations.finish_undo(record);
+                        }
+                        window.push_notification(
+                            Notification::success(format!("{message}{}", redo_note(redoable))),
+                            cx,
+                        );
                     }
                     Err(error) => {
                         this.operations.cancel_undo(operation);
@@ -1827,15 +1842,21 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(redone) => {
-                        let path = redone.path().to_path_buf();
-                        let changes = redone.forward_directory_changes();
-                        let message = operation_history_message(&redone, true);
+                    Ok(committed) => {
+                        let path = committed.path().to_path_buf();
+                        let changes = committed.changes().clone();
+                        let message = operation_history_message(&operation, true);
+                        let undoable = committed.is_undoable();
+                        let undo_record = committed.into_record();
                         if this.sidebar.browsing_trash {
-                            match &redone {
+                            match &operation {
                                 OperationRecord::Trash { .. } => {
                                     this.upsert_trash_entries(
-                                        redone.trash_records().unwrap_or_default().to_vec(),
+                                        undo_record
+                                            .as_ref()
+                                            .and_then(OperationRecord::trash_records)
+                                            .unwrap_or_default()
+                                            .to_vec(),
                                         cx,
                                     );
                                 }
@@ -1853,8 +1874,14 @@ impl Marcel {
                         } else {
                             this.apply_directory_changes(changes, Some(path), cx);
                         }
-                        this.operations.finish_redo(redone);
-                        window.push_notification(Notification::success(message), cx);
+                        // The redo committed. Losing its record only costs Undo.
+                        if let Some(record) = undo_record {
+                            this.operations.finish_redo(record);
+                        }
+                        window.push_notification(
+                            Notification::success(format!("{message}{}", undo_note(undoable))),
+                            cx,
+                        );
                     }
                     Err(error) => {
                         this.operations.cancel_redo(operation);
@@ -1982,11 +2009,21 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(records) => {
-                        this.operations.record(OperationRecord::Restore { records });
+                    Ok(restored) => {
+                        // The payloads are restored. Losing the journal entry
+                        // only costs Undo; the Trash view must still update.
+                        let undoable = restored.undoable;
+                        if undoable {
+                            this.operations.record(OperationRecord::Restore {
+                                records: restored.records,
+                            });
+                        }
                         this.remove_trash_entries(backing_paths, cx);
                         window.push_notification(
-                            Notification::success(format!("Restored {count} item(s)")),
+                            Notification::success(format!(
+                                "Restored {count} item(s){}",
+                                undo_note(undoable)
+                            )),
                             cx,
                         );
                     }
@@ -2306,7 +2343,6 @@ impl Marcel {
         };
         self.ui.entry_menu = None;
         self.start_operation_progress_refresh(cx);
-        let change_sources = sources.clone();
         let task = cx.background_executor().spawn(smol::unblock(move || {
             transfer_paths_with_progress(&sources, &destination, mode, cancel, progress)
         }));
@@ -2314,22 +2350,17 @@ impl Marcel {
         let operation_task = cx.spawn_in(window, async move |this, window| {
             let outcome = task.await;
             let _ = this.update_in(window, |this, window, cx| {
+                // A transfer can commit without retaining undo, so reconcile
+                // the browser from the exact recorded transfers rather than
+                // assuming an absent operation means nothing happened.
                 let changes = outcome.operation.as_ref().map_or_else(
                     || DirectoryChanges {
                         removed: if mode == TransferMode::Move {
-                            change_sources
-                                .iter()
-                                .filter(|source| {
-                                    outcome.completed.iter().any(|destination| {
-                                        destination.file_name() == source.file_name()
-                                    })
-                                })
-                                .cloned()
-                                .collect()
+                            outcome.completed_sources()
                         } else {
                             Vec::new()
                         },
-                        upserted: outcome.completed.clone(),
+                        upserted: outcome.completed_destinations(),
                     },
                     OperationRecord::forward_directory_changes,
                 );
@@ -2348,8 +2379,10 @@ impl Marcel {
                 let reveal = outcome
                     .completed
                     .iter()
-                    .find(|path| path.parent() == Some(this.directory.current_dir.as_path()))
-                    .cloned();
+                    .find(|transfer| {
+                        transfer.destination.parent() == Some(this.directory.current_dir.as_path())
+                    })
+                    .map(|transfer| transfer.destination.clone());
                 this.apply_directory_changes(changes, reveal, cx);
 
                 if outcome.failures.is_empty() {
@@ -2357,24 +2390,18 @@ impl Marcel {
                         TransferMode::Copy => "Copied",
                         TransferMode::Move => "Moved",
                     };
-                    let undo_note = if outcome.undo_unavailable {
-                        " · too large to retain in undo history"
-                    } else {
-                        ""
-                    };
                     window.push_notification(
                         Notification::success(format!(
-                            "{verb} {} item(s){undo_note}",
+                            "{verb} {} item(s){}",
                             outcome.completed.len(),
+                            undo_note(!outcome.undo_unavailable)
                         )),
                         cx,
                     );
                 } else {
                     let mut message = summarize_failures(&outcome.failures);
                     if outcome.undo_unavailable {
-                        message.push_str(
-                            "; successful items were too large to retain in undo history",
-                        );
+                        message.push_str("; some completed items are not available to Undo");
                     }
                     window.push_notification(Notification::error(message), cx);
                 }
@@ -2384,6 +2411,26 @@ impl Marcel {
         });
         self.operations.set_task(operation_task);
         cx.notify();
+    }
+
+    /// Apply a mutation that has already committed to the filesystem.
+    ///
+    /// The browser reducer runs from the committed effect whether or not undo
+    /// bookkeeping survived, so the projection can never disagree with the
+    /// disk. Returns whether the operation is undoable, for the notification.
+    fn apply_committed_operation(
+        &mut self,
+        committed: CommittedOperation,
+        reveal: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changes = committed.changes().clone();
+        let undoable = committed.is_undoable();
+        if let Some(record) = committed.into_record() {
+            self.operations.record(record);
+        }
+        self.apply_directory_changes(changes, reveal, cx);
+        undoable
     }
 
     fn apply_directory_changes(
@@ -6959,6 +7006,24 @@ fn operation_history_message(operation: &OperationRecord, redo: bool) -> String 
         (OperationRecord::ArchiveExtract { .. }, true) => {
             format!("Extracted “{name}” again")
         }
+    }
+}
+
+/// Suffix used when a mutation committed but its undo record was lost. Marcel
+/// reports that as success with a caveat, never as a failed operation.
+fn undo_note(undoable: bool) -> &'static str {
+    if undoable {
+        ""
+    } else {
+        " · not available to Undo"
+    }
+}
+
+fn redo_note(redoable: bool) -> &'static str {
+    if redoable {
+        ""
+    } else {
+        " · not available to Redo"
     }
 }
 

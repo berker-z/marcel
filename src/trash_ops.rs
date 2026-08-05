@@ -279,16 +279,35 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
                 ))
             })
             .collect::<Vec<_>>();
-        let candidate = candidates
-            .iter()
-            .find_map(|(index, identity_matches, _)| identity_matches.then_some(*index))
-            .or_else(|| {
-                let matching_paths = candidates
+        // Hardlinks share a (device, inode) key, so a concurrent trash of a
+        // sibling link can produce two identity matches. Bind the journal only
+        // to an unambiguous entry; anything else disables Undo rather than
+        // guessing and later restoring to the wrong original path.
+        let unique = |mut matching: Vec<&(usize, bool, bool)>| {
+            (matching.len() == 1).then(|| matching.remove(0).0)
+        };
+        let candidate = unique(
+            candidates
+                .iter()
+                .filter(|(_, identity_matches, path_matches)| *identity_matches && *path_matches)
+                .collect(),
+        )
+        .or_else(|| {
+            unique(
+                candidates
+                    .iter()
+                    .filter(|(_, identity_matches, _)| *identity_matches)
+                    .collect(),
+            )
+        })
+        .or_else(|| {
+            unique(
+                candidates
                     .iter()
                     .filter(|(_, _, path_matches)| *path_matches)
-                    .collect::<Vec<_>>();
-                (matching_paths.len() == 1).then_some(matching_paths[0].0)
-            });
+                    .collect(),
+            )
+        });
 
         let Some(index) = candidate else {
             failures.push(TrashFailure {
@@ -318,7 +337,18 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
     }
 }
 
-pub fn restore_trash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>> {
+/// The result of restoring items out of Trash.
+///
+/// `undoable` is false when every payload reached its original path but Marcel
+/// could not re-read one afterwards. The restore still happened, so the caller
+/// must present success without undo rather than an error.
+#[derive(Debug)]
+pub struct TrashRestore {
+    pub records: Vec<TrashRecord>,
+    pub undoable: bool,
+}
+
+pub fn restore_trash_records(records: &[TrashRecord]) -> Result<TrashRestore> {
     for record in records {
         validate_identity(&record.info_path, &record.info_identity, "Trash metadata")?;
         validate_identity(
@@ -362,20 +392,28 @@ pub fn restore_trash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>
         restored.push(record);
     }
 
+    // Finalize. Every payload is already restored, so nothing below may fail
+    // the operation; an uninspectable result only costs undo.
     let mut result = Vec::with_capacity(records.len());
+    let mut undoable = true;
     for record in records {
         // The payload is already safely restored. A failed metadata cleanup
         // leaves only an orphaned Trash entry, never missing user data.
         let _ = fs::remove_file(&record.info_path);
         let original = record.original_path();
-        let metadata = fs::symlink_metadata(original).with_context(|| {
-            format!("Restored “{}” but could not inspect it", original.display())
-        })?;
-        let mut updated = record.clone();
-        updated.payload_identity = identity(&metadata);
-        result.push(updated);
+        match fs::symlink_metadata(original) {
+            Ok(metadata) => {
+                let mut updated = record.clone();
+                updated.payload_identity = identity(&metadata);
+                result.push(updated);
+            }
+            Err(_) => undoable = false,
+        }
     }
-    Ok(result)
+    Ok(TrashRestore {
+        records: result,
+        undoable,
+    })
 }
 
 pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>> {
@@ -400,6 +438,8 @@ pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>> {
 
     let failure = summarize_failures(&outcome.failures);
     if !outcome.records.is_empty() {
+        // Compensating action: the trash operation partially committed, so
+        // undo it before reporting that nothing happened.
         match restore_trash_records(&outcome.records) {
             Ok(_) => bail!("{failure}; completed items were restored"),
             Err(rollback_error) => {
@@ -612,8 +652,9 @@ mod tests {
         );
         assert!(!record.backing_path.exists());
         assert!(!record.info_path.exists());
+        assert!(restored.undoable);
         assert_eq!(
-            restored[0].original_path(),
+            restored.records[0].original_path(),
             original_parent.join("note.txt")
         );
     }

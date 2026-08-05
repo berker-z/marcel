@@ -276,39 +276,45 @@ pub fn summarize_failures(failures: &[DeleteFailure]) -> String {
     }
 }
 
+/// Build the delete plan in pre-order using an explicit stack.
+///
+/// The plan is executed in reverse, so parents must precede their children.
+/// Recursing here risked a stack overflow — which aborts the process rather
+/// than reporting a failure — on a deep enough quarantined tree.
 fn collect_delete_plan(
     path: &Path,
     entries: &mut Vec<DeleteEntry>,
     progress: &TransferProgress,
 ) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("Could not inspect “{}”", path.display()))?;
-    let kind = if metadata.file_type().is_dir() {
-        DeleteKind::Directory
-    } else {
-        DeleteKind::Other
-    };
-    let entry = DeleteEntry {
-        path: path.to_path_buf(),
-        identity: identity(&metadata),
-        kind,
-        bytes: if metadata.file_type().is_file() {
-            metadata.len()
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("Could not inspect “{}”", path.display()))?;
+        let kind = if metadata.file_type().is_dir() {
+            DeleteKind::Directory
         } else {
-            0
-        },
-    };
-    progress.add_total(1, entry.bytes);
-    entries.push(entry);
+            DeleteKind::Other
+        };
+        let entry = DeleteEntry {
+            path: path.clone(),
+            identity: identity(&metadata),
+            kind,
+            bytes: if metadata.file_type().is_file() {
+                metadata.len()
+            } else {
+                0
+            },
+        };
+        progress.add_total(1, entry.bytes);
+        entries.push(entry);
 
-    if kind == DeleteKind::Directory {
-        let mut children = fs::read_dir(path)
-            .with_context(|| format!("Could not read “{}”", path.display()))?
-            .collect::<io::Result<Vec<_>>>()
-            .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            collect_delete_plan(&child.path(), entries, progress)?;
+        if kind == DeleteKind::Directory {
+            let mut children = fs::read_dir(&path)
+                .with_context(|| format!("Could not read “{}”", path.display()))?
+                .collect::<io::Result<Vec<_>>>()
+                .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
+            children.sort_by_key(|entry| entry.file_name());
+            pending.extend(children.into_iter().rev().map(|entry| entry.path()));
         }
     }
     Ok(())

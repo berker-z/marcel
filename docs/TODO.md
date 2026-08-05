@@ -21,6 +21,25 @@ Sprint status uses four consistent meanings:
   [`Sprint 17`](sprints/017-stability-and-architecture-hardening.md) closes the
   confirmed review findings; the next work is its desktop/manual acceptance
   matrix and any hardening defects that matrix reveals.
+- The critical and high findings in
+  [`review-2026-08-05.md`](review-2026-08-05.md) are fixed and covered by
+  regression tests. Its remaining lower-tier backlog is open:
+  - Hide Marcel's own `.marcel-copy-*` and `.marcel-archive-*` staging from the
+    browser reducer while operations run.
+  - Decide and document a setuid/setgid/sticky policy for copy in
+    [`copy-semantics.md`](copy-semantics.md); Marcel currently preserves them
+    where `cp` does not.
+  - Diagnose filesystems without `RENAME_NOREPLACE` explicitly instead of
+    failing every rename, move, publication, restore, and quarantine with a
+    generic error.
+  - Compare device identity when deciding drop acceptance so cross-filesystem
+    targets read as refused rather than accepted-then-failed.
+  - Reap terminal children spawned by Open in Terminal.
+  - Create the freedesktop thumbnail cache directory as `0700`.
+  - Reuse one `IconProvider` per watcher instead of rebuilding it per batch.
+  - Pass `--` to `pdftoppm`, `pdfinfo`, and `gio open`, matching `archive_ops`.
+  - Optional cleanup: one process-level coalescing writer for browser state and
+    bookmarks, replacing the per-window writers.
 - Continue mechanical ownership cleanup only where a concrete interaction or
   test seam requires it. Preview, sidebar, drag/drop, and cohesive window UI
   state now have controllers; GPUI-bound orchestration intentionally remains
