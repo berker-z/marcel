@@ -8,10 +8,22 @@ pub struct SelectionModel {
     selected: HashSet<PathBuf>,
     anchor: Option<PathBuf>,
     primary: Option<PathBuf>,
+    revision: u64,
 }
 
 impl SelectionModel {
+    /// Bumped by every mutator so per-frame derived state — notably the
+    /// drag payload — can tell when it may be reused instead of rebuilt.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn clear(&mut self) {
+        self.touch();
         self.selected.clear();
         self.anchor = None;
         self.primary = None;
@@ -30,6 +42,7 @@ impl SelectionModel {
     }
 
     pub fn select_only(&mut self, path: PathBuf) {
+        self.touch();
         self.selected.clear();
         self.selected.insert(path.clone());
         self.anchor = Some(path.clone());
@@ -37,12 +50,14 @@ impl SelectionModel {
     }
 
     pub fn make_primary(&mut self, path: &Path) {
+        self.touch();
         if self.selected.contains(path) {
             self.primary = Some(path.to_path_buf());
         }
     }
 
     pub fn toggle(&mut self, path: PathBuf, ordered: &[PathBuf]) {
+        self.touch();
         if self.selected.remove(&path) {
             if self.primary.as_ref() == Some(&path) {
                 self.primary = nearest_selected(&path, ordered, &self.selected);
@@ -55,6 +70,7 @@ impl SelectionModel {
     }
 
     pub fn select_range(&mut self, path: PathBuf, ordered: &[PathBuf], additive: bool) {
+        self.touch();
         let anchor = self
             .anchor
             .as_ref()
@@ -79,6 +95,7 @@ impl SelectionModel {
     }
 
     pub fn select_all(&mut self, ordered: &[PathBuf]) {
+        self.touch();
         if ordered.is_empty() {
             self.clear();
             return;
@@ -96,6 +113,7 @@ impl SelectionModel {
     }
 
     pub fn retain(&mut self, ordered: &[PathBuf], mut predicate: impl FnMut(&Path) -> bool) {
+        self.touch();
         self.selected.retain(|path| predicate(path));
         if self.primary.as_ref().is_some_and(|path| !predicate(path)) {
             self.primary = None;
@@ -107,6 +125,7 @@ impl SelectionModel {
     }
 
     pub fn add_all(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.touch();
         for path in paths {
             self.primary.get_or_insert_with(|| path.clone());
             self.anchor.get_or_insert_with(|| path.clone());
@@ -115,6 +134,7 @@ impl SelectionModel {
     }
 
     pub fn ensure_primary(&mut self, ordered: &[PathBuf]) {
+        self.touch();
         if self.primary.is_none() && !self.selected.is_empty() {
             self.primary = ordered
                 .iter()
@@ -130,6 +150,7 @@ impl SelectionModel {
         intersecting: impl IntoIterator<Item = PathBuf>,
         additive: bool,
     ) {
+        self.touch();
         self.selected.clear();
         if additive {
             self.selected.extend(base.iter().cloned());
@@ -245,6 +266,40 @@ mod tests {
 
         assert_eq!(selection.selected(), &HashSet::from([path("visible")]));
         assert_eq!(selection.primary(), Some(&path("visible")));
+    }
+
+    /// The cached drag payload keys off this revision, so a mutator that
+    /// forgets to bump it would hand a drag the previous selection.
+    #[test]
+    fn every_mutation_advances_the_revision() {
+        let ordered = [path("a"), path("b")];
+        let mut selection = SelectionModel::default();
+        let mut previous = selection.revision();
+        let mut assert_advanced = |selection: &SelectionModel, label: &str| {
+            assert_ne!(selection.revision(), previous, "{label} kept the revision");
+            previous = selection.revision();
+        };
+
+        selection.select_only(path("a"));
+        assert_advanced(&selection, "select_only");
+        selection.toggle(path("b"), &ordered);
+        assert_advanced(&selection, "toggle");
+        selection.select_range(path("a"), &ordered, false);
+        assert_advanced(&selection, "select_range");
+        selection.select_all(&ordered);
+        assert_advanced(&selection, "select_all");
+        selection.make_primary(Path::new("b"));
+        assert_advanced(&selection, "make_primary");
+        selection.add_all([path("a")]);
+        assert_advanced(&selection, "add_all");
+        selection.retain(&ordered, |_| true);
+        assert_advanced(&selection, "retain");
+        selection.ensure_primary(&ordered);
+        assert_advanced(&selection, "ensure_primary");
+        selection.replace_from_marquee(&HashSet::new(), [path("a")], false);
+        assert_advanced(&selection, "replace_from_marquee");
+        selection.clear();
+        assert_advanced(&selection, "clear");
     }
 
     #[test]

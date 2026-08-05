@@ -1,7 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::OsStr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -12,6 +13,19 @@ use gpui::Task;
 
 use crate::fs::{FileEntry, merge_sorted_entries, sort_entries};
 use crate::selection::SelectionModel;
+
+/// Lazily rebuilt path lookup over `entries`.
+///
+/// Resolving a path by linear scan is fine once, but the browser does it
+/// several times per frame — the render pass, every `command_enabled` query,
+/// and each context-menu item — so a 50,000-entry directory paid tens of
+/// thousands of path comparisons per frame. Rebuilding lazily keeps streamed
+/// loads from paying for an index nobody has asked for yet.
+#[derive(Default)]
+struct EntryIndex {
+    revision: u64,
+    lookup: HashMap<PathBuf, usize>,
+}
 
 pub struct DirectorySession {
     pub(crate) current_dir: PathBuf,
@@ -28,6 +42,9 @@ pub struct DirectorySession {
     pub(crate) watch_task: Option<Task<()>>,
     watch_cancel: Option<Arc<AtomicBool>>,
     pub(crate) pending_reveal: Vec<PathBuf>,
+    entries_revision: u64,
+    projection_revision: u64,
+    entry_index: RefCell<EntryIndex>,
 }
 
 impl DirectorySession {
@@ -47,11 +64,44 @@ impl DirectorySession {
             watch_task: None,
             watch_cancel: None,
             pending_reveal: Vec::new(),
+            entries_revision: 1,
+            projection_revision: 1,
+            entry_index: RefCell::new(EntryIndex::default()),
         }
     }
 
+    /// Resolve one entry by path in constant time.
+    pub fn entry(&self, path: &Path) -> Option<&FileEntry> {
+        let position = {
+            let mut index = self.entry_index.borrow_mut();
+            if index.revision != self.entries_revision {
+                index.lookup.clear();
+                index.lookup.reserve(self.entries.len());
+                for (position, entry) in self.entries.iter().enumerate() {
+                    index.lookup.insert(entry.path.clone(), position);
+                }
+                index.revision = self.entries_revision;
+            }
+            index.lookup.get(path).copied()
+        };
+        position.and_then(|position| self.entries.get(position))
+    }
+
+    /// Invalidate the path lookup. Must be called wherever `entries` changes.
+    fn mark_entries_changed(&mut self) {
+        self.entries_revision = self.entries_revision.wrapping_add(1);
+    }
+
+    /// Bumped whenever the visible projection changes, so derived per-frame
+    /// state such as the drag payload knows when it may be reused.
+    pub fn projection_revision(&self) -> u64 {
+        self.projection_revision
+    }
+
     pub fn apply_event(&mut self, event: DirectoryEvent) -> ApplyDirectoryEvent {
-        apply_directory_event(&mut self.entries, event)
+        let applied = apply_directory_event(&mut self.entries, event);
+        self.mark_entries_changed();
+        applied
     }
 
     pub fn apply_events(&mut self, events: Vec<DirectoryEvent>) -> ApplyDirectoryEvents {
@@ -89,6 +139,7 @@ impl DirectorySession {
         let mut upserts = upserts.into_values().collect::<Vec<_>>();
         sort_entries(&mut upserts);
         self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), upserts);
+        self.mark_entries_changed();
         self.rebuild_visible_entries();
         let mut reconcile = self.reconcile_selection();
         if matches!(reconcile, ReconcileSelection::Unchanged)
@@ -113,7 +164,9 @@ impl DirectorySession {
         self.generation = self.generation.wrapping_add(1);
         self.load_task.take();
         self.entries.clear();
+        self.mark_entries_changed();
         self.visible_entries.clear();
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         if clear_filter {
             self.filter_query.clear();
         }
@@ -138,6 +191,7 @@ impl DirectorySession {
 
     pub fn merge_batch(&mut self, batch: Vec<FileEntry>) -> ReconcileSelection {
         self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), batch);
+        self.mark_entries_changed();
         self.rebuild_visible_entries();
         self.reconcile_selection()
     }
@@ -216,6 +270,7 @@ impl DirectorySession {
     }
 
     pub fn rebuild_visible_entries(&mut self) {
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         // Yazi keeps finder matches as derived state over the current folder
         // and catches that state up when the folder revision changes. Marcel
         // applies the same separation to a fuzzy-ranked visible-index layer.
@@ -597,6 +652,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["folder", "selected.txt"]
         );
+    }
+
+    /// The lookup is rebuilt lazily against a revision, so every path that
+    /// mutates `entries` must invalidate it. A stale index resolves a path to
+    /// whatever entry now occupies that position.
+    #[test]
+    fn entry_lookup_tracks_every_entries_mutation() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        assert!(session.entry(Path::new("/folder/a.txt")).is_none());
+
+        session.merge_batch(vec![entry("a.txt", false, Some(1))]);
+        assert_eq!(
+            session.entry(Path::new("/folder/a.txt")).map(|e| e.size),
+            Some(Some(1))
+        );
+
+        // An inserted directory sorts ahead of the file and shifts its index.
+        session.apply_events(vec![DirectoryEvent::Added(entry("folder", true, None))]);
+        assert!(session.entry(Path::new("/folder/folder")).is_some());
+        assert_eq!(
+            session
+                .entry(Path::new("/folder/a.txt"))
+                .map(|e| e.name.as_str()),
+            Some("a.txt")
+        );
+
+        // A change in place must be observed, not served from the old copy.
+        session.apply_events(vec![DirectoryEvent::Changed(entry(
+            "a.txt",
+            false,
+            Some(99),
+        ))]);
+        assert_eq!(
+            session.entry(Path::new("/folder/a.txt")).map(|e| e.size),
+            Some(Some(99))
+        );
+
+        session.apply_events(vec![DirectoryEvent::Removed(PathBuf::from(
+            "/folder/a.txt",
+        ))]);
+        assert!(session.entry(Path::new("/folder/a.txt")).is_none());
+
+        session.apply_event(DirectoryEvent::Added(entry("b.txt", false, Some(2))));
+        assert!(session.entry(Path::new("/folder/b.txt")).is_some());
+
+        session.begin_virtual_load(true);
+        assert!(session.entry(Path::new("/folder/b.txt")).is_none());
+    }
+
+    #[test]
+    fn projection_revision_advances_when_the_visible_set_changes() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.merge_batch(vec![
+            entry("alpha.txt", false, Some(1)),
+            entry("beta.txt", false, Some(1)),
+        ]);
+        let before = session.projection_revision();
+
+        session.set_filter_query("bet".to_string());
+
+        assert_ne!(session.projection_revision(), before);
     }
 
     #[test]
