@@ -107,6 +107,12 @@ pub enum OperationRecord {
         destination: PathBuf,
         created: Vec<PathSnapshot>,
         replaced: Vec<ReplacedItem>,
+        /// Items added by folding a directory into an existing one.
+        ///
+        /// Held apart from `created` because they sit scattered inside a tree
+        /// that was already there, so undo has to validate them one at a time
+        /// rather than by re-walking a tree it owns outright.
+        merged: Vec<PathSnapshot>,
     },
     Move {
         transfers: Vec<MoveRecord>,
@@ -846,10 +852,27 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
         OperationRecord::Copy { created, .. }
         | OperationRecord::ArchiveCreate { created, .. }
         | OperationRecord::ArchiveExtract { created, .. } => {
-            let replaced = match operation {
-                OperationRecord::Copy { replaced, .. } => replaced.as_slice(),
-                _ => &[],
+            let (replaced, merged) = match operation {
+                OperationRecord::Copy {
+                    replaced, merged, ..
+                } => (replaced.as_slice(), merged.as_slice()),
+                _ => (&[][..], &[][..]),
             };
+            // Take back what was folded into an existing tree first, while the
+            // copy's own output is still whole and nothing has been removed.
+            if let Err(failure) = remove_merged_items(merged) {
+                return if failure.removed.is_empty() {
+                    MutationOutcome::unchanged(failure.error)
+                } else {
+                    MutationOutcome::discarded(
+                        DirectoryChanges {
+                            removed: failure.removed,
+                            upserted: Vec::new(),
+                        },
+                        failure.error,
+                    )
+                };
+            }
             match remove_snapshotted_tree(created) {
                 Ok(()) => {
                     // The output is gone, so whatever it displaced can come
@@ -1403,6 +1426,8 @@ enum SourcePlan {
     Transfer(PathBuf),
     /// Transfer it to this destination after displacing what is there.
     Replace(PathBuf),
+    /// Fold it into the directory already at this destination.
+    Merge(PathBuf),
     /// It is already where it was asked to go, so the request is satisfied.
     AlreadyInPlace,
     /// The user declined this source.
@@ -1523,14 +1548,18 @@ fn plan_source(
                 };
                 return SourcePlan::Transfer(destination_dir.join(name));
             }
-            // Merging two directory trees is a separate operation with its own
-            // per-child decisions, so replace still refuses it rather than
-            // discarding a tree the user expected to be merged into.
+            // Two directories meeting is a merge, not a replacement: the
+            // destination keeps everything it has and gains what it lacks.
+            // Moving cannot express that yet, so it still refuses rather than
+            // discarding a tree the user expected to be joined.
             ConflictResponse::Replace if request.is_merge() => {
-                return SourcePlan::Failed(format!(
-                    "“{}” is a folder; merging folders is not supported yet",
-                    target.display()
-                ));
+                return match mode {
+                    TransferMode::Copy => SourcePlan::Merge(target),
+                    TransferMode::Move => SourcePlan::Failed(format!(
+                        "“{}” is a folder; merging folders is only supported when copying",
+                        target.display()
+                    )),
+                };
             }
             ConflictResponse::Replace => return SourcePlan::Replace(target),
         }
@@ -1566,6 +1595,7 @@ fn transfer_paths_impl(
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
     let mut already_in_place = Vec::new();
+    let mut merged_created: Vec<PathSnapshot> = Vec::new();
     let mut cancelled_sources = Vec::new();
     let mut replaced_items: Vec<ReplacedItem> = Vec::new();
     let mut replaced_bytes: u64 = 0;
@@ -1622,6 +1652,28 @@ fn transfer_paths_impl(
                     continue;
                 }
             },
+            // A merge adds to a tree that is already there rather than
+            // publishing a new one, so it runs on its own path and records
+            // what it added separately.
+            SourcePlan::Merge(target) => {
+                if let Some(progress) = &progress {
+                    progress.set_current_path(Some(source.clone()));
+                }
+                match merge_directories(source, &target, &cancelled, progress.as_deref()) {
+                    Ok(added) => {
+                        merged_created.extend(added);
+                        completed.push(CompletedTransfer {
+                            source: source.clone(),
+                            destination: target,
+                        });
+                    }
+                    Err(error) => failures.push(TransferFailure {
+                        path: source.clone(),
+                        message: error.to_string(),
+                    }),
+                }
+                continue;
+            }
             // Not a refusal and not work: the item is where it was asked to
             // be, so the request is already satisfied. Reporting it as skipped
             // or failed would invent a problem the user does not have.
@@ -1727,12 +1779,15 @@ fn transfer_paths_impl(
     }
 
     let operation = match mode {
-        TransferMode::Copy if !copied_created.is_empty() => Some(OperationRecord::Copy {
-            sources: copied_sources,
-            destination: destination.to_path_buf(),
-            created: copied_created,
-            replaced: std::mem::take(&mut replaced_items),
-        }),
+        TransferMode::Copy if !copied_created.is_empty() || !merged_created.is_empty() => {
+            Some(OperationRecord::Copy {
+                sources: copied_sources,
+                destination: destination.to_path_buf(),
+                created: copied_created,
+                replaced: std::mem::take(&mut replaced_items),
+                merged: std::mem::take(&mut merged_created),
+            })
+        }
         TransferMode::Move if !moved.is_empty() => Some(OperationRecord::Move {
             transfers: moved,
             replaced: std::mem::take(&mut replaced_items),
@@ -2389,6 +2444,189 @@ fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
 /// Sockets, FIFOs, and device nodes are recorded rather than rejected: a
 /// rename moves them without inspecting them, so refusing to describe such a
 /// tree only costs undo on an operation that succeeded anyway.
+/// One directory folded into another, decided before anything is written.
+///
+/// Merging is the union of two trees: whatever the destination already has, it
+/// keeps. That makes it a pure addition, which is what lets it stay inside the
+/// guardrails. Nothing is displaced, so nothing needs quarantining; undo is
+/// exactly "remove what was added", which restores the previous state rather
+/// than approximating it; and a merge that fails partway has added a subset of
+/// what it planned, which is describable.
+///
+/// The operation as a whole cannot be published atomically the way a copy is,
+/// because it writes into a tree that is already visible. Each file is still
+/// published atomically on its own, so a half-written file is never reachable
+/// under its final name.
+#[derive(Debug, Default)]
+struct MergePlan {
+    /// Directories to create, parents before children.
+    directories: Vec<PathBuf>,
+    /// Files, symlinks, and other leaves to copy, as (source, destination).
+    files: Vec<(PathBuf, PathBuf)>,
+    /// Destinations already occupied, which the merge leaves untouched.
+    skipped: usize,
+}
+
+/// Decide a whole merge before performing any of it.
+///
+/// Directories are not conflicts here — they are the points at which the two
+/// trees join, so an existing directory is descended into rather than skipped.
+/// Anything else already present is left exactly as it is.
+fn plan_merge(source: &Path, destination: &Path) -> Result<MergePlan> {
+    let mut plan = MergePlan::default();
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((source, destination)) = pending.pop() {
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("Could not inspect “{}”", source.display()))?;
+        let occupant = describe_occupant(&destination).with_context(|| {
+            format!("Could not inspect destination “{}”", destination.display())
+        })?;
+
+        match (metadata.file_type().is_dir(), occupant) {
+            // Two directories meet: join them and keep walking.
+            (true, Some(occupant)) if occupant.is_directory => {}
+            // A directory arriving where nothing is: create it, then walk it.
+            (true, None) => plan.directories.push(destination.clone()),
+            // A leaf arriving where nothing is: copy it.
+            (false, None) => {
+                plan.files.push((source, destination));
+                continue;
+            }
+            // Anything else is occupied, and a merge keeps what is there.
+            _ => {
+                plan.skipped += 1;
+                continue;
+            }
+        }
+
+        let mut children = fs::read_dir(&source)
+            .with_context(|| format!("Could not read “{}”", source.display()))?
+            .collect::<io::Result<Vec<_>>>()
+            .with_context(|| format!("Could not read an entry in “{}”", source.display()))?;
+        children.sort_by_key(|entry| entry.file_name());
+        // Reversed so children are visited in enumeration order, which keeps
+        // created parents ahead of their children.
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .map(|child| (child.path(), destination.join(child.file_name()))),
+        );
+    }
+    Ok(plan)
+}
+
+/// Perform a planned merge, returning what it added.
+fn merge_directories(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+) -> Result<Vec<PathSnapshot>> {
+    // Prepare: decide the whole merge before writing any of it.
+    let plan = plan_merge(source, destination)?;
+
+    for directory in &plan.directories {
+        if cancelled.load(Ordering::Acquire) {
+            bail!("Operation cancelled");
+        }
+        fs::create_dir(directory)
+            .with_context(|| format!("Could not create “{}”", directory.display()))?;
+    }
+
+    let mut files = Vec::new();
+    for (from, to) in &plan.files {
+        if cancelled.load(Ordering::Acquire) {
+            bail!("Operation cancelled");
+        }
+        // Each file goes through the ordinary copy, which stages it privately
+        // and publishes it with one atomic rename. The merge as a whole is not
+        // atomic, but no individual file is ever reachable half-written.
+        let copied = copy_one(from, to, cancelled, progress, COPY_UNDO_SNAPSHOT_LIMIT)?;
+        files.extend(copied.created);
+    }
+
+    // Snapshot the new directories only now. Writing a file into a directory
+    // moves that directory's ctime, so recording it at creation time would
+    // leave undo comparing against an identity its own copying invalidated.
+    let mut created = Vec::with_capacity(plan.directories.len() + files.len());
+    for directory in &plan.directories {
+        let metadata = fs::symlink_metadata(directory)
+            .with_context(|| format!("Could not inspect “{}”", directory.display()))?;
+        created.push(snapshot_from_metadata(directory, &metadata)?);
+    }
+    // Parents before children, and directories before the files inside them,
+    // so removing in reverse takes leaves first.
+    created.extend(files);
+    Ok(created)
+}
+
+/// Remove exactly what a merge added.
+///
+/// The whole-tree validation a copy uses cannot work here: a merged directory
+/// is full of entries that were already there, so re-walking it and comparing
+/// against the record would always disagree. Each item is validated on its own
+/// instead, and anything that changed since is left alone.
+fn remove_merged_items(created: &[PathSnapshot]) -> Result<(), PartialRemoval> {
+    let mut removed = Vec::new();
+    for snapshot in created.iter().rev() {
+        let failure =
+            |error: anyhow::Error, removed: Vec<PathBuf>| PartialRemoval { removed, error };
+        match fs::symlink_metadata(&snapshot.path) {
+            Ok(metadata) => {
+                let found = file_identity(&metadata);
+                // A directory's ctime moves whenever its contents change —
+                // including as a direct result of the removals this loop is
+                // performing on its children — so comparing it would reject
+                // the tree undo has just been dismantling. Device and inode
+                // still prove it is the same directory, and a directory that
+                // gained an entry from elsewhere is caught by the removal
+                // itself failing rather than by an identity check.
+                let matches = if snapshot.kind == SnapshotKind::Directory {
+                    (found.device, found.inode)
+                        == (snapshot.identity.device, snapshot.identity.inode)
+                } else {
+                    found == snapshot.identity
+                };
+                if !matches {
+                    return Err(failure(
+                        anyhow::anyhow!(
+                            "Cannot undo: “{}” changed or was replaced",
+                            snapshot.path.display()
+                        ),
+                        removed,
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(failure(
+                    anyhow::Error::new(error).context(format!(
+                        "Cannot undo: “{}” is missing",
+                        snapshot.path.display()
+                    )),
+                    removed,
+                ));
+            }
+        }
+        let result = match snapshot.kind {
+            SnapshotKind::Directory => fs::remove_dir(&snapshot.path),
+            SnapshotKind::File | SnapshotKind::Symlink => fs::remove_file(&snapshot.path),
+            _ => unreachable!("a merge only ever creates directories, files, and links"),
+        };
+        match result {
+            Ok(()) => removed.push(snapshot.path.clone()),
+            Err(error) => {
+                return Err(failure(
+                    anyhow::Error::new(error)
+                        .context(format!("Could not remove “{}”", snapshot.path.display())),
+                    removed,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The name prefix Marcel gives an object it has displaced.
 ///
 /// The process id is part of the name so a later Marcel can tell its own live
@@ -3809,10 +4047,10 @@ mod tests {
         );
     }
 
-    /// Merging two directory trees needs per-child decisions, so replace must
-    /// not quietly discard a tree the user expected to be merged into.
+    /// Choosing merge for two directories must never discard what the
+    /// destination already holds, even when the source has nothing to add.
     #[test]
-    fn replacing_a_directory_with_a_directory_is_refused() {
+    fn merging_an_empty_directory_keeps_the_destination_intact() {
         let root = tempfile::tempdir().unwrap();
         let source_dir = root.path().join("source");
         let destination = root.path().join("destination");
@@ -3832,11 +4070,13 @@ mod tests {
             &mut policy,
         );
 
-        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
         assert_eq!(
             fs::read(destination.join("shared/keep.txt")).unwrap(),
             b"keep"
         );
+        // Nothing was added, so there is nothing to undo.
+        assert!(outcome.operation.is_none());
     }
 
     fn no_replacement_quarantines(directory: &Path) -> bool {
@@ -3888,6 +4128,152 @@ mod tests {
         // Both sources arrived beside them.
         assert_eq!(fs::read(destination.join("a (3).txt")).unwrap(), b"new");
         assert_eq!(fs::read(destination.join("b (2).txt")).unwrap(), b"new");
+    }
+
+    /// Merging is the union of two trees: the destination keeps everything it
+    /// has and gains what it lacks. Nothing is displaced, which is what makes
+    /// undo exact rather than approximate.
+    #[test]
+    fn merging_adds_what_is_missing_and_keeps_what_is_there() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        // Source tree: a colliding file, a new file, a colliding subdirectory
+        // holding a new file, and a wholly new subdirectory.
+        fs::create_dir_all(source_dir.join("photos/holiday")).unwrap();
+        fs::create_dir_all(source_dir.join("photos/new-album")).unwrap();
+        fs::write(source_dir.join("photos/shared.txt"), b"NEW").unwrap();
+        fs::write(source_dir.join("photos/only-in-source.txt"), b"NEW").unwrap();
+        fs::write(source_dir.join("photos/holiday/beach.txt"), b"NEW").unwrap();
+        fs::write(source_dir.join("photos/new-album/cover.txt"), b"NEW").unwrap();
+        // Destination tree: the same directory, one colliding file, one of its
+        // own, and the colliding subdirectory with its own contents.
+        fs::create_dir_all(destination.join("photos/holiday")).unwrap();
+        fs::write(destination.join("photos/shared.txt"), b"ORIGINAL").unwrap();
+        fs::write(
+            destination.join("photos/only-in-destination.txt"),
+            b"ORIGINAL",
+        )
+        .unwrap();
+        fs::write(destination.join("photos/holiday/sunset.txt"), b"ORIGINAL").unwrap();
+
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source_dir.join("photos")),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        let merged = destination.join("photos");
+        // Everything the destination already had is untouched.
+        assert_eq!(fs::read(merged.join("shared.txt")).unwrap(), b"ORIGINAL");
+        assert_eq!(
+            fs::read(merged.join("only-in-destination.txt")).unwrap(),
+            b"ORIGINAL"
+        );
+        assert_eq!(
+            fs::read(merged.join("holiday/sunset.txt")).unwrap(),
+            b"ORIGINAL"
+        );
+        // Everything it lacked has arrived, at every depth.
+        assert_eq!(fs::read(merged.join("only-in-source.txt")).unwrap(), b"NEW");
+        assert_eq!(fs::read(merged.join("holiday/beach.txt")).unwrap(), b"NEW");
+        assert_eq!(
+            fs::read(merged.join("new-album/cover.txt")).unwrap(),
+            b"NEW"
+        );
+
+        // Undo removes exactly what arrived and nothing else.
+        let operation = outcome.operation.expect("a merge retains undo");
+        undo_operation(&operation).unwrap();
+
+        assert_eq!(fs::read(merged.join("shared.txt")).unwrap(), b"ORIGINAL");
+        assert_eq!(
+            fs::read(merged.join("only-in-destination.txt")).unwrap(),
+            b"ORIGINAL"
+        );
+        assert_eq!(
+            fs::read(merged.join("holiday/sunset.txt")).unwrap(),
+            b"ORIGINAL"
+        );
+        assert!(!merged.join("only-in-source.txt").exists());
+        assert!(!merged.join("holiday/beach.txt").exists());
+        assert!(!merged.join("new-album").exists());
+        // The source is a copy source, so it is left exactly as it was.
+        assert_eq!(
+            fs::read(source_dir.join("photos/shared.txt")).unwrap(),
+            b"NEW"
+        );
+    }
+
+    /// Undo of a merge validates each item on its own, so something added
+    /// inside the merged tree afterwards is left alone rather than deleted.
+    #[test]
+    fn undoing_a_merge_leaves_later_additions_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(source_dir.join("photos")).unwrap();
+        fs::create_dir_all(destination.join("photos")).unwrap();
+        fs::write(source_dir.join("photos/arrived.txt"), b"NEW").unwrap();
+
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source_dir.join("photos")),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+        let operation = outcome.operation.expect("a merge retains undo");
+        // Someone adds a file to the merged directory afterwards.
+        let later = destination.join("photos/added-later.txt");
+        fs::write(&later, b"MINE").unwrap();
+
+        undo_operation(&operation).unwrap();
+
+        assert!(!destination.join("photos/arrived.txt").exists());
+        assert_eq!(fs::read(&later).unwrap(), b"MINE");
+    }
+
+    /// Moving cannot express a merge yet, so it refuses rather than discarding
+    /// the tree the user expected to be joined.
+    #[test]
+    fn moving_a_directory_onto_a_directory_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(source_dir.join("photos")).unwrap();
+        fs::create_dir_all(destination.join("photos")).unwrap();
+        fs::write(destination.join("photos/keep.txt"), b"keep").unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::for_all(
+            ConflictResponse::Replace,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source_dir.join("photos")),
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+        assert_eq!(
+            fs::read(destination.join("photos/keep.txt")).unwrap(),
+            b"keep"
+        );
+        assert!(source_dir.join("photos").exists());
     }
 
     /// Dropping a selection onto the folder it already lives in asks for
