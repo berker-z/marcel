@@ -57,9 +57,10 @@ use crate::{
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
     file_ops::{
-        CommittedOperation, DirectoryChanges, OperationRecord, TransferMode, create_directory,
-        create_zip_operation, extract_archive_operation, redo_operation, rename_entry,
-        summarize_failures, transfer_paths_with_progress, undo_operation, validate_entry_name,
+        CommittedOperation, DirectoryChanges, MutationOutcome, OperationRecord, TransferMode,
+        create_directory, create_zip_operation, extract_archive_operation, redo_operation,
+        rename_entry, summarize_failures, transfer_paths_with_progress, undo_operation,
+        validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -1763,7 +1764,7 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(committed) => {
+                    MutationOutcome::Committed(committed) => {
                         let reveal = matches!(&operation, OperationRecord::Rename { .. });
                         let path = if reveal {
                             committed.path().to_path_buf()
@@ -1808,9 +1809,24 @@ impl Marcel {
                             cx,
                         );
                     }
-                    Err(error) => {
+                    // Nothing reached the disk, so the record still describes
+                    // it exactly and the user can fix the obstacle and retry.
+                    MutationOutcome::Unchanged(error) => {
                         this.operations.cancel_undo(operation);
                         window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                    // The undo crossed its commit point. Whatever compensation
+                    // achieved, the record's identities predate it, so keeping
+                    // it would only produce a "changed or was replaced" refusal
+                    // later that blamed the user for Marcel's own recovery.
+                    MutationOutcome::Discarded { changes, error } => {
+                        this.apply_directory_changes(changes, None, cx);
+                        window.push_notification(
+                            Notification::error(format!(
+                                "{error}; this operation can no longer be undone"
+                            )),
+                            cx,
+                        );
                     }
                 }
                 this.operations.finish_active();
@@ -1835,7 +1851,7 @@ impl Marcel {
             let result = task.await;
             let _ = this.update_in(window, |this, window, cx| {
                 match result {
-                    Ok(committed) => {
+                    MutationOutcome::Committed(committed) => {
                         let path = committed.path().to_path_buf();
                         let changes = committed.changes().clone();
                         let message = operation_history_message(&operation, true);
@@ -1876,9 +1892,18 @@ impl Marcel {
                             cx,
                         );
                     }
-                    Err(error) => {
+                    MutationOutcome::Unchanged(error) => {
                         this.operations.cancel_redo(operation);
                         window.push_notification(Notification::error(error.to_string()), cx);
+                    }
+                    MutationOutcome::Discarded { changes, error } => {
+                        this.apply_directory_changes(changes, None, cx);
+                        window.push_notification(
+                            Notification::error(format!(
+                                "{error}; this operation can no longer be redone"
+                            )),
+                            cx,
+                        );
                     }
                 }
                 this.operations.finish_active();

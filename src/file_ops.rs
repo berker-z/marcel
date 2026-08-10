@@ -18,7 +18,15 @@ use crate::{
     trash_ops::{TrashRecord, restore_trash_records, retrash_records},
 };
 
-pub const OPERATION_HISTORY_LIMIT: usize = 100;
+/// How many operations each of the undo and redo stacks retains.
+///
+/// A record can carry one `PathSnapshot` per descendant, so depth multiplies
+/// the worst-case cost of `COPY_UNDO_SNAPSHOT_LIMIT` rather than adding to it.
+/// Nautilus retains exactly one undoable operation
+/// (`nautilus-file-undo-manager.c`), which is the far end of the same trade:
+/// depth costs memory and buys reach the user rarely exercises. Marcel keeps a
+/// usable stack but not an unreasoned one.
+pub const OPERATION_HISTORY_LIMIT: usize = 20;
 pub const COPY_UNDO_SNAPSHOT_LIMIT: usize = 100_000;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -117,11 +125,51 @@ pub struct PathSnapshot {
     kind: SnapshotKind,
 }
 
+/// The filesystem object kinds Marcel records in an undo snapshot.
+///
+/// The variant set mirrors Yazi's `ChaType`, which distinguishes every Unix
+/// object kind rather than collapsing the ones it cannot reproduce:
+/// https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-fs/src/cha/type.rs
+///
+/// Marcel keeps the distinction for two reasons. It names the exact obstacle in
+/// a refusal instead of saying "special file", and because snapshots compare by
+/// equality, a socket replaced by a FIFO at the same path is rejected on kind
+/// alone rather than relying on inode and ctime to differ.
+///
+/// Marcel cannot copy, archive, or recreate the special kinds — but a rename
+/// does not care what a directory holds, so recording them lets a moved tree
+/// stay undoable while staying out of every path that would have to reproduce
+/// or delete it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SnapshotKind {
     Directory,
     File,
     Symlink,
+    BlockDevice,
+    CharDevice,
+    Socket,
+    Fifo,
+    Unknown,
+}
+
+impl SnapshotKind {
+    /// Whether Marcel can move this object but never reproduce or remove it.
+    fn is_special(self) -> bool {
+        !matches!(self, Self::Directory | Self::File | Self::Symlink)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Directory => "a directory",
+            Self::File => "a regular file",
+            Self::Symlink => "a symbolic link",
+            Self::BlockDevice => "a block device",
+            Self::CharDevice => "a character device",
+            Self::Socket => "a socket",
+            Self::Fifo => "a FIFO",
+            Self::Unknown => "an unrecognized filesystem object",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,6 +235,80 @@ impl CommittedOperation {
 
     pub fn into_record(self) -> Option<OperationRecord> {
         self.record
+    }
+}
+
+/// The outcome of a mutation that may cross more than one commit point.
+///
+/// `CommittedOperation` models a single commit correctly, but Undo, Redo, and
+/// the Trash paths can rename item A, fail on item B, and then compensate. Two
+/// states cannot describe that, and collapsing it into an ordinary `Err` told
+/// the caller "nothing happened" while the journal had already been
+/// invalidated.
+///
+/// Nautilus solves the same problem by discarding its undo record whenever an
+/// undo fails for any reason other than user cancellation
+/// (`nautilus-file-undo-manager.c`, `undo_info_apply_ready`). It can afford a
+/// blunt rule because it stores no identities to go stale. Marcel keeps its
+/// identity checks, so it splits that rule in two: a failure that provably
+/// never reached the disk keeps the record retryable, and anything past the
+/// first commit discards it.
+#[derive(Debug)]
+pub enum MutationOutcome {
+    /// Nothing reached the filesystem. The history record still describes the
+    /// disk, so the caller keeps it and the user can retry.
+    Unchanged(anyhow::Error),
+    /// The mutation committed. Undo bookkeeping may still be absent.
+    Committed(CommittedOperation),
+    /// The mutation crossed its commit point and then failed.
+    ///
+    /// `changes` describes whatever reached the disk, which may be empty when
+    /// compensation put everything back. Empty does *not* mean retryable: a
+    /// compensating rename bumps the root's ctime, so the record that produced
+    /// this attempt can no longer validate and must be discarded.
+    Discarded {
+        changes: DirectoryChanges,
+        error: anyhow::Error,
+    },
+}
+
+impl MutationOutcome {
+    /// Treat a failure that has not reached the filesystem as retryable.
+    fn unchanged(error: impl Into<anyhow::Error>) -> Self {
+        Self::Unchanged(error.into())
+    }
+
+    /// Treat a failure past the first commit as history-invalidating.
+    fn discarded(changes: DirectoryChanges, error: impl Into<anyhow::Error>) -> Self {
+        Self::Discarded {
+            changes,
+            error: error.into(),
+        }
+    }
+
+    /// Whether the history record survives this outcome.
+    ///
+    /// `Unchanged` is the only failure a caller may retry: every other failure
+    /// crossed a commit point and left the record describing a disk state that
+    /// no longer exists.
+    pub fn keeps_history(&self) -> bool {
+        matches!(self, Self::Unchanged(_))
+    }
+}
+
+#[cfg(test)]
+impl MutationOutcome {
+    #[track_caller]
+    fn unwrap(self) -> CommittedOperation {
+        match self {
+            Self::Committed(committed) => committed,
+            Self::Unchanged(error) => panic!("expected a commit, got Unchanged: {error}"),
+            Self::Discarded { error, .. } => panic!("expected a commit, got Discarded: {error}"),
+        }
+    }
+
+    fn is_err(&self) -> bool {
+        !matches!(self, Self::Committed(_))
     }
 }
 
@@ -539,65 +661,126 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<CommittedOperation> {
     ))
 }
 
-pub fn undo_operation(operation: &OperationRecord) -> Result<CommittedOperation> {
+pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
     let reversed = operation.reverse_directory_changes();
     match operation {
         OperationRecord::CreateDirectory { path, identity } => {
-            let metadata = fs::symlink_metadata(path)
-                .with_context(|| format!("Cannot undo: “{}” no longer exists", path.display()))?;
+            // Prepare: every check below runs before the single commit, so a
+            // failure here provably left the directory in place.
+            let metadata = match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    return MutationOutcome::unchanged(anyhow::Error::new(error).context(format!(
+                        "Cannot undo: “{}” no longer exists",
+                        path.display()
+                    )));
+                }
+            };
             if !metadata.file_type().is_dir() {
-                bail!("Cannot undo: “{}” is no longer a directory", path.display());
+                return MutationOutcome::unchanged(anyhow::anyhow!(
+                    "Cannot undo: “{}” is no longer a directory",
+                    path.display()
+                ));
             }
-            if fs::read_dir(path)
-                .with_context(|| format!("Cannot inspect “{}”", path.display()))?
-                .next()
-                .is_some()
-            {
-                bail!("Cannot undo: “{}” is no longer empty", path.display());
+            match fs::read_dir(path) {
+                Ok(mut entries) => {
+                    if entries.next().is_some() {
+                        return MutationOutcome::unchanged(anyhow::anyhow!(
+                            "Cannot undo: “{}” is no longer empty",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return MutationOutcome::unchanged(
+                        anyhow::Error::new(error)
+                            .context(format!("Cannot inspect “{}”", path.display())),
+                    );
+                }
             }
             if file_identity(&metadata) != *identity {
-                bail!("Cannot undo: “{}” changed or was replaced", path.display());
+                return MutationOutcome::unchanged(anyhow::anyhow!(
+                    "Cannot undo: “{}” changed or was replaced",
+                    path.display()
+                ));
             }
-            fs::remove_dir(path)
-                .with_context(|| format!("Could not remove “{}”", path.display()))?;
-            Ok(CommittedOperation::new(
+            // Commit: `remove_dir` either removes the directory or leaves it.
+            if let Err(error) = fs::remove_dir(path) {
+                return MutationOutcome::unchanged(
+                    anyhow::Error::new(error)
+                        .context(format!("Could not remove “{}”", path.display())),
+                );
+            }
+            MutationOutcome::Committed(CommittedOperation::new(
                 path.clone(),
                 reversed,
                 Some(operation.clone()),
             ))
         }
-        OperationRecord::Copy { created, .. } => {
-            remove_snapshotted_tree(created)?;
-            Ok(CommittedOperation::new(
-                operation.path().to_path_buf(),
-                reversed,
-                Some(operation.clone()),
-            ))
+        OperationRecord::Copy { created, .. }
+        | OperationRecord::ArchiveCreate { created, .. }
+        | OperationRecord::ArchiveExtract { created, .. } => {
+            match remove_snapshotted_tree(created) {
+                Ok(()) => MutationOutcome::Committed(CommittedOperation::new(
+                    operation.path().to_path_buf(),
+                    reversed,
+                    Some(operation.clone()),
+                )),
+                // Nothing was removed, so the output still matches the record.
+                Err(failure) if failure.removed.is_empty() => {
+                    MutationOutcome::unchanged(failure.error)
+                }
+                // Part of the output is gone. The record claims a whole tree
+                // that no longer exists, so it cannot be retried.
+                Err(failure) => MutationOutcome::discarded(
+                    DirectoryChanges {
+                        removed: failure.removed,
+                        upserted: Vec::new(),
+                    },
+                    failure.error,
+                ),
+            }
         }
         OperationRecord::Move { transfers } => {
             // Prepare: validating every transfer also produces the snapshots
             // this undo needs, so no traversal is required after a rename
             // commits.
             for transfer in transfers {
-                validate_snapshot_tree(&transfer.expected_state)?;
-                ensure_unoccupied(&transfer.source)?;
+                if let Err(error) = validate_snapshot_tree(&transfer.expected_state) {
+                    return MutationOutcome::unchanged(error);
+                }
+                if let Err(error) = ensure_unoccupied(&transfer.source) {
+                    return MutationOutcome::unchanged(error);
+                }
             }
             let mut undone = Vec::with_capacity(transfers.len());
             let mut undoable = true;
-            for transfer in transfers.iter().rev() {
+            for (attempted, transfer) in transfers.iter().rev().enumerate() {
                 // Commit.
                 if let Err(error) = rename_no_replace(&transfer.destination, &transfer.source) {
-                    let rollback_error = rollback_undone_moves(&undone).err();
                     let message = format!(
                         "Could not move “{}” back to “{}”: {error}",
                         transfer.destination.display(),
                         transfer.source.display()
                     );
-                    return match rollback_error {
-                        Some(rollback_error) => Err(anyhow::anyhow!(
-                            "{message}; rollback also failed: {rollback_error}"
-                        )),
-                        None => Err(anyhow::anyhow!("{message}; earlier moves were rolled back")),
+                    if attempted == 0 {
+                        // The first rename failed, so nothing moved and the
+                        // record still describes the disk exactly.
+                        return MutationOutcome::unchanged(anyhow::anyhow!("{message}"));
+                    }
+                    // Earlier renames committed. Whether or not compensation
+                    // restores the paths, those roots have been renamed twice
+                    // and their recorded ctimes are stale, so the record can
+                    // never validate again.
+                    return match rollback_undone_moves(&undone) {
+                        Ok(()) => MutationOutcome::discarded(
+                            DirectoryChanges::default(),
+                            anyhow::anyhow!("{message}; earlier moves were rolled back"),
+                        ),
+                        Err(rollback_error) => MutationOutcome::discarded(
+                            partial_undo_changes(&undone),
+                            anyhow::anyhow!("{message}; rollback also failed: {rollback_error}"),
+                        ),
                     };
                 }
                 // Finalize: rebasing the already-validated snapshots cannot
@@ -612,7 +795,7 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<CommittedOperation>
                 });
             }
             undone.reverse();
-            Ok(CommittedOperation::new(
+            MutationOutcome::Committed(CommittedOperation::new(
                 undone
                     .first()
                     .map(|transfer| transfer.source.clone())
@@ -621,46 +804,50 @@ pub fn undo_operation(operation: &OperationRecord) -> Result<CommittedOperation>
                 undoable.then_some(OperationRecord::Move { transfers: undone }),
             ))
         }
-        OperationRecord::Trash { records } => {
-            let restored = restore_trash_records(records)?;
-            Ok(CommittedOperation::new(
+        OperationRecord::Trash { records } => match restore_trash_records(records) {
+            Ok(restored) => MutationOutcome::Committed(CommittedOperation::new(
                 operation.path().to_path_buf(),
                 reversed,
                 restored.undoable.then_some(OperationRecord::Trash {
                     records: restored.records,
                 }),
-            ))
-        }
-        OperationRecord::Restore { records } => Ok(CommittedOperation::new(
-            operation.path().to_path_buf(),
-            reversed,
-            Some(OperationRecord::Restore {
-                records: retrash_records(records)?,
-            }),
-        )),
-        OperationRecord::Rename { .. } => reverse_rename(operation),
-        OperationRecord::ArchiveCreate { created, .. }
-        | OperationRecord::ArchiveExtract { created, .. } => {
-            remove_snapshotted_tree(created)?;
-            Ok(CommittedOperation::new(
+            )),
+            // Restore validates every record before moving anything, but its
+            // rollback renames payloads back into Trash and moves their ctimes,
+            // so a failure past the first rename cannot be retried.
+            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+        },
+        OperationRecord::Restore { records } => match retrash_records(records) {
+            Ok(records) => MutationOutcome::Committed(CommittedOperation::new(
                 operation.path().to_path_buf(),
                 reversed,
-                Some(operation.clone()),
-            ))
-        }
+                Some(OperationRecord::Restore { records }),
+            )),
+            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+        },
+        OperationRecord::Rename { .. } => match reverse_rename(operation) {
+            Ok(committed) => MutationOutcome::Committed(committed),
+            // A rename is one atomic commit: it either happened or it did not.
+            Err(error) => MutationOutcome::unchanged(error),
+        },
     }
 }
 
-pub fn redo_operation(operation: &OperationRecord) -> Result<CommittedOperation> {
+pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
     let forward = operation.forward_directory_changes();
     match operation {
-        OperationRecord::CreateDirectory { path, .. } => create_directory_at(path.clone()),
+        OperationRecord::CreateDirectory { path, .. } => match create_directory_at(path.clone()) {
+            Ok(committed) => MutationOutcome::Committed(committed),
+            Err(error) => MutationOutcome::unchanged(error),
+        },
         OperationRecord::Copy {
             sources,
             destination,
             ..
         } => {
-            validate_snapshot_tree(sources)?;
+            if let Err(error) = validate_snapshot_tree(sources) {
+                return MutationOutcome::unchanged(error);
+            }
             let source_paths = top_level_paths(sources);
             let outcome = transfer_paths(
                 &source_paths,
@@ -669,22 +856,32 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<CommittedOperation>
                 Arc::new(AtomicBool::new(false)),
             );
             if !outcome.failures.is_empty() {
-                return rollback_failed_redo(outcome);
+                return rollback_failed_redo(outcome, TransferMode::Copy);
             }
-            Ok(redone_transfer(outcome, destination.clone()))
+            MutationOutcome::Committed(redone_transfer(
+                outcome,
+                destination.clone(),
+                TransferMode::Copy,
+            ))
         }
         OperationRecord::Move { transfers } => {
             for transfer in transfers {
-                validate_snapshot_tree(&transfer.expected_state)?;
+                if let Err(error) = validate_snapshot_tree(&transfer.expected_state) {
+                    return MutationOutcome::unchanged(error);
+                }
             }
             let source_paths = transfers
                 .iter()
                 .map(|transfer| transfer.source.clone())
                 .collect::<Vec<_>>();
-            let destination = transfers
+            let Some(destination) = transfers
                 .first()
                 .and_then(|transfer| transfer.destination.parent())
-                .context("Move record has no destination directory")?;
+            else {
+                return MutationOutcome::unchanged(anyhow::anyhow!(
+                    "Move record has no destination directory"
+                ));
+            };
             let outcome = transfer_paths(
                 &source_paths,
                 destination,
@@ -692,47 +889,68 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<CommittedOperation>
                 Arc::new(AtomicBool::new(false)),
             );
             if !outcome.failures.is_empty() {
-                return rollback_failed_redo(outcome);
+                return rollback_failed_redo(outcome, TransferMode::Move);
             }
-            Ok(redone_transfer(outcome, destination.to_path_buf()))
+            MutationOutcome::Committed(redone_transfer(
+                outcome,
+                destination.to_path_buf(),
+                TransferMode::Move,
+            ))
         }
-        OperationRecord::Trash { records } => Ok(CommittedOperation::new(
-            operation.path().to_path_buf(),
-            forward,
-            Some(OperationRecord::Trash {
-                records: retrash_records(records)?,
-            }),
-        )),
-        OperationRecord::Restore { records } => {
-            let restored = restore_trash_records(records)?;
-            Ok(CommittedOperation::new(
+        OperationRecord::Trash { records } => match retrash_records(records) {
+            Ok(records) => MutationOutcome::Committed(CommittedOperation::new(
+                operation.path().to_path_buf(),
+                forward,
+                Some(OperationRecord::Trash { records }),
+            )),
+            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+        },
+        OperationRecord::Restore { records } => match restore_trash_records(records) {
+            Ok(restored) => MutationOutcome::Committed(CommittedOperation::new(
                 operation.path().to_path_buf(),
                 forward,
                 restored.undoable.then_some(OperationRecord::Restore {
                     records: restored.records,
                 }),
-            ))
-        }
-        OperationRecord::Rename { .. } => reverse_rename(operation),
+            )),
+            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+        },
+        OperationRecord::Rename { .. } => match reverse_rename(operation) {
+            Ok(committed) => MutationOutcome::Committed(committed),
+            Err(error) => MutationOutcome::unchanged(error),
+        },
         OperationRecord::ArchiveCreate {
             sources,
             destination,
             ..
         } => {
-            validate_snapshot_tree(sources)?;
-            create_zip_operation(
+            if let Err(error) = validate_snapshot_tree(sources) {
+                return MutationOutcome::unchanged(error);
+            }
+            match create_zip_operation(
                 &top_level_paths(sources),
                 destination,
                 Arc::new(AtomicBool::new(false)),
-            )
+            ) {
+                Ok(committed) => MutationOutcome::Committed(committed),
+                // The archive is published atomically, so a failure leaves the
+                // destination untouched.
+                Err(error) => MutationOutcome::unchanged(error),
+            }
         }
         OperationRecord::ArchiveExtract { source, .. } => {
-            validate_snapshot_tree(source)?;
-            let archive = top_level_paths(source)
-                .into_iter()
-                .next()
-                .context("Archive operation has no source")?;
-            extract_archive_operation(&archive, Arc::new(AtomicBool::new(false)))
+            if let Err(error) = validate_snapshot_tree(source) {
+                return MutationOutcome::unchanged(error);
+            }
+            let Some(archive) = top_level_paths(source).into_iter().next() else {
+                return MutationOutcome::unchanged(anyhow::anyhow!(
+                    "Archive operation has no source"
+                ));
+            };
+            match extract_archive_operation(&archive, Arc::new(AtomicBool::new(false))) {
+                Ok(committed) => MutationOutcome::Committed(committed),
+                Err(error) => MutationOutcome::unchanged(error),
+            }
         }
     }
 }
@@ -740,19 +958,22 @@ pub fn redo_operation(operation: &OperationRecord) -> Result<CommittedOperation>
 /// Turn a redone transfer into a committed outcome. The transfer itself has
 /// already applied its own prepare/commit/finalize discipline, so a missing
 /// operation here means undo bookkeeping was lost, not that the redo failed.
-fn redone_transfer(outcome: TransferOutcome, destination: PathBuf) -> CommittedOperation {
+///
+/// Visible effects come from the exact `CompletedTransfer` records and the
+/// transfer mode. Deriving them from the undo record instead dropped every
+/// item that committed without one, and the mode-blind fallback marked a
+/// copy's *source* removed because only a move retires its sources.
+fn redone_transfer(
+    outcome: TransferOutcome,
+    destination: PathBuf,
+    mode: TransferMode,
+) -> CommittedOperation {
     let path = outcome
         .completed
         .first()
         .map(|transfer| transfer.destination.clone())
-        .unwrap_or(destination.clone());
-    let changes = outcome.operation.as_ref().map_or_else(
-        || DirectoryChanges {
-            removed: outcome.completed_sources(),
-            upserted: outcome.completed_destinations(),
-        },
-        OperationRecord::forward_directory_changes,
-    );
+        .unwrap_or(destination);
+    let changes = transfer_changes(&outcome, mode);
     CommittedOperation::new(path, changes, outcome.operation)
 }
 
@@ -766,14 +987,13 @@ pub fn create_zip_operation(
     // Commit: the archive is published by `create_zip_archive`.
     let outcome = create_zip_archive(sources, destination, cancelled)?;
     // Finalize: a failed snapshot loses undo, it does not unpublish the ZIP.
-    let record =
-        snapshot_tree(&outcome.published)
-            .ok()
-            .map(|created| OperationRecord::ArchiveCreate {
-                sources: source_snapshots,
-                destination: outcome.published.clone(),
-                created,
-            });
+    let record = snapshot_removable_tree(&outcome.published)
+        .ok()
+        .map(|created| OperationRecord::ArchiveCreate {
+            sources: source_snapshots,
+            destination: outcome.published.clone(),
+            created,
+        });
     Ok(CommittedOperation::new(
         outcome.published.clone(),
         DirectoryChanges {
@@ -792,18 +1012,17 @@ pub fn extract_archive_operation(
         bail!("Archive operation cancelled");
     }
     // Prepare.
-    let source = snapshot_tree(archive)?;
+    let source = snapshot_removable_tree(archive)?;
     // Commit.
     let outcome = extract_archive(archive, cancelled)?;
     // Finalize.
-    let record =
-        snapshot_tree(&outcome.published)
-            .ok()
-            .map(|created| OperationRecord::ArchiveExtract {
-                source,
-                output: outcome.published.clone(),
-                created,
-            });
+    let record = snapshot_removable_tree(&outcome.published)
+        .ok()
+        .map(|created| OperationRecord::ArchiveExtract {
+            source,
+            output: outcome.published.clone(),
+            created,
+        });
     Ok(CommittedOperation::new(
         outcome.published.clone(),
         DirectoryChanges {
@@ -828,6 +1047,9 @@ fn snapshot_paths_cancellable(
             .with_context(|| format!("Could not inspect “{}”", path.display()))?;
         let snapshot = snapshot_from_metadata(&path, &metadata)?;
         let kind = snapshot.kind;
+        // An archive cannot carry a socket, FIFO, or device node, so refuse the
+        // selection before any staging work rather than failing mid-compression.
+        reject_special_entries(std::slice::from_ref(&snapshot))?;
         snapshots.push(snapshot);
         if snapshots.len() > MAX_ARCHIVE_ENTRIES {
             bail!("Selection contains more than {MAX_ARCHIVE_ENTRIES} entries");
@@ -882,17 +1104,48 @@ fn reverse_rename(operation: &OperationRecord) -> Result<CommittedOperation> {
     ))
 }
 
-fn rollback_failed_redo(outcome: TransferOutcome) -> Result<CommittedOperation> {
+fn rollback_failed_redo(mut outcome: TransferOutcome, mode: TransferMode) -> MutationOutcome {
     let failure = summarize_failures(&outcome.failures);
-    if let Some(partial) = outcome.operation {
-        match undo_operation(&partial) {
-            Ok(_) => bail!("{failure}; completed items were rolled back"),
-            Err(rollback_error) => {
-                bail!("{failure}; rollback also failed: {rollback_error}");
-            }
-        }
+    if outcome.completed.is_empty() {
+        // Nothing reached the destination, so the record still describes the
+        // disk and the user can retry.
+        return MutationOutcome::unchanged(anyhow::anyhow!("{failure}"));
     }
-    bail!("{failure}");
+
+    let Some(partial) = outcome.operation.take() else {
+        // Items transferred but produced no undo bookkeeping, so Marcel cannot
+        // take them back. Report exactly what landed.
+        return MutationOutcome::discarded(
+            transfer_changes(&outcome, mode),
+            anyhow::anyhow!("{failure}; completed items could not be rolled back"),
+        );
+    };
+    match undo_operation(&partial) {
+        MutationOutcome::Committed(_) => MutationOutcome::discarded(
+            DirectoryChanges::default(),
+            anyhow::anyhow!("{failure}; completed items were rolled back"),
+        ),
+        MutationOutcome::Unchanged(rollback_error)
+        | MutationOutcome::Discarded {
+            error: rollback_error,
+            ..
+        } => MutationOutcome::discarded(
+            transfer_changes(&outcome, mode),
+            anyhow::anyhow!("{failure}; rollback also failed: {rollback_error}"),
+        ),
+    }
+}
+
+/// The visible effect of a transfer, taken from the exact recorded transfers
+/// rather than from an undo record that may cover only a subset.
+fn transfer_changes(outcome: &TransferOutcome, mode: TransferMode) -> DirectoryChanges {
+    DirectoryChanges {
+        removed: match mode {
+            TransferMode::Move => outcome.completed_sources(),
+            TransferMode::Copy => Vec::new(),
+        },
+        upserted: outcome.completed_destinations(),
+    }
 }
 
 fn rollback_undone_moves(undone: &[MoveRecord]) -> Result<()> {
@@ -1696,10 +1949,37 @@ fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
         })
 }
 
+/// Snapshot a tree for a mutation that only ever renames it.
+///
+/// Sockets, FIFOs, and device nodes are recorded rather than rejected: a
+/// rename moves them without inspecting them, so refusing to describe such a
+/// tree only costs undo on an operation that succeeded anyway.
 fn snapshot_tree(root: &Path) -> Result<Vec<PathSnapshot>> {
     let mut snapshots = Vec::new();
     snapshot_entry(root, &mut snapshots)?;
     Ok(snapshots)
+}
+
+/// Snapshot a tree for a mutation whose undo has to *delete* it.
+///
+/// Marcel cannot recreate a special file, so a tree holding one must not enter
+/// a record that Undo would later erase. Callers downgrade the failure to
+/// success-without-undo.
+fn snapshot_removable_tree(root: &Path) -> Result<Vec<PathSnapshot>> {
+    let snapshots = snapshot_tree(root)?;
+    reject_special_entries(&snapshots)?;
+    Ok(snapshots)
+}
+
+fn reject_special_entries(snapshots: &[PathSnapshot]) -> Result<()> {
+    match snapshots.iter().find(|snapshot| snapshot.kind.is_special()) {
+        Some(special) => bail!(
+            "Special files are not supported yet: “{}” is {}",
+            special.path.display(),
+            special.kind.label()
+        ),
+        None => Ok(()),
+    }
 }
 
 /// Snapshot a tree in pre-order using an explicit stack. Parents must precede
@@ -1725,14 +2005,25 @@ fn snapshot_entry(path: &Path, snapshots: &mut Vec<PathSnapshot>) -> Result<()> 
 }
 
 fn snapshot_from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<PathSnapshot> {
-    let kind = if metadata.file_type().is_dir() {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_dir() {
         SnapshotKind::Directory
-    } else if metadata.file_type().is_file() {
+    } else if file_type.is_file() {
         SnapshotKind::File
-    } else if metadata.file_type().is_symlink() {
+    } else if file_type.is_symlink() {
         SnapshotKind::Symlink
+    } else if file_type.is_block_device() {
+        SnapshotKind::BlockDevice
+    } else if file_type.is_char_device() {
+        SnapshotKind::CharDevice
+    } else if file_type.is_socket() {
+        SnapshotKind::Socket
+    } else if file_type.is_fifo() {
+        SnapshotKind::Fifo
     } else {
-        bail!("Special files are not supported yet: “{}”", path.display());
+        SnapshotKind::Unknown
     };
     Ok(PathSnapshot {
         path: path.to_path_buf(),
@@ -1805,16 +2096,65 @@ fn validate_snapshot_tree(snapshots: &[PathSnapshot]) -> Result<()> {
     Ok(())
 }
 
-fn remove_snapshotted_tree(snapshots: &[PathSnapshot]) -> Result<()> {
-    validate_snapshot_tree(snapshots)?;
+/// A tree removal that stopped partway.
+///
+/// `removed` is empty when the failure happened during validation, which lets
+/// the caller keep an undo record that still describes the disk.
+struct PartialRemoval {
+    removed: Vec<PathBuf>,
+    error: anyhow::Error,
+}
+
+fn remove_snapshotted_tree(snapshots: &[PathSnapshot]) -> Result<(), PartialRemoval> {
+    let prepared = validate_snapshot_tree(snapshots)
+        // Only copy and archive output reaches here, and neither can contain a
+        // special file. Refuse before removing anything rather than discovering
+        // it partway through an irreversible walk.
+        .and_then(|()| reject_special_entries(snapshots));
+    if let Err(error) = prepared {
+        return Err(PartialRemoval {
+            removed: Vec::new(),
+            error,
+        });
+    }
+
+    let mut removed = Vec::new();
     for snapshot in snapshots.iter().rev() {
-        match snapshot.kind {
+        let result = match snapshot.kind {
             SnapshotKind::Directory => fs::remove_dir(&snapshot.path),
             SnapshotKind::File | SnapshotKind::Symlink => fs::remove_file(&snapshot.path),
+            kind if kind.is_special() => {
+                unreachable!("special entries are rejected above")
+            }
+            _ => unreachable!("every kind is covered"),
+        };
+        match result {
+            Ok(()) => removed.push(snapshot.path.clone()),
+            Err(error) => {
+                return Err(PartialRemoval {
+                    removed,
+                    error: anyhow::Error::new(error)
+                        .context(format!("Could not remove “{}”", snapshot.path.display())),
+                });
+            }
         }
-        .with_context(|| format!("Could not remove “{}”", snapshot.path.display()))?;
     }
     Ok(())
+}
+
+/// The visible effect of an undo whose compensation could not put everything
+/// back: the transfers that were reversed are now at their sources.
+fn partial_undo_changes(undone: &[MoveRecord]) -> DirectoryChanges {
+    DirectoryChanges {
+        removed: undone
+            .iter()
+            .map(|transfer| transfer.destination.clone())
+            .collect(),
+        upserted: undone
+            .iter()
+            .map(|transfer| transfer.source.clone())
+            .collect(),
+    }
 }
 
 fn validate_file_identity(path: &Path, expected: &FileIdentity, action: &str) -> Result<()> {
@@ -1967,9 +2307,9 @@ mod tests {
         assert!(source.is_dir());
     }
 
-    /// `snapshot_tree` rejects sockets and FIFOs, so snapshotting after the
-    /// rename turned any directory containing one into a phantom failure: the
-    /// move had happened, but the caller was told it had not.
+    /// Snapshotting after the rename turned any directory containing a socket
+    /// into a phantom failure: the move had happened, but the caller was told
+    /// it had not.
     #[test]
     fn a_committed_move_is_never_reported_as_a_failure() {
         use std::os::unix::net::UnixListener;
@@ -1997,10 +2337,188 @@ mod tests {
             fs::read(destination.join("project/notes.txt")).unwrap(),
             b"important"
         );
-        // The tree holds a socket, so it cannot be snapshotted for undo. The
-        // move still succeeded and must be reported that way.
-        assert!(outcome.undo_unavailable);
-        assert!(outcome.operation.is_none());
+        // A rename never inspects what the tree holds, so the socket costs
+        // nothing: the move succeeds *and* stays undoable.
+        assert!(!outcome.undo_unavailable);
+        assert!(outcome.operation.is_some());
+    }
+
+    /// A compensating rollback renames each root a second time, which bumps its
+    /// ctime and invalidates the identities in the record that produced the
+    /// attempt. Reinserting that record made every later Undo fail with
+    /// "changed or was replaced" — blaming the user for Marcel's own recovery.
+    ///
+    /// Nautilus discards its undo record whenever an undo fails
+    /// (`nautilus-file-undo-manager.c`, `undo_info_apply_ready`). Marcel does
+    /// the same past the commit point, and only there.
+    #[test]
+    fn a_rolled_back_undo_discards_the_record_it_invalidated() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if rustix::process::geteuid().is_root() {
+            // Permission bits do not constrain root, so the mid-loop failure
+            // this test depends on cannot be provoked.
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        // Two source parents, so one can be sealed without blocking the other.
+        // `undo_operation` validates every transfer before renaming any, so an
+        // obstacle it can see up front yields `Unchanged`; reaching the
+        // rolled-back path needs a failure only the rename itself discovers.
+        let blocked = root.path().join("blocked");
+        let open = root.path().join("open");
+        let destination = root.path().join("destination");
+        for directory in [&blocked, &open, &destination] {
+            fs::create_dir(directory).unwrap();
+        }
+        fs::create_dir(blocked.join("first")).unwrap();
+        fs::write(blocked.join("first/data.txt"), b"first").unwrap();
+        fs::create_dir(open.join("second")).unwrap();
+        fs::write(open.join("second/data.txt"), b"second").unwrap();
+
+        let outcome = transfer_paths(
+            &[blocked.join("first"), open.join("second")],
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let operation = outcome.operation.expect("the move retains undo");
+
+        // Undo walks transfers in reverse: "second" returns to `open` first and
+        // commits, then "first" cannot be created back inside a read-only
+        // parent. Stat still succeeds, so the preflight cannot catch it.
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = undo_operation(&operation);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            !result.keeps_history(),
+            "a rolled-back undo must discard its record, got {result:?}"
+        );
+        let MutationOutcome::Discarded { .. } = result else {
+            panic!("expected Discarded, got {result:?}");
+        };
+        // Compensation returned "second" to the destination, so the disk is
+        // whole even though the record is gone.
+        assert!(destination.join("first/data.txt").exists());
+        assert!(destination.join("second/data.txt").exists());
+        assert!(!open.join("second").exists());
+    }
+
+    /// The mirror case: a failure that never reached the disk keeps the record,
+    /// so the user can clear the obstacle and retry. This is where Marcel is
+    /// deliberately less blunt than Nautilus, which discards either way.
+    #[test]
+    fn an_undo_that_never_commits_keeps_its_record() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::create_dir(source_dir.join("only")).unwrap();
+        fs::write(source_dir.join("only").join("data.txt"), b"payload").unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&source_dir.join("only")),
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let operation = outcome.operation.expect("the move retains undo");
+        fs::write(source_dir.join("only"), b"in the way").unwrap();
+
+        let result = undo_operation(&operation);
+
+        assert!(
+            result.keeps_history(),
+            "a pre-commit refusal must stay retryable, got {result:?}"
+        );
+        assert!(destination.join("only/data.txt").exists());
+
+        // Clearing the obstacle makes the retained record work.
+        fs::remove_file(source_dir.join("only")).unwrap();
+        undo_operation(&operation).unwrap();
+        assert!(source_dir.join("only/data.txt").exists());
+    }
+
+    /// A move is a rename in both directions, so a tree Marcel could never
+    /// copy or archive is still fully reversible. Rejecting such trees during
+    /// snapshotting was a copy concern leaking into move bookkeeping, and it
+    /// silently cost undo on the whole batch.
+    #[test]
+    fn a_moved_tree_holding_a_socket_is_undoable_and_redoable() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let source_parent = root.path().join("source");
+        let destination = root.path().join("destination");
+        let project = source_parent.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(project.join("notes.txt"), b"important").unwrap();
+        let _listener = UnixListener::bind(project.join("daemon.sock")).unwrap();
+
+        let outcome = transfer_paths(
+            std::slice::from_ref(&project),
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let operation = outcome.operation.expect("a moved socket tree retains undo");
+
+        let redo_record = recorded(undo_operation(&operation).unwrap());
+        assert!(
+            project.join("daemon.sock").exists(),
+            "undo restored the tree"
+        );
+        assert_eq!(fs::read(project.join("notes.txt")).unwrap(), b"important");
+        assert!(!destination.join("project").exists());
+
+        recorded(redo_operation(&redo_record).unwrap());
+        assert!(destination.join("project/daemon.sock").exists());
+        assert!(!project.exists());
+    }
+
+    /// Recording special files must not leak into paths whose undo deletes the
+    /// tree: Marcel cannot recreate a socket, so an archive holding one stays
+    /// success-without-undo rather than gaining an undo that would erase it.
+    #[test]
+    fn archive_sources_still_refuse_special_files() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("payload");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("notes.txt"), b"keep").unwrap();
+        let _listener = UnixListener::bind(source.join("daemon.sock")).unwrap();
+
+        let error = create_zip_operation(
+            std::slice::from_ref(&source),
+            &root.path().join("payload.zip"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect_err("an archive cannot carry a socket");
+
+        assert!(error.to_string().contains("Special files"), "{error}");
+        assert!(!root.path().join("payload.zip").exists());
+    }
+
+    #[test]
+    fn undo_refuses_to_delete_a_tree_holding_a_special_file() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("output");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("kept.txt"), b"keep").unwrap();
+        let _listener = UnixListener::bind(tree.join("daemon.sock")).unwrap();
+
+        let snapshots = snapshot_tree(&tree).expect("the rename walker records specials");
+
+        assert!(remove_snapshotted_tree(&snapshots).is_err());
+        assert_eq!(fs::read(tree.join("kept.txt")).unwrap(), b"keep");
+        assert!(tree.join("daemon.sock").exists());
     }
 
     /// Marcel runs transfers on `blocking` pool threads with Rust's 2 MiB

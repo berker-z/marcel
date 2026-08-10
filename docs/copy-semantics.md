@@ -77,7 +77,7 @@ snapshot records—approximately 50,000 copied paths. Larger copies still
 complete safely, but Marcel discards that operation's partial snapshot record,
 does not place it in undo history, and reports that limitation in the
 completion notification. The operation journal remains separately bounded to
-100 operations.
+20 operations per stack.
 
 Progress measurement is still an additional source-tree traversal, and deeply
 nested traversal is still recursive. Those are performance debts rather than

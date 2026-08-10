@@ -55,6 +55,18 @@ adapted into Marcel itself.
     session-serialized and adds hidden staging, Linux `RENAME_NOREPLACE`,
     recursive identity validation, bounded atomic progress snapshots, and
     general filesystem undo/redo. No Yazi code was copied.
+  - `src/file_ops.rs` adapts the object-kind taxonomy of `ChaType` from
+    `yazi-fs/src/cha/type.rs` at upstream commit
+    `319f90e0eab185a231eef5562215ba322e320286` into `SnapshotKind`. Like Yazi,
+    Marcel enumerates block devices, character devices, sockets, and FIFOs as
+    distinct kinds with an explicit unknown case rather than collapsing
+    everything it cannot reproduce into one variant. The same commit's
+    rename-first move path in `yazi-scheduler/src/file/file.rs` confirmed that a
+    rename never inspects what a directory holds, which is why Marcel records
+    those kinds for move undo while refusing them wherever undo would have to
+    recreate or delete them. Yazi has no filesystem undo, so the surrounding
+    snapshot, validation, and removal policy is Marcel's own. No Yazi code was
+    copied.
   - Sprint 6's copy-fidelity audit additionally studied
     `yazi-scheduler/src/file/traverse.rs`,
     `yazi-fs/src/engine/local/copier.rs`, and
