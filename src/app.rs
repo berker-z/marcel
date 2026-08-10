@@ -68,7 +68,7 @@ use crate::{
         CommittedOperation, DirectoryChanges, MutationOutcome, OperationRecord, TransferMode,
         create_directory, create_zip_operation, extract_archive_operation,
         reclaim_abandoned_quarantines, redo_operation, rename_entry, summarize_failures,
-        transfer_paths_with_conflicts, undo_operation, validate_entry_name,
+        transfer_changes, transfer_paths_with_conflicts, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -2605,20 +2605,11 @@ impl Marcel {
         let operation_task = cx.spawn_in(window, async move |this, window| {
             let outcome = task.await;
             let _ = this.update_in(window, |this, window, cx| {
-                // A transfer can commit without retaining undo, so reconcile
-                // the browser from the exact recorded transfers rather than
-                // assuming an absent operation means nothing happened.
-                let changes = outcome.operation.as_ref().map_or_else(
-                    || DirectoryChanges {
-                        removed: if mode == TransferMode::Move {
-                            outcome.completed_sources()
-                        } else {
-                            Vec::new()
-                        },
-                        upserted: outcome.completed_destinations(),
-                    },
-                    OperationRecord::forward_directory_changes,
-                );
+                // Reconcile from the exact recorded transfers. Deriving this
+                // from the undo record instead dropped every item that
+                // committed without one, leaving a moved source on screen
+                // until a watcher event corrected it.
+                let changes = transfer_changes(&outcome, mode);
                 if let Some(operation) = outcome.operation {
                     this.operations.record(operation);
                 }
@@ -2640,14 +2631,32 @@ impl Marcel {
                     .map(|transfer| transfer.destination.clone());
                 this.apply_directory_changes(changes, reveal, cx);
 
+                // Dropping a selection onto the folder it already lives in asks
+                // for nothing. Announcing "Moved 0 items" would answer a
+                // question the user did not ask.
+                if outcome.completed.is_empty()
+                    && outcome.failures.is_empty()
+                    && outcome.skipped.is_empty()
+                    && outcome.cancelled.is_empty()
+                    && !outcome.already_in_place.is_empty()
+                {
+                    this.operations.finish_active();
+                    cx.notify();
+                    return;
+                }
+
                 if outcome.failures.is_empty() {
                     let verb = match mode {
                         TransferMode::Copy => "Copied",
                         TransferMode::Move => "Moved",
                     };
+                    let skipped = match outcome.skipped.len() {
+                        0 => String::new(),
+                        count => format!(", skipped {count}"),
+                    };
                     window.push_notification(
                         Notification::success(format!(
-                            "{verb} {} item(s){}",
+                            "{verb} {} item(s){skipped}{}",
                             outcome.completed.len(),
                             undo_note(!outcome.undo_unavailable)
                         )),

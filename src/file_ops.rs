@@ -392,6 +392,11 @@ pub struct TransferOutcome {
     /// Sources the user declined to transfer because their destination was
     /// occupied.
     pub skipped: Vec<PathBuf>,
+    /// Sources that were already where they were asked to go.
+    ///
+    /// Dragging a selection onto the folder it already lives in asks for
+    /// nothing, so this is neither work done nor work refused.
+    pub already_in_place: Vec<PathBuf>,
     /// Sources never attempted, because the operation was cancelled first.
     pub cancelled: Vec<PathBuf>,
     pub undo_unavailable: bool,
@@ -400,7 +405,11 @@ pub struct TransferOutcome {
 impl TransferOutcome {
     /// Every requested source, in the state it ended in.
     pub fn accounted(&self) -> usize {
-        self.completed.len() + self.failures.len() + self.skipped.len() + self.cancelled.len()
+        self.completed.len()
+            + self.failures.len()
+            + self.skipped.len()
+            + self.already_in_place.len()
+            + self.cancelled.len()
     }
 }
 
@@ -1282,7 +1291,7 @@ fn rollback_failed_redo(mut outcome: TransferOutcome, mode: TransferMode) -> Mut
 
 /// The visible effect of a transfer, taken from the exact recorded transfers
 /// rather than from an undo record that may cover only a subset.
-fn transfer_changes(outcome: &TransferOutcome, mode: TransferMode) -> DirectoryChanges {
+pub fn transfer_changes(outcome: &TransferOutcome, mode: TransferMode) -> DirectoryChanges {
     DirectoryChanges {
         removed: match mode {
             TransferMode::Move => outcome.completed_sources(),
@@ -1394,6 +1403,8 @@ enum SourcePlan {
     Transfer(PathBuf),
     /// Transfer it to this destination after displacing what is there.
     Replace(PathBuf),
+    /// It is already where it was asked to go, so the request is satisfied.
+    AlreadyInPlace,
     /// The user declined this source.
     Skip,
     /// The user abandoned the operation.
@@ -1439,17 +1450,37 @@ fn plan_source(
         let Some(occupant) = occupant else {
             return SourcePlan::Transfer(target);
         };
-        // The destination *is* the source. This is never a conflict decision,
-        // because every answer to it is wrong: replacing would quarantine the
-        // very object about to be read, destroying it. Pasting into the folder
-        // a file was copied from reaches this by the shortest possible route,
-        // and a hard link or aliased path reaches it under a different name,
-        // which a path comparison would not catch.
+        // The destination *is* the source, which a path comparison alone would
+        // miss when a hard link names the same object elsewhere. There is no
+        // question to ask here, only an answer to apply.
         if occupant.is_same_object_as(&source_metadata) {
-            return SourcePlan::Failed(format!(
-                "Cannot {action} “{}” over itself",
-                source.display()
-            ));
+            match mode {
+                // Copying something onto itself is a request to duplicate it,
+                // and it has exactly one sensible answer, so give it rather
+                // than interrupting to ask.
+                TransferMode::Copy => {
+                    let Some(name) = target.file_name().and_then(|name| {
+                        unique_name_in(destination_dir, name, source_is_directory)
+                    }) else {
+                        return SourcePlan::Failed(format!(
+                            "Could not find a free name to duplicate “{}”",
+                            source.display()
+                        ));
+                    };
+                    return SourcePlan::Transfer(destination_dir.join(name));
+                }
+                // Moving something to where it already is changes nothing, so
+                // there is nothing to do and nothing worth reporting.
+                TransferMode::Move if target == source => return SourcePlan::AlreadyInPlace,
+                // A different name for the same object. Replacing would
+                // quarantine the very thing about to be renamed.
+                TransferMode::Move => {
+                    return SourcePlan::Failed(format!(
+                        "Cannot {action} “{}” over itself",
+                        source.display()
+                    ));
+                }
+            }
         }
         // A skip the user chose and a refusal nobody could answer are different
         // outcomes. Without an interface to ask, this stays the visible failure
@@ -1534,6 +1565,7 @@ fn transfer_paths_impl(
     let mut completed = Vec::new();
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
+    let mut already_in_place = Vec::new();
     let mut cancelled_sources = Vec::new();
     let mut replaced_items: Vec<ReplacedItem> = Vec::new();
     let mut replaced_bytes: u64 = 0;
@@ -1590,6 +1622,13 @@ fn transfer_paths_impl(
                     continue;
                 }
             },
+            // Not a refusal and not work: the item is where it was asked to
+            // be, so the request is already satisfied. Reporting it as skipped
+            // or failed would invent a problem the user does not have.
+            SourcePlan::AlreadyInPlace => {
+                already_in_place.push(source.clone());
+                continue;
+            }
             SourcePlan::Skip => {
                 skipped.push(source.clone());
                 continue;
@@ -1713,6 +1752,7 @@ fn transfer_paths_impl(
         completed,
         failures,
         skipped,
+        already_in_place,
         cancelled: cancelled_sources,
         undo_unavailable: copy_undo_unavailable
             || move_undo_unavailable
@@ -3850,41 +3890,86 @@ mod tests {
         assert_eq!(fs::read(destination.join("b (2).txt")).unwrap(), b"new");
     }
 
-    /// Pasting into the folder a file was copied from makes the destination the
-    /// source. Every conflict answer is wrong here: replacing would quarantine
-    /// the object about to be read. It must refuse without asking, even when a
-    /// resolver stands ready to say "replace".
+    /// Dropping a selection onto the folder it already lives in asks for
+    /// nothing. Refusing it would invent a problem the user does not have, and
+    /// reporting it as skipped would claim they declined something.
     #[test]
-    fn a_source_is_never_offered_as_its_own_destination() {
+    fn moving_an_item_where_it_already_is_does_nothing() {
         let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("report.pdf");
-        fs::write(&source, b"original").unwrap();
+        let folder = root.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        let source = folder.join("report.txt");
+        fs::write(&source, b"payload").unwrap();
         let mut policy = answering(crate::conflict::ConflictDecision::for_all(
             ConflictResponse::Replace,
         ));
 
-        for mode in [TransferMode::Copy, TransferMode::Move] {
-            let outcome = transfer_paths_with_conflicts(
-                std::slice::from_ref(&source),
-                root.path(),
-                mode,
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(TransferProgress::default()),
-                &mut policy,
-            );
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source),
+            &folder,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
 
-            assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
-            assert!(
-                outcome.failures[0].message.contains("over itself"),
-                "{:?}",
-                outcome.failures
-            );
-            assert_eq!(fs::read(&source).unwrap(), b"original");
-        }
+        assert_eq!(outcome.already_in_place, std::slice::from_ref(&source));
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.skipped.is_empty());
+        assert!(outcome.completed.is_empty());
+        assert!(outcome.operation.is_none());
+        assert_eq!(fs::read(&source).unwrap(), b"payload");
+        assert_eq!(outcome.accounted(), 1);
+    }
+
+    /// Copying a file into the folder it lives in is a request to duplicate it,
+    /// and it has one sensible answer, so it is answered rather than asked.
+    #[test]
+    fn copying_an_item_into_its_own_folder_duplicates_it_without_asking() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        let source = folder.join("report.txt");
+        fs::write(&source, b"payload").unwrap();
+        // A resolver that would panic if consulted: this must not ask.
+        let mut policy = ConflictPolicy::interactive(Arc::new(AlwaysAnswers(
+            crate::conflict::ConflictDecision::once(ConflictResponse::Cancel),
+        )));
+
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source),
+            &folder,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(outcome.completed.len(), 1);
+        assert_eq!(fs::read(&source).unwrap(), b"payload");
+        assert_eq!(
+            fs::read(folder.join("report (2).txt")).unwrap(),
+            b"payload",
+            "the duplicate lands beside the original"
+        );
+        // Duplicating again steps past the name it just created.
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source),
+            &folder,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(folder.join("report (3).txt").exists());
     }
 
     /// A hard link names the same object under a different path, so comparing
-    /// paths would miss it and a replace would destroy the data it was reading.
+    /// paths would miss it. Replacing there would quarantine the very object
+    /// about to be renamed, so a move refuses; a copy is safe because it never
+    /// destroys the source, and duplicating is what was asked for.
     #[test]
     fn a_hardlink_to_the_source_is_recognized_as_the_same_object() {
         let root = tempfile::tempdir().unwrap();
@@ -3901,7 +3986,24 @@ mod tests {
             ConflictResponse::Replace,
         ));
 
-        let outcome = transfer_paths_with_conflicts(
+        let moved = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferMode::Move,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(moved.failures.len(), 1, "{moved:?}");
+        assert!(
+            moved.failures[0].message.contains("over itself"),
+            "{:?}",
+            moved.failures
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+
+        let copied = transfer_paths_with_conflicts(
             std::slice::from_ref(&source),
             &destination,
             TransferMode::Copy,
@@ -3910,15 +4012,15 @@ mod tests {
             &mut policy,
         );
 
-        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
-        assert!(
-            outcome.failures[0].message.contains("over itself"),
-            "{:?}",
-            outcome.failures
-        );
+        assert!(copied.failures.is_empty(), "{:?}", copied.failures);
         assert_eq!(fs::read(&source).unwrap(), b"original");
+        // The existing link is untouched and the duplicate lands beside it.
         assert_eq!(
             fs::read(destination.join("report.pdf")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(destination.join("report (2).pdf")).unwrap(),
             b"original"
         );
     }
