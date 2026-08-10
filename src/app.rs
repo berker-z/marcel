@@ -1,8 +1,11 @@
 use std::{
     any::Any,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
+    ffi::OsString,
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     sync::atomic::AtomicBool,
     time::Duration,
@@ -50,6 +53,10 @@ use crate::{
         RestoreSelection, SelectAll, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
         TrashSelection, UndoFileOperation,
     },
+    conflict::{
+        ConflictDecision, ConflictPolicy, ConflictResponse, PendingConflict, PromptingResolver,
+        unique_name_in,
+    },
     delete_ops::{delete_paths, summarize_failures as summarize_delete_failures},
     directory_session::{
         ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
@@ -60,7 +67,7 @@ use crate::{
         CommittedOperation, DirectoryChanges, MutationOutcome, OperationRecord, TransferMode,
         create_directory, create_zip_operation, extract_archive_operation,
         reclaim_abandoned_quarantines, redo_operation, rename_entry, summarize_failures,
-        transfer_paths_with_progress, undo_operation, validate_entry_name,
+        transfer_paths_with_conflicts, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -2362,6 +2369,149 @@ impl Marcel {
         }
     }
 
+    /// Ask the user about one destination conflict.
+    ///
+    /// The transfer thread is blocked on the answer, so every route out of this
+    /// dialog must produce one. Dropping the pending question answers it as a
+    /// cancellation, which is why the dialog cannot be dismissed by clicking
+    /// away: an accidental dismissal would abandon the whole transfer.
+    fn ask_about_conflict(
+        &mut self,
+        pending: PendingConflict,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = pending.request().clone();
+        let name = request
+            .destination
+            .file_name()
+            .map(display_filename)
+            .unwrap_or_default();
+        let folder = request
+            .destination
+            .parent()
+            .map(|parent| display_filename(parent.as_os_str()))
+            .unwrap_or_default();
+        let kind = if request.destination_is_directory {
+            "folder"
+        } else {
+            "file"
+        };
+        let suggestion = request
+            .destination
+            .file_name()
+            .and_then(|name| {
+                request
+                    .destination
+                    .parent()
+                    .and_then(|parent| unique_name_in(parent, name, request.source_is_directory))
+            })
+            .map(|name| display_filename(&name))
+            .unwrap_or_else(|| name.clone());
+
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(suggestion));
+        // The dialog callbacks are shared closures, so the one-shot answer has
+        // to be taken out of somewhere they can all reach.
+        let pending = Rc::new(RefCell::new(Some(pending)));
+        let apply_to_all = Rc::new(Cell::new(false));
+        let is_merge = request.is_merge();
+
+        let input_for_dialog = input.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input_for_dialog.clone();
+            let answer = {
+                let pending = pending.clone();
+                let apply_to_all = apply_to_all.clone();
+                move |response: ConflictResponse| {
+                    if let Some(pending) = pending.borrow_mut().take() {
+                        pending.answer(ConflictDecision {
+                            response,
+                            apply_to_all: apply_to_all.get(),
+                        });
+                    }
+                }
+            };
+            let toggle = apply_to_all.clone();
+            let (skip, replace, rename, cancel) = (
+                answer.clone(),
+                answer.clone(),
+                answer.clone(),
+                answer.clone(),
+            );
+
+            dialog
+                .title(if request.destination_is_directory { "Folder Already Exists" } else { "File Already Exists" })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(format!(
+                            "A {kind} named “{name}” already exists in “{folder}”."
+                        ))
+                        .child(Input::new(&input))
+                        .child(
+                            Switch::new("conflict-apply-to-all")
+                                .small()
+                                .label("Apply to the rest of this operation")
+                                .tooltip(if is_merge {
+                                    "Merging applies only to folders; replacing files is asked separately"
+                                } else {
+                                    "Replacing applies only to files; merging folders is asked separately"
+                                })
+                                .on_click(move |checked, _, _| toggle.set(*checked)),
+                        ),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(
+                            Button::new("conflict-cancel").label("Cancel").outline().on_click(
+                                move |_, _, _| cancel(ConflictResponse::Cancel),
+                            ),
+                        ))
+                        .child(DialogClose::new().child(
+                            Button::new("conflict-skip").label("Skip").outline().on_click(
+                                move |_, _, _| skip(ConflictResponse::Skip),
+                            ),
+                        ))
+                        .child(
+                            DialogClose::new().child(
+                                Button::new("conflict-rename")
+                                    .label("Keep Both")
+                                    .outline()
+                                    .on_click({
+                                        let input = input.clone();
+                                        let apply_to_all = apply_to_all.clone();
+                                        move |_, _, cx| {
+                                            // A typed name cannot answer later
+                                            // conflicts, so applying to all
+                                            // means Marcel picks the names.
+                                            rename(if apply_to_all.get() {
+                                                ConflictResponse::AutoRename
+                                            } else {
+                                                ConflictResponse::Rename(OsString::from(
+                                                    input.read(cx).value().trim().to_string(),
+                                                ))
+                                            });
+                                        }
+                                    }),
+                            ),
+                        )
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("conflict-replace")
+                                    .label(if is_merge { "Merge" } else { "Replace" })
+                                    .with_variant(ButtonVariant::Danger)
+                                    .on_click(move |_, _, _| replace(ConflictResponse::Replace)),
+                            ),
+                        ),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+        });
+        cx.notify();
+    }
+
     fn start_transfer(
         &mut self,
         sources: Vec<PathBuf>,
@@ -2379,8 +2529,35 @@ impl Marcel {
         };
         self.ui.entry_menu = None;
         self.start_operation_progress_refresh(cx);
+        // Questions arrive one at a time: the transfer thread waits for each
+        // answer, so a second conflict cannot be raised while the first is on
+        // screen.
+        let (resolver, questions) = PromptingResolver::new();
+        cx.spawn_in(window, async move |this, window| {
+            while let Ok(pending) = questions.recv().await {
+                if this
+                    .update_in(window, |this, window, cx| {
+                        this.ask_about_conflict(pending, window, cx);
+                    })
+                    .is_err()
+                {
+                    // The window is gone, so dropping the question cancels the
+                    // transfer instead of leaving it waiting.
+                    break;
+                }
+            }
+        })
+        .detach();
         let task = cx.background_executor().spawn(smol::unblock(move || {
-            transfer_paths_with_progress(&sources, &destination, mode, cancel, progress)
+            let mut policy = ConflictPolicy::interactive(resolver);
+            transfer_paths_with_conflicts(
+                &sources,
+                &destination,
+                mode,
+                cancel,
+                progress,
+                &mut policy,
+            )
         }));
 
         let operation_task = cx.spawn_in(window, async move |this, window| {

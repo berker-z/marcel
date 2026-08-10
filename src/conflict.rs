@@ -209,6 +209,65 @@ impl ConflictPolicy {
     }
 }
 
+/// A conflict waiting for an answer, and the channel to answer it on.
+///
+/// Dropping this without answering releases the operation rather than stranding
+/// it, so a dialog dismissed by any route the interface offers still ends the
+/// wait.
+pub struct PendingConflict {
+    request: ConflictRequest,
+    reply: std::sync::mpsc::SyncSender<ConflictDecision>,
+}
+
+impl PendingConflict {
+    pub fn request(&self) -> &ConflictRequest {
+        &self.request
+    }
+
+    pub fn answer(self, decision: ConflictDecision) {
+        // The operation may have been abandoned while the question was on
+        // screen, which is not an error.
+        let _ = self.reply.send(decision);
+    }
+}
+
+/// A resolver that asks a user interface and waits for the answer.
+///
+/// This is the shape Nautilus uses — its operation threads block on a condition
+/// variable while the dialog runs on the main thread, noted directly in its
+/// source. Marcel's transfers already run on blocking-pool threads, so waiting
+/// here costs nothing the interface can feel.
+pub struct PromptingResolver {
+    requests: async_channel::Sender<PendingConflict>,
+}
+
+impl PromptingResolver {
+    /// Build a resolver and the stream of questions it will ask.
+    pub fn new() -> (Arc<Self>, async_channel::Receiver<PendingConflict>) {
+        let (requests, questions) = async_channel::unbounded();
+        (Arc::new(Self { requests }), questions)
+    }
+}
+
+impl ConflictResolver for PromptingResolver {
+    fn resolve(&self, request: &ConflictRequest) -> ConflictDecision {
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        let pending = PendingConflict {
+            request: request.clone(),
+            reply,
+        };
+        // Nobody is listening, or nobody answered. Cancelling is the honest
+        // outcome: it stops the operation and accounts for every source it did
+        // not reach, where skipping would quietly do nothing to each in turn.
+        if self.requests.send_blocking(pending).is_err() {
+            return ConflictDecision::once(ConflictResponse::Cancel);
+        }
+        answer
+            .recv()
+            .unwrap_or_else(|_| ConflictDecision::once(ConflictResponse::Cancel))
+    }
+}
+
 /// The longest name most Linux filesystems accept, in bytes.
 const MAX_NAME_BYTES: usize = 255;
 
@@ -711,6 +770,48 @@ mod tests {
             ConflictResponse::AutoRename
         );
         assert_eq!(resolver.asked(), 1);
+    }
+
+    /// A worker must never park on an answer that cannot arrive. Losing the
+    /// interface cancels the operation, which accounts for every source it did
+    /// not reach, rather than skipping each one silently.
+    #[test]
+    fn losing_the_interface_cancels_instead_of_waiting() {
+        let (resolver, questions) = PromptingResolver::new();
+        drop(questions);
+
+        let decision = resolver.resolve(&request(false, false));
+
+        assert_eq!(decision.response, ConflictResponse::Cancel);
+    }
+
+    #[test]
+    fn an_unanswered_question_cancels_rather_than_stranding_the_worker() {
+        let (resolver, questions) = PromptingResolver::new();
+        let asking = std::thread::spawn(move || resolver.resolve(&request(false, false)));
+
+        // Take the question and drop it, as a dismissed dialog would.
+        let pending = questions.recv_blocking().unwrap();
+        drop(pending);
+
+        assert_eq!(asking.join().unwrap().response, ConflictResponse::Cancel);
+    }
+
+    #[test]
+    fn an_answered_question_reaches_the_waiting_worker() {
+        let (resolver, questions) = PromptingResolver::new();
+        let asking = std::thread::spawn(move || resolver.resolve(&request(false, false)));
+
+        let pending = questions.recv_blocking().unwrap();
+        assert_eq!(
+            pending.request().destination,
+            PathBuf::from("/destination/item")
+        );
+        pending.answer(ConflictDecision::for_all(ConflictResponse::Replace));
+
+        let decision = asking.join().unwrap();
+        assert_eq!(decision.response, ConflictResponse::Replace);
+        assert!(decision.apply_to_all);
     }
 
     #[test]
