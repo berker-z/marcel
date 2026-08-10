@@ -31,7 +31,19 @@ use crate::{
 /// usable stack but not an unreasoned one.
 pub const OPERATION_HISTORY_LIMIT: usize = 20;
 pub const COPY_UNDO_SNAPSHOT_LIMIT: usize = 100_000;
+
+/// How many bytes of replaced data one operation may hold aside for undo.
+///
+/// Quarantining what a replace displaced is what makes replacement reversible,
+/// but it is real disk held for as long as the record lives. This follows the
+/// rule `COPY_UNDO_SNAPSHOT_LIMIT` already sets: past the budget the operation
+/// still happens, it simply stops being undoable and says so. The alternative —
+/// refusing to replace large files — would be a worse answer to a question the
+/// user already asked.
+pub const REPLACEMENT_UNDO_BYTE_LIMIT: u64 = 1024 * 1024 * 1024;
+
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static REPLACEMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct CopyContext {
@@ -94,9 +106,11 @@ pub enum OperationRecord {
         sources: Vec<PathSnapshot>,
         destination: PathBuf,
         created: Vec<PathSnapshot>,
+        replaced: Vec<ReplacedItem>,
     },
     Move {
         transfers: Vec<MoveRecord>,
+        replaced: Vec<ReplacedItem>,
     },
     Trash {
         records: Vec<TrashRecord>,
@@ -180,6 +194,27 @@ pub struct MoveRecord {
     source: PathBuf,
     destination: PathBuf,
     expected_state: Vec<PathSnapshot>,
+}
+
+/// An object a transfer displaced, held aside so undo can put it back.
+///
+/// Nautilus keeps nothing here: it overwrites in place, and undo of a copy
+/// deletes the destinations, so whatever was replaced is gone for good. Marcel
+/// treats a replacement as reversible or reports that it is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplacedItem {
+    /// Where it lived, and where undo must put it back.
+    path: PathBuf,
+    /// Where it is being held meanwhile.
+    quarantine: PathBuf,
+    identity: FileIdentity,
+}
+
+impl ReplacedItem {
+    /// The hidden path holding this item, so an evicted record can release it.
+    pub fn quarantine(&self) -> &Path {
+        &self.quarantine
+    }
 }
 
 /// The outcome of a mutation that has already committed to the filesystem.
@@ -458,7 +493,7 @@ impl OperationRecord {
                 .first()
                 .map(|snapshot| snapshot.path.as_path())
                 .unwrap_or(destination),
-            Self::Move { transfers } => transfers
+            Self::Move { transfers, .. } => transfers
                 .first()
                 .map(|transfer| transfer.destination.as_path())
                 .unwrap_or_else(|| Path::new("")),
@@ -490,7 +525,7 @@ impl OperationRecord {
                     .collect(),
                 ..DirectoryChanges::default()
             },
-            Self::Move { transfers } => DirectoryChanges {
+            Self::Move { transfers, .. } => DirectoryChanges {
                 removed: transfers
                     .iter()
                     .map(|transfer| transfer.source.clone())
@@ -541,6 +576,24 @@ impl OperationRecord {
         }
     }
 
+    /// The objects this record is holding aside so undo can restore them.
+    pub fn replaced_items(&self) -> &[ReplacedItem] {
+        match self {
+            Self::Copy { replaced, .. } | Self::Move { replaced, .. } => replaced,
+            _ => &[],
+        }
+    }
+
+    /// Give up everything this record was holding aside.
+    ///
+    /// Called when the record can no longer be reached, which makes its
+    /// quarantines unreachable rather than merely unused.
+    pub fn release_quarantines(&self) {
+        for item in self.replaced_items() {
+            erase_replacement_quarantine(item.quarantine());
+        }
+    }
+
     pub fn trash_records(&self) -> Option<&[TrashRecord]> {
         match self {
             Self::Trash { records } | Self::Restore { records } => Some(records),
@@ -579,9 +632,19 @@ impl OperationJournal {
         !self.redo.is_empty()
     }
 
-    pub fn record(&mut self, operation: OperationRecord) {
-        self.redo.clear();
-        push_bounded(&mut self.undo, operation, self.limit);
+    /// Record an operation, returning every record this displaced.
+    ///
+    /// A displaced record can never be reached again, so anything it was
+    /// holding aside — a replaced file waiting to be restored — is now
+    /// unreachable garbage. Returning them rather than dropping them silently
+    /// is what keeps quarantines from accumulating for the life of the process.
+    #[must_use = "evicted records may hold quarantined data that must be released"]
+    pub fn record(&mut self, operation: OperationRecord) -> Vec<OperationRecord> {
+        let mut evicted = std::mem::take(&mut self.redo)
+            .into_iter()
+            .collect::<Vec<_>>();
+        evicted.extend(push_bounded(&mut self.undo, operation, self.limit));
+        evicted
     }
 
     pub fn begin_undo(&mut self) -> Option<OperationRecord> {
@@ -609,14 +672,20 @@ impl OperationJournal {
     }
 }
 
-fn push_bounded(stack: &mut VecDeque<OperationRecord>, operation: OperationRecord, limit: usize) {
+fn push_bounded(
+    stack: &mut VecDeque<OperationRecord>,
+    operation: OperationRecord,
+    limit: usize,
+) -> Vec<OperationRecord> {
     if limit == 0 {
-        return;
+        return vec![operation];
     }
+    let mut evicted = Vec::new();
     while stack.len() >= limit {
-        stack.pop_front();
+        evicted.extend(stack.pop_front());
     }
     stack.push_back(operation);
+    evicted
 }
 
 pub fn validate_entry_name(name: &str) -> Result<()> {
@@ -758,12 +827,28 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
         OperationRecord::Copy { created, .. }
         | OperationRecord::ArchiveCreate { created, .. }
         | OperationRecord::ArchiveExtract { created, .. } => {
+            let replaced = match operation {
+                OperationRecord::Copy { replaced, .. } => replaced.as_slice(),
+                _ => &[],
+            };
             match remove_snapshotted_tree(created) {
-                Ok(()) => MutationOutcome::Committed(CommittedOperation::new(
-                    operation.path().to_path_buf(),
-                    reversed,
-                    Some(operation.clone()),
-                )),
+                Ok(()) => {
+                    // The output is gone, so whatever it displaced can come
+                    // back. A failure here leaves the copy removed, so it
+                    // cannot be reported as though nothing happened.
+                    if let Err(error) = restore_replaced_items(replaced) {
+                        return MutationOutcome::discarded(reversed, error);
+                    }
+                    MutationOutcome::Committed(CommittedOperation::new(
+                        operation.path().to_path_buf(),
+                        reversed,
+                        // Redo would have to displace the restored items all
+                        // over again, which is a fresh decision the user has
+                        // not made, so a replacement is undoable but not
+                        // redoable.
+                        replaced.is_empty().then(|| operation.clone()),
+                    ))
+                }
                 // Nothing was removed, so the output still matches the record.
                 Err(failure) if failure.removed.is_empty() => {
                     MutationOutcome::unchanged(failure.error)
@@ -779,7 +864,10 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 ),
             }
         }
-        OperationRecord::Move { transfers } => {
+        OperationRecord::Move {
+            transfers,
+            replaced,
+        } => {
             // Prepare: validating every transfer also produces the snapshots
             // this undo needs, so no traversal is required after a rename
             // commits.
@@ -833,13 +921,24 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 });
             }
             undone.reverse();
+            // Every source is back, so the destinations are free again and
+            // what they displaced can return.
+            if let Err(error) = restore_replaced_items(replaced) {
+                return MutationOutcome::discarded(reversed, error);
+            }
             MutationOutcome::Committed(CommittedOperation::new(
                 undone
                     .first()
                     .map(|transfer| transfer.source.clone())
                     .unwrap_or_default(),
                 reversed,
-                undoable.then_some(OperationRecord::Move { transfers: undone }),
+                // A replacement is undoable but not redoable: redoing would
+                // displace the restored items again, which is a decision the
+                // user has not made a second time.
+                (undoable && replaced.is_empty()).then_some(OperationRecord::Move {
+                    transfers: undone,
+                    replaced: Vec::new(),
+                }),
             ))
         }
         OperationRecord::Trash { records } => match restore_trash_records(records) {
@@ -899,7 +998,7 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
                 TransferMode::Copy,
             ))
         }
-        OperationRecord::Move { transfers } => {
+        OperationRecord::Move { transfers, .. } => {
             for transfer in transfers {
                 if let Err(error) = validate_snapshot_tree(&transfer.expected_state) {
                     return MutationOutcome::unchanged(error);
@@ -1210,6 +1309,7 @@ pub fn transfer_paths(
         None,
         COPY_UNDO_SNAPSHOT_LIMIT,
         &mut ConflictPolicy::refusing(),
+        REPLACEMENT_UNDO_BYTE_LIMIT,
     )
 }
 
@@ -1228,6 +1328,7 @@ pub fn transfer_paths_with_progress(
         Some(progress),
         COPY_UNDO_SNAPSHOT_LIMIT,
         &mut ConflictPolicy::refusing(),
+        REPLACEMENT_UNDO_BYTE_LIMIT,
     )
 }
 
@@ -1251,6 +1352,7 @@ pub fn transfer_paths_with_conflicts(
         Some(progress),
         COPY_UNDO_SNAPSHOT_LIMIT,
         policy,
+        REPLACEMENT_UNDO_BYTE_LIMIT,
     )
 }
 
@@ -1264,6 +1366,8 @@ const MAX_CONFLICT_RETRIES: usize = 64;
 enum SourcePlan {
     /// Transfer it to this destination, which is free.
     Transfer(PathBuf),
+    /// Transfer it to this destination after displacing what is there.
+    Replace(PathBuf),
     /// The user declined this source.
     Skip,
     /// The user abandoned the operation.
@@ -1362,15 +1466,16 @@ fn plan_source(
                 };
                 return SourcePlan::Transfer(destination_dir.join(name));
             }
-            // Replacement has to be able to put back what it displaced before
-            // Marcel will perform one, so the decision exists but the engine
-            // does not act on it yet.
-            ConflictResponse::Replace => {
+            // Merging two directory trees is a separate operation with its own
+            // per-child decisions, so replace still refuses it rather than
+            // discarding a tree the user expected to be merged into.
+            ConflictResponse::Replace if request.is_merge() => {
                 return SourcePlan::Failed(format!(
-                    "“{}” already exists; replacing an existing item is not supported yet",
+                    "“{}” is a folder; merging folders is not supported yet",
                     target.display()
                 ));
             }
+            ConflictResponse::Replace => return SourcePlan::Replace(target),
         }
     }
     SourcePlan::Failed(format!(
@@ -1387,6 +1492,7 @@ fn transfer_paths_impl(
     progress: Option<Arc<TransferProgress>>,
     copy_undo_snapshot_limit: usize,
     policy: &mut ConflictPolicy,
+    replacement_undo_byte_limit: u64,
 ) -> TransferOutcome {
     // Conceptually follows Yazi's per-item scheduled transfer outcomes,
     // cooperative cancellation, partial-success accounting, and rename-first
@@ -1400,6 +1506,9 @@ fn transfer_paths_impl(
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
     let mut cancelled_sources = Vec::new();
+    let mut replaced_items: Vec<ReplacedItem> = Vec::new();
+    let mut replaced_bytes: u64 = 0;
+    let mut replacement_undo_unavailable = false;
     let mut copied_sources = Vec::new();
     let mut copied_created = Vec::new();
     let mut copy_undo_unavailable = false;
@@ -1437,8 +1546,21 @@ fn transfer_paths_impl(
             });
             continue;
         };
-        let target = match plan_source(source, destination, destination.join(name), mode, policy) {
-            SourcePlan::Transfer(target) => target,
+        let plan = plan_source(source, destination, destination.join(name), mode, policy);
+        let (target, displaced) = match plan {
+            SourcePlan::Transfer(target) => (target, None),
+            // Move what is there aside before publishing over it, so the
+            // replacement is never destroyed by a transfer that then fails.
+            SourcePlan::Replace(target) => match quarantine_for_replacement(&target) {
+                Ok(item) => (target, Some(item)),
+                Err(error) => {
+                    failures.push(TransferFailure {
+                        path: source.clone(),
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            },
             SourcePlan::Skip => {
                 skipped.push(source.clone());
                 continue;
@@ -1497,14 +1619,42 @@ fn transfer_paths_impl(
         };
 
         match result {
-            Ok(()) => completed.push(CompletedTransfer {
-                source: source.clone(),
-                destination: target,
-            }),
-            Err(error) => failures.push(TransferFailure {
-                path: source.clone(),
-                message: error.to_string(),
-            }),
+            Ok(()) => {
+                if let Some(item) = displaced {
+                    // Holding the displaced object is what makes this undoable.
+                    // Past the budget the replacement still stands; it simply
+                    // stops being reversible, which the caller reports.
+                    let bytes = quarantined_bytes(item.quarantine());
+                    if replaced_bytes.saturating_add(bytes) > replacement_undo_byte_limit {
+                        erase_replacement_quarantine(item.quarantine());
+                        replacement_undo_unavailable = true;
+                    } else {
+                        replaced_bytes = replaced_bytes.saturating_add(bytes);
+                        replaced_items.push(item);
+                    }
+                }
+                completed.push(CompletedTransfer {
+                    source: source.clone(),
+                    destination: target,
+                });
+            }
+            Err(error) => {
+                // The transfer failed, so put back what it displaced rather
+                // than leaving the destination empty.
+                let mut message = error.to_string();
+                if let Some(item) = displaced
+                    && let Err(restore_error) = restore_replaced_items(std::slice::from_ref(&item))
+                {
+                    message.push_str(&format!(
+                        "; the replaced item remains at “{}”: {restore_error}",
+                        item.quarantine().display()
+                    ));
+                }
+                failures.push(TransferFailure {
+                    path: source.clone(),
+                    message,
+                });
+            }
         }
     }
 
@@ -1513,10 +1663,18 @@ fn transfer_paths_impl(
             sources: copied_sources,
             destination: destination.to_path_buf(),
             created: copied_created,
+            replaced: std::mem::take(&mut replaced_items),
         }),
-        TransferMode::Move if !moved.is_empty() => Some(OperationRecord::Move { transfers: moved }),
+        TransferMode::Move if !moved.is_empty() => Some(OperationRecord::Move {
+            transfers: moved,
+            replaced: std::mem::take(&mut replaced_items),
+        }),
         _ => None,
     };
+    // Nothing will carry these into the journal, so they can never be restored.
+    for item in &replaced_items {
+        erase_replacement_quarantine(item.quarantine());
+    }
 
     if let Some(progress) = &progress {
         progress.set_current_path(None);
@@ -1527,7 +1685,9 @@ fn transfer_paths_impl(
         failures,
         skipped,
         cancelled: cancelled_sources,
-        undo_unavailable: copy_undo_unavailable || move_undo_unavailable,
+        undo_unavailable: copy_undo_unavailable
+            || move_undo_unavailable
+            || replacement_undo_unavailable,
     }
 }
 
@@ -2160,6 +2320,139 @@ fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
 /// Sockets, FIFOs, and device nodes are recorded rather than rejected: a
 /// rename moves them without inspecting them, so refusing to describe such a
 /// tree only costs undo on an operation that succeeded anyway.
+/// The name prefix Marcel gives an object it has displaced.
+///
+/// The process id is part of the name so a later Marcel can tell its own live
+/// quarantines from those a dead process abandoned, which is the same rule
+/// permanent deletion already uses for its own remnants.
+pub fn replacement_quarantine_prefix(process: u32) -> String {
+    format!(".marcel-replaced-{process}-")
+}
+
+pub fn is_replacement_quarantine_name(name: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    name.as_bytes().starts_with(b".marcel-replaced-")
+}
+
+/// Move the object at `path` aside, returning where it went.
+///
+/// The rename is atomic, so the destination is never briefly absent in a way
+/// that another writer could occupy, and the displaced object is never
+/// destroyed before its replacement is safely published.
+fn quarantine_for_replacement(path: &Path) -> Result<ReplacedItem> {
+    let parent = path
+        .parent()
+        .context("Replacement target has no parent directory")?;
+    let name = path
+        .file_name()
+        .context("Replacement target has no file name")?;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Could not inspect “{}”", path.display()))?;
+
+    for _ in 0..1024 {
+        let sequence = REPLACEMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut quarantine_name = replacement_quarantine_prefix(std::process::id());
+        quarantine_name.push_str(&sequence.to_string());
+        quarantine_name.push('-');
+        quarantine_name.push_str(&name.to_string_lossy());
+        let candidate = parent.join(quarantine_name);
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let expected = file_identity(&metadata);
+                rename_no_replace(path, &candidate).with_context(|| {
+                    format!("Could not move “{}” aside to replace it", path.display())
+                })?;
+                // Finalize: the rename bumped the moved root's ctime, so the
+                // identity has to be re-read rather than carried over — the
+                // same discipline the move path already follows. Device and
+                // inode survive a rename, so they prove this is still the
+                // object that was moved and not something that took its place.
+                let moved = fs::symlink_metadata(&candidate).with_context(|| {
+                    format!(
+                        "Could not inspect “{}” after moving it aside",
+                        candidate.display()
+                    )
+                })?;
+                let identity = file_identity(&moved);
+                if (identity.device, identity.inode) != (expected.device, expected.inode) {
+                    bail!(
+                        "“{}” changed while being moved aside to replace it",
+                        path.display()
+                    );
+                }
+                return Ok(ReplacedItem {
+                    path: path.to_path_buf(),
+                    quarantine: candidate,
+                    identity,
+                });
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Could not inspect replacement quarantine “{}”",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!("Could not reserve a unique replacement quarantine path")
+}
+
+/// Total bytes held by a quarantined object.
+fn quarantined_bytes(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+        if metadata.file_type().is_dir()
+            && let Ok(entries) = fs::read_dir(&path)
+        {
+            pending.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+    total
+}
+
+/// Release a quarantined object, because nothing can restore it any more.
+pub fn erase_replacement_quarantine(path: &Path) {
+    // The path was produced by Marcel's own atomic rename under a
+    // process-namespaced name, so nothing else can have taken it.
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    let _ = if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+}
+
+/// Put a displaced object back where it came from.
+fn restore_replaced_items(replaced: &[ReplacedItem]) -> Result<()> {
+    for item in replaced.iter().rev() {
+        validate_file_identity(
+            &item.quarantine,
+            &item.identity,
+            "restore the replaced item",
+        )?;
+        rename_no_replace(&item.quarantine, &item.path).with_context(|| {
+            format!(
+                "Could not put “{}” back after undoing a replacement",
+                item.path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn snapshot_tree(root: &Path) -> Result<Vec<PathSnapshot>> {
     let mut snapshots = Vec::new();
     snapshot_entry(root, &mut snapshots)?;
@@ -2940,9 +3233,9 @@ mod tests {
         let first = recorded(create_directory(root.path(), "first").unwrap());
         let second = recorded(create_directory(root.path(), "second").unwrap());
         let third = recorded(create_directory(root.path(), "third").unwrap());
-        journal.record(first);
-        journal.record(second.clone());
-        journal.record(third.clone());
+        let _ = journal.record(first);
+        let _ = journal.record(second.clone());
+        let _ = journal.record(third.clone());
 
         assert_eq!(journal.begin_undo(), Some(third.clone()));
         assert_eq!(journal.begin_undo(), Some(second.clone()));
@@ -2951,7 +3244,7 @@ mod tests {
         journal.finish_undo(second.clone());
         assert!(journal.can_redo());
         journal.cancel_undo(third);
-        journal.record(second);
+        let _ = journal.record(second);
         assert!(!journal.can_redo());
     }
 
@@ -3143,6 +3436,209 @@ mod tests {
         );
         assert!(!destination.parent().unwrap().join("escaped.txt").exists());
         assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    /// A record pushed out of the journal can never be undone, so what it was
+    /// holding aside stops being recoverable data and becomes a hidden file
+    /// nobody would ever collect.
+    #[test]
+    fn evicting_a_record_releases_the_data_it_was_holding() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source_dir.join("report.txt"), b"replacement").unwrap();
+        fs::write(destination.join("report.txt"), b"the original").unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source_dir.join("report.txt")),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+        let replacing = outcome.operation.expect("a replacement retains undo");
+        assert!(!no_replacement_quarantines(&destination));
+
+        let mut journal = OperationJournal::new(1);
+        assert!(journal.record(replacing).is_empty());
+        // A second record displaces the first, which can now never be undone.
+        let evicted = journal.record(recorded(create_directory(root.path(), "later").unwrap()));
+
+        assert_eq!(evicted.len(), 1);
+        for record in &evicted {
+            record.release_quarantines();
+        }
+        assert!(
+            no_replacement_quarantines(&destination),
+            "an unreachable record must not keep holding disk"
+        );
+        // The replacement itself is untouched; only its way back is gone.
+        assert_eq!(
+            fs::read(destination.join("report.txt")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    /// The whole promise of replacement: what it displaced comes back. Nautilus
+    /// overwrites in place, so its undo cannot do this at all.
+    #[test]
+    fn undoing_a_replacement_puts_the_displaced_file_back() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source_dir.join("report.txt"), b"replacement").unwrap();
+        fs::write(destination.join("report.txt"), b"the original").unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source_dir.join("report.txt")),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(!outcome.undo_unavailable);
+        assert_eq!(
+            fs::read(destination.join("report.txt")).unwrap(),
+            b"replacement"
+        );
+        let operation = outcome.operation.expect("a replacement retains undo");
+
+        undo_operation(&operation).unwrap();
+
+        assert_eq!(
+            fs::read(destination.join("report.txt")).unwrap(),
+            b"the original",
+            "undo must restore what the replacement displaced"
+        );
+        assert!(no_replacement_quarantines(&destination));
+    }
+
+    /// A transfer that fails after displacing must put the displaced item back
+    /// rather than leaving the destination empty.
+    #[test]
+    fn a_failed_replacement_restores_what_it_displaced() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        // A socket cannot be copied, so the transfer fails after the
+        // destination has already been moved aside.
+        let source = source_dir.join("payload");
+        fs::create_dir(&source).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(source.join("daemon.sock")).unwrap();
+        fs::write(destination.join("payload"), b"the original").unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+        assert_eq!(
+            fs::read(destination.join("payload")).unwrap(),
+            b"the original",
+            "a failed replacement must not consume the original"
+        );
+        assert!(no_replacement_quarantines(&destination));
+    }
+
+    /// Past the byte budget the replacement still happens; it simply stops
+    /// being reversible, and the quarantine is released rather than held.
+    #[test]
+    fn an_oversized_replacement_succeeds_without_undo() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source_dir.join("blob.bin"), b"replacement").unwrap();
+        fs::write(destination.join("blob.bin"), vec![0_u8; 4096]).unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+
+        let outcome = transfer_paths_impl(
+            std::slice::from_ref(&source_dir.join("blob.bin")),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            COPY_UNDO_SNAPSHOT_LIMIT,
+            &mut policy,
+            1024,
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(
+            outcome.undo_unavailable,
+            "an oversized replacement cannot be undone"
+        );
+        assert_eq!(
+            fs::read(destination.join("blob.bin")).unwrap(),
+            b"replacement"
+        );
+        assert!(
+            no_replacement_quarantines(&destination),
+            "an unreachable quarantine must be released, not left on disk"
+        );
+    }
+
+    /// Merging two directory trees needs per-child decisions, so replace must
+    /// not quietly discard a tree the user expected to be merged into.
+    #[test]
+    fn replacing_a_directory_with_a_directory_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(source_dir.join("shared")).unwrap();
+        fs::create_dir_all(destination.join("shared")).unwrap();
+        fs::write(destination.join("shared/keep.txt"), b"keep").unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::for_all(
+            ConflictResponse::Replace,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source_dir.join("shared")),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+        assert_eq!(
+            fs::read(destination.join("shared/keep.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    fn no_replacement_quarantines(directory: &Path) -> bool {
+        fs::read_dir(directory)
+            .unwrap()
+            .flatten()
+            .all(|entry| !is_replacement_quarantine_name(&entry.file_name()))
     }
 
     /// Renaming everything keeps every source, each beside the item it
@@ -3682,6 +4178,7 @@ mod tests {
             None,
             2,
             &mut ConflictPolicy::refusing(),
+            REPLACEMENT_UNDO_BYTE_LIMIT,
         );
 
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);

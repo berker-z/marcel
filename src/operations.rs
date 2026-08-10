@@ -214,8 +214,16 @@ impl OperationController {
         self.progress_task = Some(task);
     }
 
+    /// Record an operation and release anything the records it displaced were
+    /// holding aside.
+    ///
+    /// A replaced file is quarantined so undo can put it back. Once its record
+    /// leaves the journal nothing can reach it again, so it stops being
+    /// recoverable data and becomes a hidden file nobody will ever collect.
     pub fn record(&mut self, operation: OperationRecord) {
-        self.journal.record(operation);
+        for evicted in self.journal.record(operation) {
+            evicted.release_quarantines();
+        }
     }
 
     pub fn begin_undo(&mut self) -> Option<OperationRecord> {
