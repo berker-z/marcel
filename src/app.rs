@@ -58,9 +58,9 @@ use crate::{
     drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
     file_ops::{
         CommittedOperation, DirectoryChanges, MutationOutcome, OperationRecord, TransferMode,
-        create_directory, create_zip_operation, extract_archive_operation, redo_operation,
-        rename_entry, summarize_failures, transfer_paths_with_progress, undo_operation,
-        validate_entry_name,
+        create_directory, create_zip_operation, extract_archive_operation,
+        reclaim_abandoned_quarantines, redo_operation, rename_entry, summarize_failures,
+        transfer_paths_with_progress, undo_operation, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -825,6 +825,17 @@ impl Marcel {
                             }
                             DirectoryUpdate::Done => {
                                 this.directory.finish_load();
+                                // A replacement quarantine owned by a process
+                                // that is gone can never be restored, so it is
+                                // unreachable garbage rather than data anyone
+                                // might still want. Unlike an interrupted
+                                // permanent deletion, it needs no guidance.
+                                let reclaim = path.clone();
+                                cx.background_executor()
+                                    .spawn(smol::unblock(move || {
+                                        reclaim_abandoned_quarantines(&reclaim)
+                                    }))
+                                    .detach();
                                 if let Some(quarantine_warning) =
                                     quarantine_recovery_warning(&this.directory.entries)
                                 {

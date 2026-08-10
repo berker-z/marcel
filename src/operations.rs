@@ -48,6 +48,40 @@ pub struct OperationController {
     progress_task: Option<Task<()>>,
 }
 
+/// Release everything the journal is holding when it goes away.
+///
+/// Closing a window or quitting destroys the only records that could restore a
+/// replaced file, so the data it was holding aside becomes unreachable at that
+/// moment. Releasing it here keeps an ordinary quit from leaving hidden files
+/// behind; a crash cannot run this, which is why startup reclamation exists as
+/// well.
+///
+/// The work is detached rather than done inline because erasing a large tree
+/// must not stall the window that is closing.
+impl Drop for OperationController {
+    fn drop(&mut self) {
+        let unreachable = self
+            .journal
+            .drain()
+            .flat_map(|record| {
+                record
+                    .replaced_items()
+                    .iter()
+                    .map(|item| item.quarantine().to_path_buf())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if unreachable.is_empty() {
+            return;
+        }
+        std::thread::spawn(move || {
+            for path in unreachable {
+                crate::file_ops::erase_replacement_quarantine(&path);
+            }
+        });
+    }
+}
+
 impl OperationController {
     pub fn is_busy(&self) -> bool {
         self.busy

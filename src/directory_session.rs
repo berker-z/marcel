@@ -282,7 +282,9 @@ impl DirectorySession {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, entry)| {
-                    (self.show_hidden || !is_hidden_os_name(&entry.name_os)).then_some(index)
+                    (!crate::file_ops::is_internal_working_name(&entry.name_os)
+                        && (self.show_hidden || !is_hidden_os_name(&entry.name_os)))
+                    .then_some(index)
                 })
                 .collect();
             return;
@@ -294,7 +296,9 @@ impl DirectorySession {
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                if !self.show_hidden && is_hidden_os_name(&entry.name_os) {
+                if crate::file_ops::is_internal_working_name(&entry.name_os)
+                    || (!self.show_hidden && is_hidden_os_name(&entry.name_os))
+                {
                     return None;
                 }
                 fuzzy_score_folded(&entry.folded_name, &folded_query).map(|score| (index, score))
@@ -480,6 +484,33 @@ mod tests {
             size,
             icon_path: None,
         }
+    }
+
+    /// Hidden entries are shown by default, so without filtering, replacing a
+    /// file would make a cryptic sibling appear beside it and vanish later.
+    /// Permanent-delete quarantines stay visible because their recovery
+    /// guidance tells the user to go and look at them.
+    #[test]
+    fn marcel_working_files_stay_out_of_the_browser() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.show_hidden = true;
+        session.entries = vec![
+            entry("report.txt", false, Some(1)),
+            entry(".marcel-replaced-1-0-report.txt", false, Some(1)),
+            entry(".marcel-copy-1-0-staging", true, None),
+            entry(".marcel-archive-abc", true, None),
+            entry(".marcel-delete-1-0-old", true, None),
+            entry(".config", true, None),
+        ];
+        session.rebuild_visible_entries();
+
+        let visible = session
+            .visible_entries
+            .iter()
+            .map(|index| session.entries[*index].name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible, ["report.txt", ".marcel-delete-1-0-old", ".config"]);
     }
 
     #[test]

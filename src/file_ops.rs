@@ -624,6 +624,16 @@ impl OperationJournal {
         }
     }
 
+    /// Take every record out, leaving the journal empty.
+    ///
+    /// Used when the journal is going away, so its records can release what
+    /// they were holding aside before they are dropped.
+    pub fn drain(&mut self) -> impl Iterator<Item = OperationRecord> + use<> {
+        std::mem::take(&mut self.undo)
+            .into_iter()
+            .chain(std::mem::take(&mut self.redo))
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -1307,9 +1317,8 @@ pub fn transfer_paths(
         mode,
         cancelled,
         None,
-        COPY_UNDO_SNAPSHOT_LIMIT,
+        TransferBudget::default(),
         &mut ConflictPolicy::refusing(),
-        REPLACEMENT_UNDO_BYTE_LIMIT,
     )
 }
 
@@ -1326,9 +1335,8 @@ pub fn transfer_paths_with_progress(
         mode,
         cancelled,
         Some(progress),
-        COPY_UNDO_SNAPSHOT_LIMIT,
+        TransferBudget::default(),
         &mut ConflictPolicy::refusing(),
-        REPLACEMENT_UNDO_BYTE_LIMIT,
     )
 }
 
@@ -1350,10 +1358,28 @@ pub fn transfer_paths_with_conflicts(
         mode,
         cancelled,
         Some(progress),
-        COPY_UNDO_SNAPSHOT_LIMIT,
+        TransferBudget::default(),
         policy,
-        REPLACEMENT_UNDO_BYTE_LIMIT,
     )
+}
+
+/// What a transfer may spend on undo bookkeeping.
+///
+/// Both limits follow the same rule: past the budget the transfer still
+/// happens, it just stops being undoable and says so.
+#[derive(Clone, Copy, Debug)]
+struct TransferBudget {
+    copy_undo_snapshot_limit: usize,
+    replacement_undo_byte_limit: u64,
+}
+
+impl Default for TransferBudget {
+    fn default() -> Self {
+        Self {
+            copy_undo_snapshot_limit: COPY_UNDO_SNAPSHOT_LIMIT,
+            replacement_undo_byte_limit: REPLACEMENT_UNDO_BYTE_LIMIT,
+        }
+    }
 }
 
 /// How many times one source may be renamed before Marcel stops asking.
@@ -1490,10 +1516,13 @@ fn transfer_paths_impl(
     mode: TransferMode,
     cancelled: Arc<AtomicBool>,
     progress: Option<Arc<TransferProgress>>,
-    copy_undo_snapshot_limit: usize,
+    budget: TransferBudget,
     policy: &mut ConflictPolicy,
-    replacement_undo_byte_limit: u64,
 ) -> TransferOutcome {
+    let TransferBudget {
+        copy_undo_snapshot_limit,
+        replacement_undo_byte_limit,
+    } = budget;
     // Conceptually follows Yazi's per-item scheduled transfer outcomes,
     // cooperative cancellation, partial-success accounting, and rename-first
     // move path. No Yazi code is copied:
@@ -2333,6 +2362,74 @@ pub fn is_replacement_quarantine_name(name: &OsStr) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
 
     name.as_bytes().starts_with(b".marcel-replaced-")
+}
+
+/// Whether a name belongs to Marcel's own working state rather than the user's
+/// data.
+///
+/// Hidden entries are shown by default, so without this a user who replaces a
+/// file watches a cryptic sibling appear beside it and vanish later. Copy and
+/// archive staging have the same problem while an operation runs.
+///
+/// Permanent-delete quarantines are deliberately excluded: their recovery
+/// guidance points the user straight at the path, so hiding them would make
+/// that advice impossible to follow.
+pub fn is_internal_working_name(name: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let bytes = name.as_bytes();
+    bytes.starts_with(b".marcel-replaced-")
+        || bytes.starts_with(b".marcel-copy-")
+        || bytes.starts_with(b".marcel-archive-")
+}
+
+/// The process that created a replacement quarantine, if the name carries one.
+fn quarantine_owner(name: &OsStr) -> Option<u32> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let rest = name.as_bytes().strip_prefix(b".marcel-replaced-")?;
+    let end = rest.iter().position(|byte| *byte == b'-')?;
+    std::str::from_utf8(&rest[..end]).ok()?.parse().ok()
+}
+
+/// Whether a process is still running, and so might still be able to undo.
+///
+/// A live owner's quarantine is its own business: two Marcel processes can
+/// exist when desktop integration is unavailable, and reclaiming another's
+/// would destroy data it can still restore. An unknown answer keeps the file.
+#[cfg(target_os = "linux")]
+fn process_is_running(process: u32) -> bool {
+    Path::new(&format!("/proc/{process}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_running(_process: u32) -> bool {
+    true
+}
+
+/// Release replacement quarantines abandoned by processes that are gone.
+///
+/// Unlike an interrupted permanent deletion, this needs no user involvement.
+/// A replaced file is one the user chose to overwrite, and once the process
+/// holding its record is gone nothing can ever restore it, so it is provably
+/// unreachable rather than possibly-wanted. Returns how many were released.
+pub fn reclaim_abandoned_quarantines(directory: &Path) -> usize {
+    let current = std::process::id();
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut released = 0;
+    for entry in entries.flatten() {
+        let Some(owner) = quarantine_owner(&entry.file_name()) else {
+            continue;
+        };
+        if owner == current || process_is_running(owner) {
+            continue;
+        }
+        erase_replacement_quarantine(&entry.path());
+        released += 1;
+    }
+    released
 }
 
 /// Move the object at `path` aside, returning where it went.
@@ -3438,6 +3535,72 @@ mod tests {
         assert_eq!(outcome.accounted(), sources.len());
     }
 
+    /// A crash cannot run the exit path, so the remnants it leaves have to be
+    /// reclaimed later. A dead owner's quarantine can never be restored, which
+    /// makes it unreachable garbage rather than data anyone might want.
+    #[test]
+    fn quarantines_from_dead_processes_are_reclaimed_and_live_ones_are_left() {
+        let root = tempfile::tempdir().unwrap();
+        // Process id 0 is never a real process, so it stands in for a Marcel
+        // that is gone.
+        let abandoned = root.path().join(".marcel-replaced-0-0-report.txt");
+        let live = root.path().join(format!(
+            ".marcel-replaced-{}-0-report.txt",
+            std::process::id()
+        ));
+        let ordinary = root.path().join("report.txt");
+        for path in [&abandoned, &live, &ordinary] {
+            fs::write(path, b"payload").unwrap();
+        }
+
+        let released = reclaim_abandoned_quarantines(root.path());
+
+        assert_eq!(released, 1);
+        assert!(!abandoned.exists(), "a dead owner's quarantine is garbage");
+        assert!(
+            live.exists(),
+            "this process can still undo, so its quarantine stays"
+        );
+        assert!(ordinary.exists(), "user data is never touched");
+    }
+
+    /// A live second Marcel can still restore its own replacements, so its
+    /// quarantines must survive another instance listing the same directory.
+    #[test]
+    fn a_running_owners_quarantine_is_never_reclaimed() {
+        let root = tempfile::tempdir().unwrap();
+        // The test process itself is a live owner that is not this process id
+        // only in the sense that the check must consult liveness, not equality.
+        let parent = std::os::unix::process::parent_id();
+        let live = root
+            .path()
+            .join(format!(".marcel-replaced-{parent}-0-report.txt"));
+        fs::write(&live, b"payload").unwrap();
+
+        assert_eq!(reclaim_abandoned_quarantines(root.path()), 0);
+        assert!(live.exists());
+    }
+
+    #[test]
+    fn marcel_working_names_are_recognized_without_catching_user_data() {
+        for name in [
+            ".marcel-replaced-1-0-report.txt",
+            ".marcel-copy-1-0-abc",
+            ".marcel-archive-abc",
+        ] {
+            assert!(is_internal_working_name(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            // Recovery guidance points the user straight at these.
+            ".marcel-delete-1-0-report.txt",
+            "report.txt",
+            ".hidden",
+            "marcel-replaced-1-0",
+        ] {
+            assert!(!is_internal_working_name(OsStr::new(name)), "{name}");
+        }
+    }
+
     /// A record pushed out of the journal can never be undone, so what it was
     /// holding aside stops being recoverable data and becomes a hidden file
     /// nobody would ever collect.
@@ -3584,9 +3747,11 @@ mod tests {
             TransferMode::Copy,
             Arc::new(AtomicBool::new(false)),
             None,
-            COPY_UNDO_SNAPSHOT_LIMIT,
+            TransferBudget {
+                replacement_undo_byte_limit: 1024,
+                ..TransferBudget::default()
+            },
             &mut policy,
-            1024,
         );
 
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
@@ -4176,9 +4341,11 @@ mod tests {
             TransferMode::Copy,
             Arc::new(AtomicBool::new(false)),
             None,
-            2,
+            TransferBudget {
+                copy_undo_snapshot_limit: 2,
+                ..TransferBudget::default()
+            },
             &mut ConflictPolicy::refusing(),
-            REPLACEMENT_UNDO_BYTE_LIMIT,
         );
 
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
