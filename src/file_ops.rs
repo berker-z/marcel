@@ -14,6 +14,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::{
     archive_ops::{MAX_ARCHIVE_ENTRIES, create_zip_archive, extract_archive},
+    conflict::{ConflictPolicy, ConflictRequest, ConflictResponse, describe_occupant},
     local_fs::rename_no_replace,
     trash_ops::{TrashRecord, restore_trash_records, retrash_records},
 };
@@ -339,12 +340,31 @@ pub struct TransferFailure {
     pub message: String,
 }
 
+/// The result of a transfer, accounting for every requested source exactly
+/// once across `completed`, `skipped`, `failed`, and `cancelled`.
+///
+/// Cancellation previously recorded one failure and abandoned the loop, so a
+/// hundred-item transfer stopped at item ten reported ten results and left
+/// eighty-nine sources with no state at all. Nothing downstream could tell
+/// "skipped by the user" from "silently forgotten".
 #[derive(Debug)]
 pub struct TransferOutcome {
     pub operation: Option<OperationRecord>,
     pub completed: Vec<CompletedTransfer>,
     pub failures: Vec<TransferFailure>,
+    /// Sources the user declined to transfer because their destination was
+    /// occupied.
+    pub skipped: Vec<PathBuf>,
+    /// Sources never attempted, because the operation was cancelled first.
+    pub cancelled: Vec<PathBuf>,
     pub undo_unavailable: bool,
+}
+
+impl TransferOutcome {
+    /// Every requested source, in the state it ended in.
+    pub fn accounted(&self) -> usize {
+        self.completed.len() + self.failures.len() + self.skipped.len() + self.cancelled.len()
+    }
 }
 
 impl TransferOutcome {
@@ -598,13 +618,29 @@ fn push_bounded(stack: &mut VecDeque<OperationRecord>, operation: OperationRecor
 }
 
 pub fn validate_entry_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.trim().is_empty() {
+    validate_entry_os_name(OsStr::new(name))
+}
+
+/// The one name rule, applied to the raw bytes.
+///
+/// A conflict can be resolved by choosing a new name, and that name must clear
+/// exactly the same bar as Rename and New Folder. Marcel keeps authoritative
+/// `OsString` filenames, so the check works on bytes rather than requiring
+/// valid UTF-8.
+pub fn validate_entry_os_name(name: &OsStr) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.iter().all(u8::is_ascii_whitespace) {
         bail!("Enter a name");
     }
-    if name == "." || name == ".." {
-        bail!("“{name}” is reserved and cannot be used as a name");
+    if bytes == b"." || bytes == b".." {
+        bail!(
+            "“{}” is reserved and cannot be used as a name",
+            name.to_string_lossy()
+        );
     }
-    if name.contains('/') || name.contains('\0') {
+    if bytes.contains(&b'/') || bytes.contains(&0) {
         bail!("Names cannot contain “/” or a null character");
     }
     Ok(())
@@ -1171,6 +1207,7 @@ pub fn transfer_paths(
         cancelled,
         None,
         COPY_UNDO_SNAPSHOT_LIMIT,
+        &mut ConflictPolicy::refusing(),
     )
 }
 
@@ -1188,7 +1225,123 @@ pub fn transfer_paths_with_progress(
         cancelled,
         Some(progress),
         COPY_UNDO_SNAPSHOT_LIMIT,
+        &mut ConflictPolicy::refusing(),
     )
+}
+
+/// Transfer with a policy that can answer destination conflicts.
+///
+/// The policy is borrowed for the whole transfer because its apply-to-all state
+/// belongs to this operation and must not outlive it.
+pub fn transfer_paths_with_conflicts(
+    sources: &[PathBuf],
+    destination: &Path,
+    mode: TransferMode,
+    cancelled: Arc<AtomicBool>,
+    progress: Arc<TransferProgress>,
+    policy: &mut ConflictPolicy,
+) -> TransferOutcome {
+    transfer_paths_impl(
+        sources,
+        destination,
+        mode,
+        cancelled,
+        Some(progress),
+        COPY_UNDO_SNAPSHOT_LIMIT,
+        policy,
+    )
+}
+
+/// How many times one source may be renamed before Marcel stops asking.
+///
+/// A resolver that keeps returning an occupied name would otherwise spin
+/// forever. Reaching this is a bug in the resolver, not a user action.
+const MAX_CONFLICT_RETRIES: usize = 64;
+
+/// What conflict resolution decided to do with one source.
+enum SourcePlan {
+    /// Transfer it to this destination, which is free.
+    Transfer(PathBuf),
+    /// The user declined this source.
+    Skip,
+    /// The user abandoned the operation.
+    Cancel,
+    Failed(String),
+}
+
+/// Resolve a destination for one source, asking the policy while the chosen
+/// name stays occupied.
+fn plan_source(
+    source: &Path,
+    destination_dir: &Path,
+    initial_target: PathBuf,
+    policy: &mut ConflictPolicy,
+) -> SourcePlan {
+    let source_is_directory = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata.file_type().is_dir(),
+        Err(error) => {
+            return SourcePlan::Failed(format!(
+                "Could not inspect “{}”: {error}",
+                source.display()
+            ));
+        }
+    };
+
+    let mut target = initial_target;
+    for _ in 0..MAX_CONFLICT_RETRIES {
+        let occupant = match describe_occupant(&target) {
+            Ok(occupant) => occupant,
+            Err(error) => {
+                return SourcePlan::Failed(format!(
+                    "Could not inspect destination “{}”: {error}",
+                    target.display()
+                ));
+            }
+        };
+        let Some(destination_is_directory) = occupant else {
+            return SourcePlan::Transfer(target);
+        };
+        // A skip the user chose and a refusal nobody could answer are different
+        // outcomes. Without an interface to ask, this stays the visible failure
+        // it has always been, rather than becoming a silent no-op that reports
+        // zero items transferred and no error.
+        if !policy.is_interactive() {
+            return SourcePlan::Failed(format!(
+                "“{}” already exists; nothing was overwritten",
+                target.display()
+            ));
+        }
+
+        let request = ConflictRequest {
+            source: source.to_path_buf(),
+            destination: target.clone(),
+            source_is_directory,
+            destination_is_directory,
+        };
+        match policy.decide(&request) {
+            ConflictResponse::Skip => return SourcePlan::Skip,
+            ConflictResponse::Cancel => return SourcePlan::Cancel,
+            ConflictResponse::Rename(name) => {
+                if let Err(error) = validate_entry_os_name(&name) {
+                    return SourcePlan::Failed(error.to_string());
+                }
+                target = destination_dir.join(name);
+            }
+            // Replacement has to be able to put back what it displaced before
+            // Marcel will perform one, so the decision exists but the engine
+            // does not act on it yet.
+            ConflictResponse::Replace => {
+                return SourcePlan::Failed(format!(
+                    "“{}” already exists; replacing an existing item is not supported yet",
+                    target.display()
+                ));
+            }
+        }
+    }
+    SourcePlan::Failed(format!(
+        "Could not find a free name for “{}” after {MAX_CONFLICT_RETRIES} attempts",
+        source.display()
+    ))
 }
 
 fn transfer_paths_impl(
@@ -1198,6 +1351,7 @@ fn transfer_paths_impl(
     cancelled: Arc<AtomicBool>,
     progress: Option<Arc<TransferProgress>>,
     copy_undo_snapshot_limit: usize,
+    policy: &mut ConflictPolicy,
 ) -> TransferOutcome {
     // Conceptually follows Yazi's per-item scheduled transfer outcomes,
     // cooperative cancellation, partial-success accounting, and rename-first
@@ -1209,6 +1363,8 @@ fn transfer_paths_impl(
     // https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-fs/src/engine/attrs.rs
     let mut completed = Vec::new();
     let mut failures = Vec::new();
+    let mut skipped = Vec::new();
+    let mut cancelled_sources = Vec::new();
     let mut copied_sources = Vec::new();
     let mut copied_created = Vec::new();
     let mut copy_undo_unavailable = false;
@@ -1231,12 +1387,11 @@ fn transfer_paths_impl(
         progress.set_preparing(false);
     }
 
-    for source in sources {
-        if cancelled.load(Ordering::Acquire) {
-            failures.push(TransferFailure {
-                path: source.clone(),
-                message: "Operation cancelled".to_string(),
-            });
+    for (index, source) in sources.iter().enumerate() {
+        // Account for every source that will not be attempted, rather than
+        // recording one failure and abandoning the rest silently.
+        if cancelled.load(Ordering::Acquire) || policy.is_cancelled() {
+            cancelled_sources.extend(sources[index..].iter().cloned());
             break;
         }
 
@@ -1247,7 +1402,24 @@ fn transfer_paths_impl(
             });
             continue;
         };
-        let target = destination.join(name);
+        let target = match plan_source(source, destination, destination.join(name), policy) {
+            SourcePlan::Transfer(target) => target,
+            SourcePlan::Skip => {
+                skipped.push(source.clone());
+                continue;
+            }
+            SourcePlan::Cancel => {
+                cancelled_sources.extend(sources[index..].iter().cloned());
+                break;
+            }
+            SourcePlan::Failed(message) => {
+                failures.push(TransferFailure {
+                    path: source.clone(),
+                    message,
+                });
+                continue;
+            }
+        };
         if let Some(progress) = &progress {
             progress.set_current_path(Some(source.clone()));
         }
@@ -1318,6 +1490,8 @@ fn transfer_paths_impl(
         operation,
         completed,
         failures,
+        skipped,
+        cancelled: cancelled_sources,
         undo_unavailable: copy_undo_unavailable || move_undo_unavailable,
     }
 }
@@ -2809,6 +2983,150 @@ mod tests {
         assert_eq!(fs::read(destination.join("source.txt")).unwrap(), b"keep");
     }
 
+    /// A resolver that answers every conflict the same way.
+    struct AlwaysAnswers(crate::conflict::ConflictDecision);
+
+    impl crate::conflict::ConflictResolver for AlwaysAnswers {
+        fn resolve(&self, _request: &ConflictRequest) -> crate::conflict::ConflictDecision {
+            self.0.clone()
+        }
+    }
+
+    fn answering(decision: crate::conflict::ConflictDecision) -> ConflictPolicy {
+        ConflictPolicy::interactive(Arc::new(AlwaysAnswers(decision)))
+    }
+
+    fn occupied_transfer_fixture() -> (tempfile::TempDir, Vec<PathBuf>, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source_dir.join("taken.txt"), b"new").unwrap();
+        fs::write(source_dir.join("free.txt"), b"free").unwrap();
+        fs::write(destination.join("taken.txt"), b"keep").unwrap();
+        let sources = vec![source_dir.join("taken.txt"), source_dir.join("free.txt")];
+        (root, sources, destination)
+    }
+
+    /// Skipping is a deliberate outcome, not a failure, and it must not stop
+    /// the sources that follow it.
+    #[test]
+    fn a_skipped_conflict_leaves_both_items_and_continues() {
+        let (_root, sources, destination) = occupied_transfer_fixture();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Skip,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            &sources,
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.skipped, [sources[0].clone()]);
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(outcome.completed.len(), 1);
+        assert_eq!(fs::read(destination.join("taken.txt")).unwrap(), b"keep");
+        assert_eq!(fs::read(destination.join("free.txt")).unwrap(), b"free");
+        assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    /// Cancelling from a conflict abandons the operation, and every source it
+    /// never reached is accounted for rather than silently forgotten.
+    #[test]
+    fn cancelling_a_conflict_accounts_for_every_unattempted_source() {
+        let (_root, sources, destination) = occupied_transfer_fixture();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Cancel,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            &sources,
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.cancelled, sources);
+        assert!(outcome.completed.is_empty());
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(!destination.join("free.txt").exists());
+        assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    #[test]
+    fn renaming_resolves_a_conflict_without_touching_the_occupant() {
+        let (_root, sources, destination) = occupied_transfer_fixture();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Rename(OsStr::new("renamed.txt").to_os_string()),
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            &sources,
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(fs::read(destination.join("taken.txt")).unwrap(), b"keep");
+        assert_eq!(fs::read(destination.join("renamed.txt")).unwrap(), b"new");
+        assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    /// A chosen name gets the same scrutiny as one typed into Rename, so a
+    /// resolver cannot smuggle a path separator past the destination directory.
+    #[test]
+    fn a_rename_response_cannot_escape_the_destination_directory() {
+        let (_root, sources, destination) = occupied_transfer_fixture();
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Rename(OsStr::new("../escaped.txt").to_os_string()),
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            &sources,
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(
+            outcome.failures[0].message.contains("cannot contain"),
+            "{:?}",
+            outcome.failures
+        );
+        assert!(!destination.parent().unwrap().join("escaped.txt").exists());
+        assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    /// Cancelling the operation through the cancel flag must also account for
+    /// the sources it never reached.
+    #[test]
+    fn a_cancelled_transfer_accounts_for_every_requested_source() {
+        let (_root, sources, destination) = occupied_transfer_fixture();
+
+        let outcome = transfer_paths(
+            &sources,
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(true)),
+        );
+
+        assert_eq!(outcome.cancelled, sources);
+        assert_eq!(outcome.accounted(), sources.len());
+    }
+
     #[test]
     fn copy_undo_refuses_a_modified_output() {
         let root = tempfile::tempdir().unwrap();
@@ -3211,6 +3529,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             2,
+            &mut ConflictPolicy::refusing(),
         );
 
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);

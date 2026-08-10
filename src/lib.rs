@@ -2,6 +2,7 @@ mod app;
 pub mod archive_ops;
 mod bookmarks;
 pub mod commands;
+pub mod conflict;
 mod delete_ops;
 #[cfg(target_os = "linux")]
 pub mod desktop_integration;
