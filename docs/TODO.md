@@ -21,6 +21,18 @@ Sprint status uses four consistent meanings:
   [`Sprint 17`](sprints/017-stability-and-architecture-hardening.md) closes the
   confirmed review findings; the next work is its desktop/manual acceptance
   matrix and any hardening defects that matrix reveals.
+- A third review is cross-checked in
+  [`review-2026-08-10.md`](review-2026-08-10.md). Its transaction-integrity
+  findings are closed: undo, redo, and the Trash mutations now report which side
+  of their commit boundary a failure landed on, and no path reinstates a record
+  that compensation invalidated. Its remaining open findings are tracked as
+  unchecked Sprint 17 acceptance boxes, in the order the review recommends:
+  journal-wide snapshot budget, pre-commit identity keys carried through every
+  post-commit refresh and into Trash purge, quarantine-first undo deletion,
+  complete per-source accounting, physical Trash-root comparison, honest Trash
+  enumeration, and the application-global operation owner.
+  One finding was rejected: its permanent-delete change would report a
+  provably complete deletion as failed.
 - The critical and high findings in
   [`review-2026-08-05.md`](review-2026-08-05.md) are fixed and covered by
   regression tests. Its remaining lower-tier backlog is open:

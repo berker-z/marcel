@@ -2045,8 +2045,15 @@ impl Marcel {
                             cx,
                         );
                     }
-                    Err(error) => {
-                        window.push_notification(Notification::error(error.to_string()), cx);
+                    Err(failure) => {
+                        if failure.committed {
+                            // Payloads moved before the failure. Compensation
+                            // may not have returned all of them, so the listing
+                            // can no longer be trusted to match the Trash.
+                            this.start_trash_load(false, cx);
+                        }
+                        window
+                            .push_notification(Notification::error(failure.error.to_string()), cx);
                     }
                 }
                 this.operations.finish_active();

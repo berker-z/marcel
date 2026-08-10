@@ -348,46 +348,101 @@ pub struct TrashRestore {
     pub undoable: bool,
 }
 
-pub fn restore_trash_records(records: &[TrashRecord]) -> Result<TrashRestore> {
-    for record in records {
-        validate_identity(&record.info_path, &record.info_identity, "Trash metadata")?;
-        validate_identity(
-            &record.backing_path,
-            &record.payload_identity,
-            "Trash payload",
-        )?;
-        let parent = fs::symlink_metadata(&record.original_parent).with_context(|| {
-            format!(
-                "Cannot restore “{}”: its original parent no longer exists",
-                record.original_path().display()
-            )
-        })?;
-        if !parent.file_type().is_dir() {
-            bail!(
-                "Cannot restore “{}”: its original parent is no longer a directory",
-                record.original_path().display()
-            );
+/// A failed Trash mutation, and whether it reached the filesystem.
+///
+/// Neither upstream models this. Yazi's `Trash::restore` loops with `?` and
+/// leaves partial results in place with no rollback and no identity check
+/// (`yazi-fs/src/trash/freedesktop/trash.rs`). Nautilus discards the return
+/// value of the `g_file_move` that performs each restore and reports success
+/// as "at least one entry matched"
+/// (`nautilus-file-undo-operations.c`, `trash_retrieve_files_to_restore_thread`).
+/// Marcel validates identities, rolls back, and therefore has to say which side
+/// of its commit boundary a failure landed on.
+#[derive(Debug)]
+pub struct TrashMutationFailure {
+    pub error: anyhow::Error,
+    /// False only when Marcel can prove no rename committed, which keeps the
+    /// history record retryable. A rollback still counts as committed: it
+    /// renames payloads a second time and moves the ctimes the record holds.
+    pub committed: bool,
+}
+
+impl TrashMutationFailure {
+    fn unchanged(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            committed: false,
         }
-        ensure_unoccupied(record.original_path())?;
+    }
+
+    fn committed(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            committed: true,
+        }
+    }
+}
+
+pub fn restore_trash_records(
+    records: &[TrashRecord],
+) -> Result<TrashRestore, TrashMutationFailure> {
+    // Prepare: every check runs before the first rename, so a refusal here
+    // provably left the Trash untouched.
+    for record in records {
+        let prepared =
+            validate_identity(&record.info_path, &record.info_identity, "Trash metadata")
+                .and_then(|()| {
+                    validate_identity(
+                        &record.backing_path,
+                        &record.payload_identity,
+                        "Trash payload",
+                    )
+                })
+                .and_then(|()| {
+                    let parent =
+                        fs::symlink_metadata(&record.original_parent).with_context(|| {
+                            format!(
+                                "Cannot restore “{}”: its original parent no longer exists",
+                                record.original_path().display()
+                            )
+                        })?;
+                    if !parent.file_type().is_dir() {
+                        bail!(
+                            "Cannot restore “{}”: its original parent is no longer a directory",
+                            record.original_path().display()
+                        );
+                    }
+                    ensure_unoccupied(record.original_path())
+                });
+        if let Err(error) = prepared {
+            return Err(TrashMutationFailure::unchanged(error));
+        }
     }
 
     let mut restored = Vec::with_capacity(records.len());
     for record in records {
         let original = record.original_path().to_path_buf();
+        // Commit.
         if let Err(error) = rename_no_replace(&record.backing_path, &original) {
-            let rollback = rollback_restored(&restored);
             let message = format!(
                 "Could not restore “{}” from Trash: {error}",
                 original.display()
             );
-            return match rollback {
-                Ok(()) => Err(anyhow::anyhow!(
+            if restored.is_empty() {
+                // The first rename failed, so the Trash is untouched and the
+                // record still describes it exactly.
+                return Err(TrashMutationFailure::unchanged(anyhow::anyhow!(
+                    "{message}"
+                )));
+            }
+            return Err(match rollback_restored(&restored) {
+                Ok(()) => TrashMutationFailure::committed(anyhow::anyhow!(
                     "{message}; earlier restores were rolled back"
                 )),
-                Err(rollback_error) => Err(anyhow::anyhow!(
+                Err(rollback_error) => TrashMutationFailure::committed(anyhow::anyhow!(
                     "{message}; rollback also failed: {rollback_error}"
                 )),
-            };
+            });
         }
         restored.push(record);
     }
@@ -398,8 +453,10 @@ pub fn restore_trash_records(records: &[TrashRecord]) -> Result<TrashRestore> {
     let mut undoable = true;
     for record in records {
         // The payload is already safely restored. A failed metadata cleanup
-        // leaves only an orphaned Trash entry, never missing user data.
-        let _ = fs::remove_file(&record.info_path);
+        // leaves only an orphaned Trash entry, never missing user data — but
+        // check identity first so a replacement metadata file for an unrelated
+        // Trash entry is never the thing that gets removed.
+        let _ = remove_matching_trash_info(record);
         let original = record.original_path();
         match fs::symlink_metadata(original) {
             Ok(metadata) => {
@@ -416,18 +473,22 @@ pub fn restore_trash_records(records: &[TrashRecord]) -> Result<TrashRestore> {
     })
 }
 
-pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>> {
+pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>, TrashMutationFailure> {
+    // Prepare.
     for record in records {
-        validate_identity(
+        if let Err(error) = validate_identity(
             record.original_path(),
             &record.payload_identity,
             "Restored item",
-        )?;
+        ) {
+            return Err(TrashMutationFailure::unchanged(error));
+        }
     }
     let originals = records
         .iter()
         .map(|record| record.original_path().to_path_buf())
         .collect::<Vec<_>>();
+    // Commit: `trash_paths` places items one at a time.
     let outcome = trash_paths(&originals);
     if outcome.failures.is_empty()
         && !outcome.undo_unavailable
@@ -437,17 +498,30 @@ pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>> {
     }
 
     let failure = summarize_failures(&outcome.failures);
-    if !outcome.records.is_empty() {
-        // Compensating action: the trash operation partially committed, so
-        // undo it before reporting that nothing happened.
-        match restore_trash_records(&outcome.records) {
-            Ok(_) => bail!("{failure}; completed items were restored"),
-            Err(rollback_error) => {
-                bail!("{failure}; restore rollback also failed: {rollback_error}");
-            }
-        }
+    if outcome.completed.is_empty() {
+        // Nothing reached the Trash, so the record is still accurate.
+        return Err(TrashMutationFailure::unchanged(anyhow::anyhow!(
+            "{failure}"
+        )));
     }
-    bail!("{failure}");
+    if outcome.records.is_empty() {
+        // Items were trashed but none could be identified, so Marcel cannot
+        // compensate for them and must not claim nothing happened.
+        return Err(TrashMutationFailure::committed(anyhow::anyhow!(
+            "{failure}; items reached Trash but could not be returned"
+        )));
+    }
+    // Compensating action: the trash operation partially committed, so undo
+    // what can be identified before reporting the failure.
+    Err(match restore_trash_records(&outcome.records) {
+        Ok(_) => TrashMutationFailure::committed(anyhow::anyhow!(
+            "{failure}; completed items were restored"
+        )),
+        Err(rollback) => TrashMutationFailure::committed(anyhow::anyhow!(
+            "{failure}; restore rollback also failed: {}",
+            rollback.error
+        )),
+    })
 }
 
 pub fn summarize_failures(failures: &[TrashFailure]) -> String {
@@ -657,6 +731,73 @@ mod tests {
             restored.records[0].original_path(),
             original_parent.join("note.txt")
         );
+    }
+
+    /// A refusal raised before the first rename leaves the Trash exactly as the
+    /// record describes, so the caller may keep the history entry and retry.
+    #[test]
+    fn a_restore_refused_before_committing_stays_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_parent = temp.path().join("original");
+        fs::create_dir(&original_parent).unwrap();
+        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        File::create(original_parent.join("note.txt")).unwrap();
+
+        let failure = restore_trash_records(std::slice::from_ref(&record))
+            .expect_err("an occupied destination must refuse");
+
+        assert!(
+            !failure.committed,
+            "a preflight refusal must stay retryable: {}",
+            failure.error
+        );
+        assert!(record.backing_path.exists());
+        assert!(record.info_path.exists());
+    }
+
+    /// Once a payload has been renamed out of Trash, compensation renames it
+    /// back and moves its ctime, so the record can no longer validate and the
+    /// caller must discard it.
+    #[test]
+    fn a_restore_that_rolls_back_reports_a_committed_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if rustix::process::geteuid().is_root() {
+            // Permission bits do not constrain root, so the mid-loop failure
+            // this test depends on cannot be provoked.
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let trash = temp.path().join("Trash");
+        // Two original parents, so one can be sealed without blocking the
+        // other. The preflight stats each destination and validates each
+        // record before the first rename, so an obstacle it can see yields an
+        // unchanged failure; reaching the rolled-back path needs one only the
+        // rename itself discovers.
+        let open = temp.path().join("open");
+        let sealed = temp.path().join("sealed");
+        fs::create_dir(&open).unwrap();
+        fs::create_dir(&sealed).unwrap();
+        let first = seeded_record(&trash, &open, "first.txt");
+        let second = seeded_record(&trash, &sealed, "second.txt");
+
+        // "first" restores into a writable parent and commits; "second" cannot
+        // be created inside a read-only parent, though stat still succeeds.
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o555)).unwrap();
+        let failure = restore_trash_records(&[first.clone(), second]);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let failure = failure.expect_err("a read-only parent must fail the restore");
+        assert!(
+            failure.committed,
+            "a rolled-back restore must discard its record: {}",
+            failure.error
+        );
+        // Compensation returned the first payload to Trash, so no user data was
+        // stranded outside it.
+        assert!(first.backing_path.exists());
+        assert!(!first.original_path().exists());
     }
 
     #[test]

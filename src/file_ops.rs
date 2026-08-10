@@ -812,10 +812,7 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                     records: restored.records,
                 }),
             )),
-            // Restore validates every record before moving anything, but its
-            // rollback renames payloads back into Trash and moves their ctimes,
-            // so a failure past the first rename cannot be retried.
-            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+            Err(failure) => trash_failure_outcome(failure),
         },
         OperationRecord::Restore { records } => match retrash_records(records) {
             Ok(records) => MutationOutcome::Committed(CommittedOperation::new(
@@ -823,7 +820,7 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 reversed,
                 Some(OperationRecord::Restore { records }),
             )),
-            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+            Err(failure) => trash_failure_outcome(failure),
         },
         OperationRecord::Rename { .. } => match reverse_rename(operation) {
             Ok(committed) => MutationOutcome::Committed(committed),
@@ -903,7 +900,7 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
                 forward,
                 Some(OperationRecord::Trash { records }),
             )),
-            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+            Err(failure) => trash_failure_outcome(failure),
         },
         OperationRecord::Restore { records } => match restore_trash_records(records) {
             Ok(restored) => MutationOutcome::Committed(CommittedOperation::new(
@@ -913,7 +910,7 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
                     records: restored.records,
                 }),
             )),
-            Err(error) => MutationOutcome::discarded(DirectoryChanges::default(), error),
+            Err(failure) => trash_failure_outcome(failure),
         },
         OperationRecord::Rename { .. } => match reverse_rename(operation) {
             Ok(committed) => MutationOutcome::Committed(committed),
@@ -2140,6 +2137,20 @@ fn remove_snapshotted_tree(snapshots: &[PathSnapshot]) -> Result<(), PartialRemo
         }
     }
     Ok(())
+}
+
+/// Map a Trash failure onto the shared outcome.
+///
+/// Trash placement and restoration move payloads between the Trash and the
+/// user's directories, and Marcel reconciles the Trash view from the operation
+/// record rather than from `DirectoryChanges`, so there is no browser effect to
+/// report here — only whether the record survives.
+fn trash_failure_outcome(failure: crate::trash_ops::TrashMutationFailure) -> MutationOutcome {
+    if failure.committed {
+        MutationOutcome::discarded(DirectoryChanges::default(), failure.error)
+    } else {
+        MutationOutcome::unchanged(failure.error)
+    }
 }
 
 /// The visible effect of an undo whose compensation could not put everything

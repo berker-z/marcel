@@ -18,6 +18,17 @@ and does not add features, distribution formats, or release automation.
 
 ## Correctness contract
 
+- A mutation that crosses more than one commit point reports which side of that
+  boundary a failure landed on. An ordinary "nothing happened" error is legal
+  only where Marcel can prove no commit escaped.
+- No failure path reinstates an operation record whose recorded identities
+  predate a compensating rename. Compensation that restores the paths still
+  invalidates the record, because renaming a root moves its ctime.
+- Visible transfer effects come from the exact recorded transfers and the
+  transfer mode, never from an undo record that may describe only a subset.
+- A tree Marcel cannot copy or archive is still movable and still undoable.
+  Object kinds it cannot reproduce are refused only where undo would have to
+  recreate or delete them.
 - PDF inspection rejects zero-page documents before any page index is clamped
   or scheduled.
 - Native watcher and Marcel-owned operation reconciliation share one metadata
@@ -118,6 +129,30 @@ and does not add features, distribution formats, or release automation.
 - [x] Run the remaining rename, location-bar, theme, unusual-filename,
   non-Latin fallback, and scale-factor interaction checks retained by earlier
   sprints.
+- [x] Return an explicit three-state outcome from `undo_operation`,
+  `redo_operation`, and the Trash mutations, and reinstate a history record
+  only for a failure that provably never reached the filesystem.
+- [x] Derive redone-transfer effects from `CompletedTransfer` and the transfer
+  mode so a copy redo never marks its still-present source removed.
+- [x] Keep moved trees holding a socket, FIFO, or device node undoable, while
+  archive creation, extraction, and snapshotted-tree removal still refuse them.
+- [x] Bound the operation journal to 20 records per stack.
+- [ ] Give Move the same bounded snapshot budget as Copy, and make the budget
+  journal-wide rather than per-operation.
+- [ ] Carry a pre-commit object key into every post-commit identity refresh, and
+  into `delete_trash_backings` from `purge_trash_records`.
+- [ ] Make undo of copy and archive output quarantine-first, reusing
+  `delete_ops`, so a partial erase cannot leave the record claiming a whole
+  tree.
+- [ ] Account for every requested source exactly once across completed, failed,
+  and cancelled outcomes.
+- [ ] Compare physical location, not lexical prefix, when refusing to
+  permanently delete inside a Trash root.
+- [ ] Surface malformed or unreadable Trash entries instead of dropping them
+  from the listing, and stop Empty Trash implying it emptied them.
+- [ ] Move active filesystem operations, the operation journal, and the busy
+  lock to an application-global owner so closing a window cannot orphan work or
+  discard history.
 - [x] Pass `cargo fmt --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test --all-targets` in the declared development environment.
@@ -204,6 +239,36 @@ Verified:
 - An invalid-UTF-8 source renamed to a valid name, and Undo/Redo restored and
   reapplied its exact raw identity. A valid non-ASCII name renamed to another
   Unicode name and remained selected.
+
+## 2026-08-10 transaction-integrity slice
+
+A third review, cross-checked in [`review-2026-08-10.md`](../review-2026-08-10.md),
+found that `CommittedOperation` closed the single-commit boundary and left the
+multi-commit one open. Undo, Redo, and the Trash mutations could rename one
+item, fail on the next, compensate, and still return an ordinary error, after
+which the application reinstated the record that attempt had just invalidated.
+
+Both upstreams were read at pinned commits before deciding anything, and the
+decision came from Nautilus:
+
+- Yazi has no filesystem undo at all, so the journal has no upstream precedent.
+  Its move path is rename-first with no content inspection, which is what makes
+  moved trees holding special files safe to keep undoable, and its `ChaType`
+  supplied the object-kind taxonomy now mirrored in `SnapshotKind`.
+- Nautilus discards its undo record whenever an undo fails for any reason other
+  than user cancellation, and clears the pending action before the asynchronous
+  undo runs rather than reinstating it afterwards. Marcel adopts the rule and
+  refines it: its prepare/commit/finalize discipline can prove when nothing
+  committed, so those failures stay retryable. Nautilus cannot express that
+  distinction because it stores no identities that can go stale.
+- Nautilus's Trash undo discards the return value of the move that performs
+  each restore and reports success when any entry merely matched. Marcel's
+  identity-validating, rolling-back restore is stronger than either upstream,
+  so this slice kept Marcel's model and added only the commit-boundary split.
+
+Deliberately deferred rather than done: the remaining unchecked boxes above,
+which the review tiers as identity-refresh races, accounting completeness, and
+the application-global operation owner.
 
 ## Deferred coordination
 
