@@ -2488,53 +2488,61 @@ impl Marcel {
                                 }),
                         ),
                 )
+                // Each button answers and dismisses on its own rather than
+                // sitting inside a DialogClose wrapper. The wrapper closes on a
+                // click of its own surrounding element, which a button with its
+                // own handler never delivers — so every answer was sent while
+                // the dialog stayed on screen, and the next conflict opened
+                // another one on top of it.
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().child(
-                                Button::new("conflict-cancel")
-                                    .label("Cancel")
-                                    .outline()
-                                    .on_click(move |_, _, _| cancel(ConflictResponse::Cancel)),
-                            ),
+                            Button::new("conflict-cancel")
+                                .label("Cancel")
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    cancel(ConflictResponse::Cancel);
+                                    window.close_dialog(cx);
+                                }),
                         )
                         .child(
-                            DialogClose::new().child(
-                                Button::new("conflict-skip")
-                                    .label("Skip")
-                                    .outline()
-                                    .on_click(move |_, _, _| skip(ConflictResponse::Skip)),
-                            ),
+                            Button::new("conflict-skip")
+                                .label("Skip")
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    skip(ConflictResponse::Skip);
+                                    window.close_dialog(cx);
+                                }),
                         )
                         .child(
-                            DialogClose::new().child(
-                                Button::new("conflict-rename")
-                                    .label("Rename")
-                                    .outline()
-                                    .on_click({
-                                        let input = input.clone();
-                                        move |_, _, cx| {
-                                            // A typed name cannot answer later
-                                            // conflicts, so applying to all
-                                            // means Marcel picks the names.
-                                            rename(if applies_to_all {
-                                                ConflictResponse::AutoRename
-                                            } else {
-                                                ConflictResponse::Rename(OsString::from(
-                                                    input.read(cx).value().trim().to_string(),
-                                                ))
-                                            });
-                                        }
-                                    }),
-                            ),
+                            Button::new("conflict-rename")
+                                .label("Rename")
+                                .outline()
+                                .on_click({
+                                    let input = input.clone();
+                                    move |_, window, cx| {
+                                        // A typed name cannot answer later
+                                        // conflicts, so applying to all means
+                                        // Marcel picks the names.
+                                        rename(if applies_to_all {
+                                            ConflictResponse::AutoRename
+                                        } else {
+                                            ConflictResponse::Rename(OsString::from(
+                                                input.read(cx).value().trim().to_string(),
+                                            ))
+                                        });
+                                        window.close_dialog(cx);
+                                    }
+                                }),
                         )
                         .child(
-                            DialogAction::new().child(
-                                Button::new("conflict-replace")
-                                    .label(if is_merge { "Merge" } else { "Replace" })
-                                    .with_variant(ButtonVariant::Danger)
-                                    .on_click(move |_, _, _| replace(ConflictResponse::Replace)),
-                            ),
+                            Button::new("conflict-replace")
+                                .label(if is_merge { "Merge" } else { "Replace" })
+                                .with_variant(ButtonVariant::Danger)
+                                .on_click(move |_, window, cx| {
+                                    replace(ConflictResponse::Replace);
+                                    window.close_dialog(cx);
+                                }),
                         ),
                 )
                 .overlay_closable(false)
