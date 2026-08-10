@@ -1275,16 +1275,22 @@ fn plan_source(
     source: &Path,
     destination_dir: &Path,
     initial_target: PathBuf,
+    mode: TransferMode,
     policy: &mut ConflictPolicy,
 ) -> SourcePlan {
-    let source_is_directory = match fs::symlink_metadata(source) {
-        Ok(metadata) => metadata.file_type().is_dir(),
+    let source_metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
         Err(error) => {
             return SourcePlan::Failed(format!(
                 "Could not inspect “{}”: {error}",
                 source.display()
             ));
         }
+    };
+    let source_is_directory = source_metadata.file_type().is_dir();
+    let action = match mode {
+        TransferMode::Copy => "copy",
+        TransferMode::Move => "move",
     };
 
     let mut target = initial_target;
@@ -1298,9 +1304,21 @@ fn plan_source(
                 ));
             }
         };
-        let Some(destination_is_directory) = occupant else {
+        let Some(occupant) = occupant else {
             return SourcePlan::Transfer(target);
         };
+        // The destination *is* the source. This is never a conflict decision,
+        // because every answer to it is wrong: replacing would quarantine the
+        // very object about to be read, destroying it. Pasting into the folder
+        // a file was copied from reaches this by the shortest possible route,
+        // and a hard link or aliased path reaches it under a different name,
+        // which a path comparison would not catch.
+        if occupant.is_same_object_as(&source_metadata) {
+            return SourcePlan::Failed(format!(
+                "Cannot {action} “{}” over itself",
+                source.display()
+            ));
+        }
         // A skip the user chose and a refusal nobody could answer are different
         // outcomes. Without an interface to ask, this stays the visible failure
         // it has always been, rather than becoming a silent no-op that reports
@@ -1316,7 +1334,7 @@ fn plan_source(
             source: source.to_path_buf(),
             destination: target.clone(),
             source_is_directory,
-            destination_is_directory,
+            destination_is_directory: occupant.is_directory,
         };
         match policy.decide(&request) {
             ConflictResponse::Skip => return SourcePlan::Skip,
@@ -1402,7 +1420,7 @@ fn transfer_paths_impl(
             });
             continue;
         };
-        let target = match plan_source(source, destination, destination.join(name), policy) {
+        let target = match plan_source(source, destination, destination.join(name), mode, policy) {
             SourcePlan::Transfer(target) => target,
             SourcePlan::Skip => {
                 skipped.push(source.clone());
@@ -3108,6 +3126,79 @@ mod tests {
         );
         assert!(!destination.parent().unwrap().join("escaped.txt").exists());
         assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    /// Pasting into the folder a file was copied from makes the destination the
+    /// source. Every conflict answer is wrong here: replacing would quarantine
+    /// the object about to be read. It must refuse without asking, even when a
+    /// resolver stands ready to say "replace".
+    #[test]
+    fn a_source_is_never_offered_as_its_own_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("report.pdf");
+        fs::write(&source, b"original").unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::for_all(
+            ConflictResponse::Replace,
+        ));
+
+        for mode in [TransferMode::Copy, TransferMode::Move] {
+            let outcome = transfer_paths_with_conflicts(
+                std::slice::from_ref(&source),
+                root.path(),
+                mode,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(TransferProgress::default()),
+                &mut policy,
+            );
+
+            assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+            assert!(
+                outcome.failures[0].message.contains("over itself"),
+                "{:?}",
+                outcome.failures
+            );
+            assert_eq!(fs::read(&source).unwrap(), b"original");
+        }
+    }
+
+    /// A hard link names the same object under a different path, so comparing
+    /// paths would miss it and a replace would destroy the data it was reading.
+    #[test]
+    fn a_hardlink_to_the_source_is_recognized_as_the_same_object() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let source = source_dir.join("report.pdf");
+        fs::write(&source, b"original").unwrap();
+        // Same inode, different directory, same basename: the transfer would
+        // land exactly on its own source.
+        fs::hard_link(&source, destination.join("report.pdf")).unwrap();
+        let mut policy = answering(crate::conflict::ConflictDecision::for_all(
+            ConflictResponse::Replace,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            std::slice::from_ref(&source),
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+        assert!(
+            outcome.failures[0].message.contains("over itself"),
+            "{:?}",
+            outcome.failures
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        assert_eq!(
+            fs::read(destination.join("report.pdf")).unwrap(),
+            b"original"
+        );
     }
 
     /// Cancelling the operation through the cancel flag must also account for

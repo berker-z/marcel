@@ -194,14 +194,43 @@ impl ConflictPolicy {
     }
 }
 
+/// What already occupies a destination path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Occupant {
+    pub is_directory: bool,
+    /// Device and inode, so an occupant can be recognized as the very object
+    /// being transferred even under a different name.
+    pub object: (u64, u64),
+}
+
+impl Occupant {
+    /// Whether this is the same filesystem object as `metadata` describes.
+    ///
+    /// Nautilus answers the same question by comparing paths — `test_dir_is_parent`
+    /// walks parents with `g_file_equal`. That catches a file copied over its
+    /// own path, but not a hard link or an aliased path that names the same
+    /// inode. Marcel already tracks device and inode everywhere else, so it
+    /// compares the object rather than the name.
+    pub fn is_same_object_as(&self, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+
+        self.object == (metadata.dev(), metadata.ino())
+    }
+}
+
 /// Describe an existing object for a conflict request, or `None` when the path
 /// is free.
 ///
 /// Symbolic links count as occupying their path and are never followed: the
 /// question is whether *this name* is taken, not what it points at.
-pub fn describe_occupant(path: &Path) -> std::io::Result<Option<bool>> {
+pub fn describe_occupant(path: &Path) -> std::io::Result<Option<Occupant>> {
+    use std::os::unix::fs::MetadataExt as _;
+
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata.file_type().is_dir())),
+        Ok(metadata) => Ok(Some(Occupant {
+            is_directory: metadata.file_type().is_dir(),
+            object: (metadata.dev(), metadata.ino()),
+        })),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
@@ -412,10 +441,38 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         std::os::unix::fs::symlink(&directory, &link).unwrap();
 
-        assert_eq!(describe_occupant(&directory).unwrap(), Some(true));
+        let directory_occupant = describe_occupant(&directory).unwrap().unwrap();
+        let link_occupant = describe_occupant(&link).unwrap().unwrap();
+
+        assert!(directory_occupant.is_directory);
         // The link points at a directory but is not one, so replacing it is
-        // not a merge.
-        assert_eq!(describe_occupant(&link).unwrap(), Some(false));
-        assert_eq!(describe_occupant(&root.path().join("free")).unwrap(), None);
+        // not a merge, and it is a different object from its target.
+        assert!(!link_occupant.is_directory);
+        assert_ne!(directory_occupant.object, link_occupant.object);
+        assert!(
+            describe_occupant(&root.path().join("free"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_hardlink_is_the_same_object_as_the_file_it_links() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original");
+        let link = root.path().join("hardlink");
+        let other = root.path().join("other");
+        std::fs::write(&original, b"payload").unwrap();
+        std::fs::hard_link(&original, &link).unwrap();
+        std::fs::write(&other, b"payload").unwrap();
+
+        let original_metadata = std::fs::symlink_metadata(&original).unwrap();
+        let link_occupant = describe_occupant(&link).unwrap().unwrap();
+        let other_occupant = describe_occupant(&other).unwrap().unwrap();
+
+        assert!(link_occupant.is_same_object_as(&original_metadata));
+        // Identical content is not the same object, so byte equality is not
+        // what this question is asking.
+        assert!(!other_occupant.is_same_object_as(&original_metadata));
     }
 }
