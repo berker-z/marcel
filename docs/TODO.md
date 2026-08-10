@@ -273,9 +273,14 @@ The packaging contract, current dependency caveats, target formats, and
 - [x] Rename files with a pointer-friendly inline interaction, `F2`, atomic
   no-overwrite publication, and identity-validating Undo/Redo.
 - Finish desktop clipboard interoperability and queued transfers; then add
-  duplicate and move-to. Cross-filesystem
-  cut/paste and interactive conflict decisions are explicitly parked until
-  their safety and UX work is scheduled.
+  duplicate and move-to. Cross-filesystem cut/paste remains explicitly parked
+  until its safety and UX work is scheduled.
+- [x] Ask about an occupied destination instead of failing, with skip, rename,
+  replace, and cancel, each able to answer the rest of the operation. Never
+  overwrite without an explicit decision, hold a replaced item aside so undo
+  can restore it, and refuse a transfer whose destination is its own source.
+  See [`Sprint 18`](sprints/018-destination-conflict-decisions.md); directory
+  merge and drag-and-drop conflicts remain open there.
 - [x] Accept native local-file drops from desktop applications into Places,
   bookmarks, folders, and the current browser directory, using safe copy
   semantics.

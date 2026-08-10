@@ -12,6 +12,11 @@ It closes confirmed correctness and hostile-input problems, pays down manual
 validation debt, and mechanically extracts cohesive ownership from the
 application coordinator.
 
+[Sprint 18: destination conflict decisions](sprints/018-destination-conflict-decisions.md)
+runs alongside it. An occupied destination is now a question rather than a
+failure, and it precedes Sprint 17's application-global operation owner because
+interactive operations must be able to reach a user interface.
+
 [Sprint 16: public release presentation and metadata](sprints/016-public-release-presentation.md)
 remains planned but deprioritized until the hardening sprint is complete.
 

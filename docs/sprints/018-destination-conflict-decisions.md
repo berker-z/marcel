@@ -1,7 +1,8 @@
 # Sprint 18: Destination conflict decisions
 
-**Status:** Planned — contract and acceptance criteria exist; implementation has
-not started.
+**Status:** Implemented core — the first slice is present and partly accepted in
+a graphical session. Directory merge and drag-and-drop conflicts are named
+follow-ups, and several acceptance checks below are still unrun.
 
 ## Goal
 
@@ -164,35 +165,82 @@ silently.
 
 ## Acceptance checks
 
-- [ ] Attempting to paste onto an occupied destination presents a conflict
+- [x] Attempting to paste onto an occupied destination presents a conflict
   decision rather than failing, and refusing leaves both items untouched.
-- [ ] Replace, skip, rename, and cancel each produce the exact disk and
-  projection state they name, verified per response.
+- [x] Replace, skip, rename, and cancel each produce the exact disk and
+  projection state they name, verified per response. Replace, rename, and the
+  merge refusal were confirmed in a graphical session; skip and cancel have
+  automated coverage only.
+- [x] An alternative name increments rather than nesting, starts at `(2)`,
+  preserves compound extensions and dotfile names, and puts the suffix at the
+  end of a directory name.
 - [ ] Apply-to-all applies only within its operation, and replace-all does not
-  imply merge-all or skip-all.
-- [ ] A rename response that collides again re-enters the conflict decision
+  imply merge-all or skip-all. Covered by unit tests; unverified in a window.
+- [x] A rename response that collides again re-enters the conflict decision
   instead of failing or overwriting.
 - [ ] Cancelling from a conflict stops the operation and is reported as
   cancellation, not as failure.
-- [ ] Completed, skipped, replaced, failed, and cancelled outcomes account for
+- [x] Completed, skipped, replaced, failed, and cancelled outcomes account for
   every requested source exactly once.
-- [ ] Undo restores an item that a replace overwrote, or the operation reported
+- [x] Undo restores an item that a replace overwrote, or the operation reported
   itself as not undoable at the time it completed.
-- [ ] Undo and Redo never present a conflict decision, and still refuse on a
-  changed or replaced identity.
-- [ ] A conflict raised with no reachable user interface refuses and completes
+- [x] Undo and Redo never present a conflict decision, and still refuse on a
+  changed or replaced identity. Undoing a replacement is deliberately not
+  redoable, because redoing would displace the restored item again.
+- [x] A transfer whose destination resolves to its own source is refused rather
+  than offered as a decision, including through a hard link.
+- [x] A conflict raised with no reachable user interface refuses and completes
   the operation instead of blocking a worker thread.
 - [ ] Closing the initiating window while a conflict decision is pending leaves
-  no parked worker and no partially applied operation.
-- [ ] Conflict handling introduces no occupancy test that a concurrent writer can
+  no parked worker and no partially applied operation. The worker path is
+  covered by tests; the window path is unverified.
+- [x] Conflict handling introduces no occupancy test that a concurrent writer can
   invalidate between the test and the write.
 - [ ] No operation overwrites without a recorded decision, verified across
-  paste, drop, archive publication, and Trash restore.
+  paste, drop, archive publication, and Trash restore. Only paste asks today;
+  the rest still refuse an occupied destination outright.
+- [x] A replaced item held for undo is released when its record is displaced,
+  when the window closes, and when a later run finds it abandoned by a process
+  that is gone.
+- [x] Marcel's own working files stay out of the browser, so a replacement does
+  not make a hidden sibling appear beside its target.
 - [ ] Deterministic failure-injection coverage for a failure arriving after a
   replacement has been quarantined but before the replacement is published.
-- [ ] Pass `cargo fmt --check`,
+- [x] Pass `cargo fmt --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test --all-targets` in the declared development environment.
+
+## 2026-08-10 first-slice acceptance run
+
+Run against disposable fixtures under `testo/`, covering a plain collision, a
+collision whose `(2)` was already taken, a compound `.tar.gz` extension, a
+dotfile, a directory onto a directory, and a name with no collision at all.
+
+Verified: an occupied destination asks instead of failing; renaming produces
+`(2)`, then `(3)`, then `(4)` as earlier names fill up, never nesting;
+`archive.tar.gz` keeps its compound extension; `.bashrc` keeps its leading dot;
+a directory takes the suffix at the end of its whole name; replacing works and
+Undo brings back what it displaced; merging two directories is refused with a
+clear message; and pasting a file into the folder it came from is refused
+outright.
+
+Three defects surfaced that every automated check had passed:
+
+- The apply-to-all control drew whatever value it was handed and was never
+  handed one, so it always rendered unchecked while quietly changing the answer
+  that would be sent. It is now a checkbox reading live state, which is also
+  what it should have been: a modifier on the button about to be pressed.
+- The dialog builder read the window entity, which panicked because it runs
+  inside the update that opened the dialog. Entity access belongs in a dialog's
+  callbacks, never its builder — every other dialog already followed that rule.
+- Answering a conflict sent the decision but left the dialog on screen, because
+  the close wrapper handles a click on the element it wraps and a button with
+  its own handler consumes it. Transfers ran to completion behind a stack of
+  undismissed dialogs.
+
+All three were interaction defects invisible to `cargo test`, which is the
+argument for keeping a graphical run in this sprint's acceptance rather than
+treating the automated gate as sufficient.
 
 ## Out of scope
 

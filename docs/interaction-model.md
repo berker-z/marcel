@@ -101,8 +101,18 @@ An active copy or move owns a persistent card in the bottom-right status
 stack. It shows preparation, current item, item/byte progress where available,
 and an explicit Cancel action. Toast notifications occupy the same vertical
 stack, so completion and error messages cannot visually overlap progress.
-Cross-filesystem moves and interactive destination-conflict decisions are
-deliberately parked; no-overwrite failure remains the safe behavior.
+Cross-filesystem moves remain deliberately parked.
+
+An occupied destination is a question rather than a failure. Marcel offers
+skip, rename, replace, and cancel, each able to answer the rest of the
+operation, and it never overwrites without an explicit decision. Replacing and
+merging are answered separately, so agreeing to replace a set of files does not
+agree to merge a directory tree. A replaced item is held aside so undo can
+restore it, or the operation reports itself as not undoable. Merging two
+directories is still refused, and a transfer whose destination resolves to its
+own source is refused outright rather than offered as a choice. Where no
+interface can answer — a closed window, a request from outside the
+application — the original no-overwrite failure remains the behavior.
 
 Successful local-copy fidelity is defined in
 [`copy-semantics.md`](copy-semantics.md). Supported metadata loss fails before
