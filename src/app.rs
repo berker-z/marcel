@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ffi::OsString,
     ops::Range,
@@ -2414,16 +2414,20 @@ impl Marcel {
         // The dialog callbacks are shared closures, so the one-shot answer has
         // to be taken out of somewhere they can all reach.
         let pending = Rc::new(RefCell::new(Some(pending)));
-        self.ui.conflict_apply_to_all = false;
+        // Scoped to this one question: the sticky answer it produces lives in
+        // the operation's policy, not here.
+        let apply_to_all = Rc::new(Cell::new(false));
         let is_merge = request.is_merge();
 
         let input_for_dialog = input.clone();
         let view = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, _, _| {
             let input = input_for_dialog.clone();
-            // The checkbox draws whatever it is told, so read the live value
-            // rather than assuming it is still unchecked.
-            let applies_to_all = view.read(cx).ui.conflict_apply_to_all;
+            // Read the live value, because the checkbox draws whatever it is
+            // told. It cannot come from the entity: this closure runs while
+            // Marcel is already borrowed by the update that opened the dialog,
+            // so reading it here panics.
+            let applies_to_all = apply_to_all.get();
             let answer = {
                 let pending = pending.clone();
                 move |response: ConflictResponse| {
@@ -2435,7 +2439,8 @@ impl Marcel {
                     }
                 }
             };
-            let toggle = view.clone();
+            let toggle = apply_to_all.clone();
+            let redraw = view.clone();
             let (skip, replace, rename, cancel) = (
                 answer.clone(),
                 answer.clone(),
@@ -2474,11 +2479,12 @@ impl Marcel {
                                     "Do this for every file"
                                 })
                                 .on_click(move |checked, _, cx| {
-                                    let checked = *checked;
-                                    toggle.update(cx, |this, cx| {
-                                        this.ui.conflict_apply_to_all = checked;
-                                        cx.notify();
-                                    });
+                                    toggle.set(*checked);
+                                    // A click is dispatched outside any entity
+                                    // update, so asking for a redraw here is
+                                    // safe and is what makes the new value
+                                    // visible.
+                                    redraw.update(cx, |_, cx| cx.notify());
                                 }),
                         ),
                 )

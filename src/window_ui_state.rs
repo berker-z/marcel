@@ -37,13 +37,6 @@ pub struct WindowUiState {
     pub rename_input: Option<Entity<InputState>>,
     pub rename_subscription: Option<Subscription>,
     pub entry_menu: Option<EntryMenu>,
-    /// Whether the open conflict dialog will answer for the rest of the
-    /// operation.
-    ///
-    /// Lives here rather than inside the dialog because the checkbox is a
-    /// controlled component: it draws whatever it is told, so the value has to
-    /// sit somewhere a click can change and then notify.
-    pub conflict_apply_to_all: bool,
     pub directory_scroll: UniformListScrollHandle,
     pub view_mode: ViewMode,
     pub grid_layout_columns: usize,
@@ -74,7 +67,6 @@ impl WindowUiState {
             rename_input: None,
             rename_subscription: None,
             entry_menu: None,
-            conflict_apply_to_all: false,
             directory_scroll: UniformListScrollHandle::new(),
             view_mode: match browser_state.view {
                 BrowserView::List => ViewMode::List,
