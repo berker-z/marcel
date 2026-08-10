@@ -14,7 +14,9 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::{
     archive_ops::{MAX_ARCHIVE_ENTRIES, create_zip_archive, extract_archive},
-    conflict::{ConflictPolicy, ConflictRequest, ConflictResponse, describe_occupant},
+    conflict::{
+        ConflictPolicy, ConflictRequest, ConflictResponse, describe_occupant, unique_name_in,
+    },
     local_fs::rename_no_replace,
     trash_ops::{TrashRecord, restore_trash_records, retrash_records},
 };
@@ -1344,6 +1346,21 @@ fn plan_source(
                     return SourcePlan::Failed(error.to_string());
                 }
                 target = destination_dir.join(name);
+            }
+            // Marcel picks the name, so it searches for a free one directly
+            // rather than proposing candidates back through the resolver.
+            ConflictResponse::AutoRename => {
+                let Some(name) = target
+                    .file_name()
+                    .and_then(|name| unique_name_in(destination_dir, name, source_is_directory))
+                else {
+                    return SourcePlan::Failed(format!(
+                        "Could not find a free name for “{}” in “{}”",
+                        source.display(),
+                        destination_dir.display()
+                    ));
+                };
+                return SourcePlan::Transfer(destination_dir.join(name));
             }
             // Replacement has to be able to put back what it displaced before
             // Marcel will perform one, so the decision exists but the engine
@@ -3126,6 +3143,50 @@ mod tests {
         );
         assert!(!destination.parent().unwrap().join("escaped.txt").exists());
         assert_eq!(outcome.accounted(), sources.len());
+    }
+
+    /// Renaming everything keeps every source, each beside the item it
+    /// collided with, without a single item being lost or overwritten.
+    #[test]
+    fn renaming_all_keeps_every_colliding_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&destination).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(source_dir.join(name), b"new").unwrap();
+            fs::write(destination.join(name), b"existing").unwrap();
+        }
+        // Already occupied, so "a.txt" has to land past it.
+        fs::write(destination.join("a (2).txt"), b"existing too").unwrap();
+        let sources = vec![source_dir.join("a.txt"), source_dir.join("b.txt")];
+        let mut policy = answering(crate::conflict::ConflictDecision::for_all(
+            ConflictResponse::AutoRename,
+        ));
+
+        let outcome = transfer_paths_with_conflicts(
+            &sources,
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(outcome.completed.len(), 2);
+        assert_eq!(outcome.accounted(), sources.len());
+        // Nothing that was already there changed.
+        assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"existing");
+        assert_eq!(fs::read(destination.join("b.txt")).unwrap(), b"existing");
+        assert_eq!(
+            fs::read(destination.join("a (2).txt")).unwrap(),
+            b"existing too"
+        );
+        // Both sources arrived beside them.
+        assert_eq!(fs::read(destination.join("a (3).txt")).unwrap(), b"new");
+        assert_eq!(fs::read(destination.join("b (2).txt")).unwrap(), b"new");
     }
 
     /// Pasting into the folder a file was copied from makes the destination the
