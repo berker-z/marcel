@@ -43,8 +43,9 @@ remains planned but deprioritized until the hardening sprint is complete.
   bundled assets, adaptations, and license notices.
 - [`sprints/`](sprints/): numbered implementation plans and acceptance history.
 
-`HANDOFF.md` is a historical agent handoff, not a current roadmap or required
-per-turn checklist.
+[`HANDOFF.md`](HANDOFF.md) is a short pointer to the current state and the next
+queue. `TODO.md` and the sprint documents remain the source of truth; the
+handoff only says where to start.
 
 ## Sprint status convention
 
