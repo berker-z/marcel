@@ -1,8 +1,8 @@
 # Sprint 18: Destination conflict decisions
 
-**Status:** Implemented core — the first slice is present and partly accepted in
-a graphical session. Directory merge and drag-and-drop conflicts are named
-follow-ups, and several acceptance checks below are still unrun.
+**Status:** Implemented — the sprint's scope is present and accepted in a
+graphical session, apart from the named acceptance checks below that remain
+unrun. Merging a folder while *moving* it is the one deliberate gap.
 
 ## Goal
 
@@ -14,14 +14,13 @@ it remains the default, but it is not a complete file manager: a user who wants
 to replace a file has no way to say so, and the refusal arrives as a failure
 rather than as a question. This sprint adds the question.
 
-Two documented contracts change here, so this is a product decision and not only
-an implementation one:
-
-- [`interaction-model.md`](../interaction-model.md) states that "interactive
-  destination-conflict decisions are deliberately parked; no-overwrite failure
-  remains the safe behavior."
-- [`TODO.md`](../TODO.md) parks conflict decisions "until their safety and UX
-  work is scheduled." This sprint is that scheduling.
+Two documented contracts changed here, so this was a product decision and not
+only an implementation one. [`interaction-model.md`](../interaction-model.md)
+stated that interactive conflict decisions were parked and no-overwrite failure
+was the safe behavior; that is now the fallback where nothing can answer, not
+the whole policy. [`TODO.md`](../TODO.md) parked conflict decisions until their
+safety and UX work was scheduled, and now parks only cross-filesystem transfers.
+Both were updated when this slice landed.
 
 Sequencing note: this sprint precedes the application-global operation owner
 tracked in [`Sprint 17`](017-stability-and-architecture-hardening.md).
@@ -133,35 +132,46 @@ must not become the one place where data leaves without a way back.
   can state what was replaced, skipped, and renamed rather than reporting a
   count alone.
 
-## First slice
+## Delivered scope
 
-- Paste of a copy or a move into an occupied destination.
-- The four responses, apply-to-all for each, and the three independent sticky
-  flags.
-- Quarantine-backed replacement for the single-file case, with undo restoring
-  the replaced original.
-- Directory merge is specified here but implemented in a later slice; until
-  then a directory landing on a directory offers skip, rename, and cancel.
+- Paste and drag-and-drop into an occupied destination.
+- The four responses, apply-to-all for each, and independent sticky flags for
+  skipping, replacing, merging, and automatic renaming.
+- Quarantine-backed replacement, with undo restoring the replaced original and
+  the quarantine released once nothing can reach it.
+- Directory merge as the union of two trees, undoable by removing exactly what
+  it added.
 
-## Open decisions
+## Decisions taken
 
-These need answers before or during implementation; none should be settled
-silently.
+- **Drag-and-drop asks, exactly as paste does.** Both gestures funnel through
+  one transfer entry point, so the dialog is shared rather than duplicated.
+- **A transfer onto the folder an item already occupies is answered, not
+  asked.** Moving something to where it already is changes nothing, so it does
+  nothing and is reported as neither work nor refusal. Copying something into
+  its own folder means duplicating it, so it takes the next free name without a
+  prompt. The rule is keyed on the transfer mode rather than the gesture,
+  because cut-and-paste inside one folder means what dragging inside it means.
+- **Merge is the union of two trees, not a recursive replacement.** The
+  destination keeps everything it has and gains what it lacks. This avoids the
+  prompt storm of asking per colliding descendant, and it is what keeps merge
+  inside the existing guardrails: nothing is displaced, so nothing needs holding
+  aside, and undo is exactly "remove what was added".
+- **A quarantined replacement is restored if its transfer then fails**, rather
+  than being left for the startup recovery path.
+- **Replace is offered when a file lands on a directory.** It is destructive,
+  but it is quarantine-backed like any other replacement, so undo restores the
+  directory whole.
 
-- **Does drag-and-drop prompt, or only paste?** Nautilus treats a drop and a
-  paste identically. Consistency argues for the same, and a drop onto a folder
-  with a colliding name is a common accident. The cost is that the first slice
-  widens to the drag surface and its cancellation behavior.
-- **Does merge recurse into conflict decisions for children?** Nautilus's
-  merge-all exists precisely because it does. A merge that asks once per
-  colliding descendant is correct but can generate many prompts.
-- **What happens to a quarantined replaced item if the operation later fails?**
-  It follows the interrupted-quarantine recovery path that permanent deletion
-  already uses, which is currently reported at startup rather than resolved
-  automatically.
-- **Is replace offered when the destination is a directory and the source is
-  not, or the reverse?** Replacing a populated directory with a file is a large
-  destructive action wearing a small button.
+## Still open
+
+- **Merging a folder while moving it.** Expressing it as renames would leave the
+  source partly emptied; expressing it as copy-then-delete would abandon the
+  rename-only model that keeps moves atomic and same-device. Merge is therefore
+  reachable through paste but not through a drag, which is an inconsistency
+  worth closing.
+- **Conflict decisions for surfaces other than transfers.** Archive publication
+  and Trash restore still refuse an occupied destination outright.
 
 ## Acceptance checks
 
@@ -196,9 +206,19 @@ silently.
   covered by tests; the window path is unverified.
 - [x] Conflict handling introduces no occupancy test that a concurrent writer can
   invalidate between the test and the write.
+- [x] Merging folds one directory into another, keeping everything the
+  destination already held at every depth and adding only what it lacked, with
+  an existing subdirectory joined rather than replaced.
+- [x] Undo of a merge removes exactly what the merge added, leaves what was
+  already there, and refuses to remove a directory that has since gained an
+  entry rather than deleting it.
+- [x] A second merge of the same source adds nothing and records nothing to
+  undo.
+- [x] A transfer onto the folder its source already occupies does nothing for a
+  move and duplicates for a copy, without prompting for either.
 - [ ] No operation overwrites without a recorded decision, verified across
-  paste, drop, archive publication, and Trash restore. Only paste asks today;
-  the rest still refuse an occupied destination outright.
+  paste, drop, archive publication, and Trash restore. Transfers ask; archive
+  publication and Trash restore still refuse an occupied destination outright.
 - [x] A replaced item held for undo is released when its record is displaced,
   when the window closes, and when a later run finds it abandoned by a process
   that is gone.
@@ -241,6 +261,22 @@ Three defects surfaced that every automated check had passed:
 All three were interaction defects invisible to `cargo test`, which is the
 argument for keeping a graphical run in this sprint's acceptance rather than
 treating the automated gate as sufficient.
+
+A second run covered merging, against a source and destination sharing a
+directory name, a colliding file inside it, a colliding subdirectory, and a
+subdirectory present only in the source. The destination kept every file it
+held at every depth, gained only what it lacked, and Undo removed exactly what
+had arrived. Adding a file to a merged folder and then undoing refused to
+remove that folder rather than deleting the file, and merging a second time
+added nothing and recorded nothing.
+
+One defect class recurred three times across this sprint and is worth stating
+plainly: **a rename or a removal moves an inode's ctime, so an identity
+recorded before that moment cannot be compared after it.** It appeared when
+quarantining a replaced file, when snapshotting a directory a merge was about
+to fill, and when undo removed the children of a directory it had recorded.
+Each time the symptom was an operation refusing its own work as though an
+outsider had interfered.
 
 ## Out of scope
 
