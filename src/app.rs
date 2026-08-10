@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::OsString,
     ops::Range,
@@ -22,6 +22,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Root, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
+    checkbox::Checkbox,
     dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter},
     h_flex,
     input::{
@@ -2413,25 +2414,28 @@ impl Marcel {
         // The dialog callbacks are shared closures, so the one-shot answer has
         // to be taken out of somewhere they can all reach.
         let pending = Rc::new(RefCell::new(Some(pending)));
-        let apply_to_all = Rc::new(Cell::new(false));
+        self.ui.conflict_apply_to_all = false;
         let is_merge = request.is_merge();
 
         let input_for_dialog = input.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        let view = cx.entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
             let input = input_for_dialog.clone();
+            // The checkbox draws whatever it is told, so read the live value
+            // rather than assuming it is still unchecked.
+            let applies_to_all = view.read(cx).ui.conflict_apply_to_all;
             let answer = {
                 let pending = pending.clone();
-                let apply_to_all = apply_to_all.clone();
                 move |response: ConflictResponse| {
                     if let Some(pending) = pending.borrow_mut().take() {
                         pending.answer(ConflictDecision {
                             response,
-                            apply_to_all: apply_to_all.get(),
+                            apply_to_all: applies_to_all,
                         });
                     }
                 }
             };
-            let toggle = apply_to_all.clone();
+            let toggle = view.clone();
             let (skip, replace, rename, cancel) = (
                 answer.clone(),
                 answer.clone(),
@@ -2440,7 +2444,11 @@ impl Marcel {
             );
 
             dialog
-                .title(if request.destination_is_directory { "Folder Already Exists" } else { "File Already Exists" })
+                .title(if request.destination_is_directory {
+                    "Folder Already Exists"
+                } else {
+                    "File Already Exists"
+                })
                 .child(
                     div()
                         .flex()
@@ -2449,44 +2457,61 @@ impl Marcel {
                         .child(format!(
                             "A {kind} named “{name}” already exists in “{folder}”."
                         ))
-                        .child(Input::new(&input))
                         .child(
-                            Switch::new("conflict-apply-to-all")
-                                .small()
-                                .label("Apply to the rest of this operation")
-                                .tooltip(if is_merge {
-                                    "Merging applies only to folders; replacing files is asked separately"
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_sm().child("Rename it to"))
+                                .child(Input::new(&input)),
+                        )
+                        .child(
+                            Checkbox::new("conflict-apply-to-all")
+                                .checked(applies_to_all)
+                                .label(if is_merge {
+                                    "Do this for every folder"
                                 } else {
-                                    "Replacing applies only to files; merging folders is asked separately"
+                                    "Do this for every file"
                                 })
-                                .on_click(move |checked, _, _| toggle.set(*checked)),
+                                .on_click(move |checked, _, cx| {
+                                    let checked = *checked;
+                                    toggle.update(cx, |this, cx| {
+                                        this.ui.conflict_apply_to_all = checked;
+                                        cx.notify();
+                                    });
+                                }),
                         ),
                 )
                 .footer(
                     DialogFooter::new()
-                        .child(DialogClose::new().child(
-                            Button::new("conflict-cancel").label("Cancel").outline().on_click(
-                                move |_, _, _| cancel(ConflictResponse::Cancel),
+                        .child(
+                            DialogClose::new().child(
+                                Button::new("conflict-cancel")
+                                    .label("Cancel")
+                                    .outline()
+                                    .on_click(move |_, _, _| cancel(ConflictResponse::Cancel)),
                             ),
-                        ))
-                        .child(DialogClose::new().child(
-                            Button::new("conflict-skip").label("Skip").outline().on_click(
-                                move |_, _, _| skip(ConflictResponse::Skip),
+                        )
+                        .child(
+                            DialogClose::new().child(
+                                Button::new("conflict-skip")
+                                    .label("Skip")
+                                    .outline()
+                                    .on_click(move |_, _, _| skip(ConflictResponse::Skip)),
                             ),
-                        ))
+                        )
                         .child(
                             DialogClose::new().child(
                                 Button::new("conflict-rename")
-                                    .label("Keep Both")
+                                    .label("Rename")
                                     .outline()
                                     .on_click({
                                         let input = input.clone();
-                                        let apply_to_all = apply_to_all.clone();
                                         move |_, _, cx| {
                                             // A typed name cannot answer later
                                             // conflicts, so applying to all
                                             // means Marcel picks the names.
-                                            rename(if apply_to_all.get() {
+                                            rename(if applies_to_all {
                                                 ConflictResponse::AutoRename
                                             } else {
                                                 ConflictResponse::Rename(OsString::from(
@@ -2509,6 +2534,9 @@ impl Marcel {
                 .overlay_closable(false)
                 .close_button(false)
         });
+        // The suggested name is selected, so typing over it replaces it and
+        // Rename works without reaching for the pointer.
+        input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
