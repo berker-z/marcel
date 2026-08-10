@@ -50,8 +50,11 @@ Sprint status uses four consistent meanings:
   - Create the freedesktop thumbnail cache directory as `0700`.
   - Reuse one `IconProvider` per watcher instead of rebuilding it per batch.
   - Pass `--` to `pdftoppm`, `pdfinfo`, and `gio open`, matching `archive_ops`.
-  - Optional cleanup: one process-level coalescing writer for browser state and
-    bookmarks, replacing the per-window writers.
+  - Optional cleanup: one process-level coalescing writer for browser state,
+    replacing the per-window writers. Bookmarks no longer need this — Sprint 19
+    gave them an application-global store, because last-writer-wins there was
+    silent user-data loss rather than a benign race. Browser view state can keep
+    last-writer-wins.
 - Continue mechanical ownership cleanup only where a concrete interaction or
   test seam requires it. Preview, sidebar, drag/drop, and cohesive window UI
   state now have controllers; GPUI-bound orchestration intentionally remains

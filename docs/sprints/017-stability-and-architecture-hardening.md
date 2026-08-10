@@ -150,9 +150,12 @@ and does not add features, distribution formats, or release automation.
   permanently delete inside a Trash root.
 - [ ] Surface malformed or unreadable Trash entries instead of dropping them
   from the listing, and stop Empty Trash implying it emptied them.
-- [ ] Move active filesystem operations, the operation journal, and the busy
+- [x] Move active filesystem operations, the operation journal, and the busy
   lock to an application-global owner so closing a window cannot orphan work or
-  discard history.
+  discard history. Delivered in
+  [Sprint 19](019-application-global-operations.md), which also moved the
+  clipboard and the bookmark store and left its multi-window acceptance run
+  outstanding.
 - [x] Pass `cargo fmt --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test --all-targets` in the declared development environment.

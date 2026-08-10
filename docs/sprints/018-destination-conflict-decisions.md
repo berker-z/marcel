@@ -204,6 +204,9 @@ must not become the one place where data leaves without a way back.
 - [ ] Closing the initiating window while a conflict decision is pending leaves
   no parked worker and no partially applied operation. The worker path is
   covered by tests; the window path is unverified.
+  [Sprint 19](019-application-global-operations.md) restated the rule: a
+  question already on screen dies with its window and cancels, while the *next*
+  question moves to another live window, or refuses when there is none.
 - [x] Conflict handling introduces no occupancy test that a concurrent writer can
   invalidate between the test and the write.
 - [x] Merging folds one directory into another, keeping everything the
@@ -220,8 +223,12 @@ must not become the one place where data leaves without a way back.
   paste, drop, archive publication, and Trash restore. Transfers ask; archive
   publication and Trash restore still refuse an occupied destination outright.
 - [x] A replaced item held for undo is released when its record is displaced,
-  when the window closes, and when a later run finds it abandoned by a process
-  that is gone.
+  when the application exits, and when a later run finds it abandoned by a
+  process that is gone. Releasing on *window* close was correct only while the
+  journal died with the window;
+  [Sprint 19](019-application-global-operations.md) made the record outlive the
+  window, so erasing the quarantine there would have destroyed data a live
+  record still pointed at.
 - [x] Marcel's own working files stay out of the browser, so a replacement does
   not make a hidden sibling appear beside its target.
 - [ ] Deterministic failure-injection coverage for a failure arriving after a
