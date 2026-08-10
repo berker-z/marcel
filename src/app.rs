@@ -1,28 +1,24 @@
 use std::{
     any::Any,
-    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
-    ffi::OsString,
     ops::Range,
     path::{Path, PathBuf},
-    rc::Rc,
     sync::Arc,
     sync::atomic::AtomicBool,
     time::Duration,
 };
 
 use gpui::{
-    AnyElement, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity,
-    ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Styled, TextRun,
-    UniformListScrollHandle, Window, canvas, div, font, img, prelude::*, px, relative,
-    uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DragMoveEvent,
+    Entity, ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Hsla,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Styled,
+    Subscription, TextRun, UniformListScrollHandle, Window, canvas, div, font, img, prelude::*, px,
+    relative, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Root, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
-    checkbox::Checkbox,
     dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter},
     h_flex,
     input::{
@@ -41,10 +37,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     archive_ops::{default_zip_name, is_supported_archive},
-    bookmarks::{
-        Bookmark, add as add_bookmark, load as load_bookmarks, remove as remove_bookmark_at,
-        reorder as reorder_bookmark, save as save_bookmarks,
-    },
+    bookmarks::{Bookmark, BookmarkStore},
     commands::{
         ActivateSelection, BROWSER_KEY_CONTEXT, BrowserCommand, ClearSelection, CompressSelection,
         CopySelection, CutSelection, DeletePermanently, EmptyTrash, ExtendDown, ExtendLeft,
@@ -54,21 +47,13 @@ use crate::{
         RestoreSelection, SelectAll, SelectFirst, SelectLast, SelectPageDown, SelectPageUp,
         TrashSelection, UndoFileOperation,
     },
-    conflict::{
-        ConflictDecision, ConflictPolicy, ConflictResponse, PendingConflict, PromptingResolver,
-        unique_name_in,
-    },
-    delete_ops::{delete_paths, summarize_failures as summarize_delete_failures},
     directory_session::{
         ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
     },
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
     file_ops::{
-        CommittedOperation, DirectoryChanges, MutationOutcome, OperationRecord, TransferMode,
-        create_directory, create_zip_operation, extract_archive_operation,
-        reclaim_abandoned_quarantines, redo_operation, rename_entry, summarize_failures,
-        transfer_changes, transfer_paths_with_conflicts, undo_operation, validate_entry_name,
+        DirectoryChanges, TransferMode, reclaim_abandoned_quarantines, validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -76,7 +61,7 @@ use crate::{
     },
     history::NavigationHistory,
     launch::{LocationTarget, resolve_location},
-    operations::{FileClipboard, OperationController, OperationProgressKind},
+    operations::{FileClipboard, OperationCoordinator, OperationEvent, OperationProgressKind},
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
     preview_controller::{
@@ -86,10 +71,7 @@ use crate::{
     state::{self, BrowserState, BrowserView},
     theme::{self, Palette},
     thumbnails,
-    trash_ops::{
-        TrashRecord, list_trash_records, purge_trash_records, restore_trash_records,
-        summarize_failures as summarize_trash_failures, trash_paths,
-    },
+    trash_ops::{TrashRecord, list_trash_records},
     window_ui_state::{ContextMenuTarget, EntryMenu, ViewMode, WindowUiState},
 };
 
@@ -170,14 +152,6 @@ struct DragPreview {
     detail: &'static str,
 }
 
-enum PermanentDeleteResult {
-    Files(crate::delete_ops::DeleteOutcome),
-    Trash {
-        outcome: crate::trash_ops::TrashOutcome,
-        requested: Vec<TrashRecord>,
-    },
-}
-
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
@@ -221,7 +195,16 @@ pub struct Marcel {
     palette: Palette,
     home_dir: PathBuf,
     directory: DirectorySession,
-    operations: OperationController,
+    /// The application's operation owner, not this window's.
+    ///
+    /// A window starts operations, shows their questions and reports, and folds
+    /// their effects into its own projection. Closing it neither orphans work
+    /// nor discards history.
+    operations: Entity<OperationCoordinator>,
+    /// The user's bookmarks, shared so that two windows cannot write stale
+    /// lists over each other.
+    bookmarks: Entity<BookmarkStore>,
+    _shared: [Subscription; 3],
     drag: DragController,
     preview: PreviewController,
     ui: WindowUiState,
@@ -273,12 +256,31 @@ impl Marcel {
         let mut directory = DirectorySession::new(start_dir.clone());
         directory.show_hidden = browser_state.show_hidden;
 
+        // Effects arrive from the application, so a mutation another window
+        // started still reconciles here, and progress it is running still
+        // redraws here.
+        let operations = crate::operations::global(cx);
+        let bookmarks = crate::bookmarks::global(&home_dir, cx);
+        let shared_subscriptions = [
+            cx.observe(&operations, |_, _, cx| cx.notify()),
+            cx.observe(&bookmarks, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &operations,
+                window,
+                |this, _, event: &OperationEvent, window, cx| {
+                    this.on_operation_event(event, window, cx);
+                },
+            ),
+        ];
+
         let mut this = Self {
             browser_focus: cx.focus_handle(),
             palette: theme::active(),
             home_dir: home_dir.clone(),
             directory,
-            operations: OperationController::default(),
+            operations,
+            bookmarks,
+            _shared: shared_subscriptions,
             drag: DragController::default(),
             preview: PreviewController::new(mono_font_size, THUMBNAIL_WORKERS, PDF_PAGE_WORKERS),
             ui: WindowUiState::new(
@@ -295,7 +297,6 @@ impl Marcel {
             drag_payload: None,
         };
         this.start_places_load(home_dir, cx);
-        this.start_bookmarks_load(cx);
         this.start_directory_load(true, cx);
         this
     }
@@ -330,93 +331,36 @@ impl Marcel {
         }));
     }
 
-    fn start_bookmarks_load(&mut self, cx: &mut Context<Self>) {
-        let path = self.sidebar.bookmarks_path.clone();
-        let load_task = cx.background_executor().spawn(smol::unblock(move || {
-            let bookmarks = load_bookmarks(&path)?;
-            let mut icon_provider = crate::icons::IconProvider::discover();
-            let icons = bookmarks
-                .iter()
-                .filter_map(|bookmark| {
-                    icon_provider
-                        .icon_for(&bookmark.path, true)
-                        .map(|icon| (bookmark.path.clone(), icon))
-                })
-                .collect();
-            anyhow::Ok((bookmarks, icons))
-        }));
-
-        self.sidebar.bookmarks_load_task = Some(cx.spawn(async move |this, cx| {
-            let result = load_task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.sidebar.bookmarks_loading = false;
-                match result {
-                    Ok((bookmarks, icons)) => {
-                        this.sidebar.bookmarks = bookmarks;
-                        this.sidebar.bookmark_icons = icons;
-                    }
-                    Err(error) => {
-                        eprintln!("Could not load Marcel bookmarks: {error:#}");
-                    }
-                }
-                cx.notify();
-            });
-        }));
-    }
-
-    fn start_bookmarks_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar.bookmarks_save_task.is_some() {
-            return;
-        }
-        let path = self.sidebar.bookmarks_path.clone();
-        let snapshot = self.sidebar.bookmarks.clone();
-        let saved_snapshot = snapshot.clone();
-        let save_task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || save_bookmarks(&path, &snapshot)));
-
-        self.sidebar.bookmarks_save_task = Some(cx.spawn_in(window, async move |this, window| {
-            let result = save_task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                this.sidebar.bookmarks_save_task = None;
-                if let Err(error) = result {
-                    window.push_notification(
-                        Notification::error(format!("Could not save bookmarks: {error}")),
-                        cx,
-                    );
-                } else if this.sidebar.bookmarks != saved_snapshot {
-                    this.start_bookmarks_save(window, cx);
-                }
-                cx.notify();
-            });
-        }));
-    }
-
     fn add_dragged_bookmarks(
         &mut self,
         paths: &[PathBuf],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sidebar.bookmark_insertion = None;
         if paths.is_empty() {
-            self.sidebar.bookmark_insertion = None;
             return;
         }
 
-        let mut added = 0;
-        for path in paths {
-            if add_bookmark(&mut self.sidebar.bookmarks, path.clone()) {
-                if let Some(icon) = self
-                    .directory
-                    .entry(path)
-                    .and_then(|entry| entry.icon_path.clone())
-                {
-                    self.sidebar.bookmark_icons.insert(path.clone(), icon);
-                }
-                added += 1;
-            }
-        }
-        self.sidebar.bookmark_insertion = None;
+        // The icon comes from this window's projection, because that is where
+        // the drag started; the bookmark itself belongs to the application.
+        let candidates = paths
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    self.directory
+                        .entry(path)
+                        .and_then(|entry| entry.icon_path.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let origin = window.window_handle();
+        let added = self
+            .bookmarks
+            .clone()
+            .update(cx, |bookmarks, cx| bookmarks.add(&candidates, origin, cx));
+
         if added == 0 {
             window.push_notification(
                 Notification::info("Those folders are already bookmarked"),
@@ -424,7 +368,6 @@ impl Marcel {
             );
             return;
         }
-        self.start_bookmarks_save(window, cx);
         window.push_notification(
             Notification::success(format!("Added {added} bookmark(s)")),
             cx,
@@ -440,19 +383,23 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         self.sidebar.bookmark_insertion = None;
-        if reorder_bookmark(&mut self.sidebar.bookmarks, from, insertion) {
-            self.start_bookmarks_save(window, cx);
-            cx.notify();
-        }
+        let origin = window.window_handle();
+        self.bookmarks.clone().update(cx, |bookmarks, cx| {
+            bookmarks.move_to(from, insertion, origin, cx);
+        });
+        cx.notify();
     }
 
     fn remove_bookmark(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.bookmark_menu = None;
-        let Some(bookmark) = remove_bookmark_at(&mut self.sidebar.bookmarks, index) else {
+        let origin = window.window_handle();
+        let Some(bookmark) = self
+            .bookmarks
+            .clone()
+            .update(cx, |bookmarks, cx| bookmarks.remove_at(index, origin, cx))
+        else {
             return;
         };
-        self.sidebar.bookmark_icons.remove(&bookmark.path);
-        self.start_bookmarks_save(window, cx);
         window.push_notification(
             Notification::success(format!("Removed bookmark “{}”", bookmark.label())),
             cx,
@@ -466,7 +413,7 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.sidebar.bookmark_menu?;
-        self.sidebar.bookmarks.get(menu.index)?;
+        self.bookmarks.read(cx).bookmarks().get(menu.index)?;
         let colors = cx.theme().colors;
         // Popovers and `accent` share the raised surface in Marcel palettes.
         // The active-list tint stays visible over that surface on every theme.
@@ -519,14 +466,23 @@ impl Marcel {
     }
 
     fn render_operation_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let active = self.operations.progress()?;
-        let snapshot = active.progress.snapshot();
-        let cancelling = self.operations.is_cancelling();
+        let (kind, source_count, detail, cancellable, snapshot, cancelling) = {
+            let operations = self.operations.read(cx);
+            let active = operations.progress()?;
+            (
+                active.kind,
+                active.source_count,
+                active.detail.clone(),
+                active.cancellable,
+                active.progress.snapshot(),
+                operations.is_cancelling(),
+            )
+        };
         let colors = cx.theme().colors;
         let title = if cancelling {
             "Cancelling…"
         } else {
-            match active.kind {
+            match kind {
                 OperationProgressKind::Copy => "Copying",
                 OperationProgressKind::Move => "Moving",
                 OperationProgressKind::Compress => "Compressing",
@@ -545,7 +501,7 @@ impl Marcel {
         let progress_text = if snapshot.preparing {
             format!(
                 "Preparing {} item(s)",
-                snapshot.total_items.max(active.source_count as u64)
+                snapshot.total_items.max(source_count as u64)
             )
         } else if snapshot.total_bytes > 0 {
             format!(
@@ -566,7 +522,6 @@ impl Marcel {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         });
-        let detail = active.detail.clone();
         let view = cx.entity();
         let cancel_button = Button::new("cancel-active-transfer")
             .small()
@@ -611,7 +566,7 @@ impl Marcel {
                                         .child(detail),
                                 ),
                         )
-                        .when(active.cancellable, |this| this.child(cancel_button)),
+                        .when(cancellable, |this| this.child(cancel_button)),
                 )
                 .child(Progress::new("operation-progress").h_1().value(percentage))
                 .child(
@@ -718,7 +673,7 @@ impl Marcel {
                 .find_map(|(index, bounds)| {
                     (pointer.y < bounds.top() + bounds.size.height / 2.0).then_some(**index)
                 })
-                .unwrap_or(self.sidebar.bookmarks.len())
+                .unwrap_or(self.bookmarks.read(cx).bookmarks().len())
         };
         if self.sidebar.bookmark_insertion != Some(BookmarkInsertion { index }) {
             self.sidebar.bookmark_insertion = Some(BookmarkInsertion { index });
@@ -738,7 +693,7 @@ impl Marcel {
         if self.drag.file_scroll_task.is_none() {
             self.start_file_drag_autoscroll(cx);
         }
-        let operation_busy = self.operations.is_busy();
+        let operation_busy = self.operations.read(cx).is_busy();
         let can_move_to = |path: &Path| !operation_busy && can_move_files_to(&drag.paths, path);
 
         let over_browser_folder = self
@@ -755,6 +710,7 @@ impl Marcel {
             .borrow()
             .iter()
             .any(|(path, bounds)| bounds.contains(&pointer) && can_move_to(path));
+        let bookmarks = self.bookmarks.read(cx);
         let over_bookmark =
             self.sidebar
                 .bookmark_row_bounds
@@ -762,9 +718,8 @@ impl Marcel {
                 .iter()
                 .any(|(index, bounds)| {
                     bounds.contains(&pointer)
-                        && self
-                            .sidebar
-                            .bookmarks
+                        && bookmarks
+                            .bookmarks()
                             .get(*index)
                             .is_some_and(|bookmark| can_move_to(&bookmark.path))
                 });
@@ -1065,7 +1020,7 @@ impl Marcel {
         }
     }
 
-    fn command_enabled(&self, command: BrowserCommand) -> bool {
+    fn command_enabled(&self, command: BrowserCommand, cx: &App) -> bool {
         match command {
             BrowserCommand::GoToParent => {
                 !self.sidebar.browsing_trash && self.directory.current_dir.parent().is_some()
@@ -1093,21 +1048,22 @@ impl Marcel {
             }
             BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::PasteFiles => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && self.directory.error.is_none()
                     && self
                         .operations
+                        .read(cx)
                         .clipboard()
                         .is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
             BrowserCommand::NewFolder => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && self.directory.error.is_none()
             }
             BrowserCommand::OpenTerminal => {
@@ -1118,20 +1074,20 @@ impl Marcel {
             }
             BrowserCommand::RenameSelection => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && self.directory.error.is_none()
                     && self.directory.selection.selected().len() == 1
                     && self.directory.selection.primary().is_some()
             }
             BrowserCommand::CompressSelection => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && self.directory.error.is_none()
                     && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::ExtractSelection => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && self.directory.error.is_none()
                     && self.directory.selection.selected().len() == 1
                     && self
@@ -1145,12 +1101,12 @@ impl Marcel {
             }
             BrowserCommand::TrashSelection => {
                 !self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::RestoreSelection => {
                 self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && !self.directory.selection.selected().is_empty()
                     && self
                         .directory
@@ -1160,7 +1116,7 @@ impl Marcel {
                         .all(|path| self.sidebar.trash_records.contains_key(path))
             }
             BrowserCommand::DeletePermanently => {
-                !self.operations.is_busy()
+                !self.operations.read(cx).is_busy()
                     && !self.directory.selection.selected().is_empty()
                     && (!self.sidebar.browsing_trash
                         || self
@@ -1172,11 +1128,11 @@ impl Marcel {
             }
             BrowserCommand::EmptyTrash => {
                 self.sidebar.browsing_trash
-                    && !self.operations.is_busy()
+                    && !self.operations.read(cx).is_busy()
                     && !self.sidebar.trash_records.is_empty()
             }
-            BrowserCommand::UndoFileOperation => self.operations.can_undo(),
-            BrowserCommand::RedoFileOperation => self.operations.can_redo(),
+            BrowserCommand::UndoFileOperation => self.operations.read(cx).can_undo(),
+            BrowserCommand::RedoFileOperation => self.operations.read(cx).can_redo(),
             BrowserCommand::MoveUp
             | BrowserCommand::MoveDown
             | BrowserCommand::MoveLeft
@@ -1203,7 +1159,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.command_enabled(command) {
+        if !self.command_enabled(command, cx) {
             return;
         }
 
@@ -1464,60 +1420,10 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.operations.begin_simple() {
-            return;
-        }
-        let attempted_destination = source
-            .parent()
-            .map(|parent| parent.join(&name))
-            .unwrap_or_else(|| source.clone());
-        let task_source = source.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || rename_entry(&task_source, &name)));
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    Ok(committed) => {
-                        let destination = committed.path().to_path_buf();
-                        let display_name = destination
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let undoable =
-                            this.apply_committed_operation(committed, Some(destination), cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Renamed to “{display_name}”{}",
-                                undo_note(undoable)
-                            )),
-                            cx,
-                        );
-                    }
-                    Err(error) => {
-                        window.push_notification(Notification::error(error.to_string()), cx);
-                        // Most failures leave the source untouched. A failure
-                        // after the no-replace syscall (for example while
-                        // inspecting the result) may still have renamed it, so
-                        // revalidate both possible paths instead of assuming
-                        // either filesystem state.
-                        this.apply_directory_changes(
-                            DirectoryChanges {
-                                upserted: vec![source.clone(), attempted_destination.clone()],
-                                ..DirectoryChanges::default()
-                            },
-                            None,
-                            cx,
-                        );
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_rename(source, name, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn open_new_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1568,44 +1474,11 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.operations.begin_simple() {
-            return;
-        }
-
         let parent = self.directory.current_dir.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || create_directory(&parent, &name)));
-
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    Ok(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let undoable =
-                            this.apply_committed_operation(committed, Some(path.clone()), cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Created folder “{}”{}",
-                                path.file_name()
-                                    .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default(),
-                                undo_note(undoable)
-                            )),
-                            cx,
-                        );
-                    }
-                    Err(error) => {
-                        window.push_notification(Notification::error(error.to_string()), cx);
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_create_directory(parent, name, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn open_compress_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1680,46 +1553,10 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         let destination = self.directory.current_dir.join(name);
-        let Some((cancel, _progress)) = self.operations.begin_archive(
-            OperationProgressKind::Compress,
-            sources.len(),
-            format!("to {}", destination.display()),
-        ) else {
-            return;
-        };
-        self.start_operation_progress_refresh(cx);
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            create_zip_operation(&sources, &destination, cancel)
-        }));
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    Ok(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let undoable =
-                            this.apply_committed_operation(committed, Some(path.clone()), cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Created ZIP “{}”{}",
-                                path.file_name()
-                                    .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default(),
-                                undo_note(undoable)
-                            )),
-                            cx,
-                        );
-                    }
-                    Err(error) => {
-                        window.push_notification(Notification::error(error.to_string()), cx);
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_compress(sources, destination, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn start_extract_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1727,210 +1564,24 @@ impl Marcel {
         let Some(archive) = self.directory.selection.primary().cloned() else {
             return;
         };
-        let Some((cancel, _progress)) = self.operations.begin_archive(
-            OperationProgressKind::Extract,
-            1,
-            format!("from {}", archive.display()),
-        ) else {
-            return;
-        };
-        self.start_operation_progress_refresh(cx);
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            extract_archive_operation(&archive, cancel)
-        }));
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    Ok(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let undoable =
-                            this.apply_committed_operation(committed, Some(path.clone()), cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Extracted “{}”{}",
-                                path.file_name()
-                                    .map(|name| name.to_string_lossy())
-                                    .unwrap_or_default(),
-                                undo_note(undoable)
-                            )),
-                            cx,
-                        );
-                    }
-                    Err(error) => {
-                        window.push_notification(Notification::error(error.to_string()), cx);
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_extract(archive, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn start_undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(operation) = self.operations.begin_undo() else {
-            return;
-        };
-
-        let operation_for_task = operation.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || undo_operation(&operation_for_task)));
-
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    MutationOutcome::Committed(committed) => {
-                        let reveal = matches!(&operation, OperationRecord::Rename { .. });
-                        let path = if reveal {
-                            committed.path().to_path_buf()
-                        } else {
-                            operation.path().to_path_buf()
-                        };
-                        let changes = committed.changes().clone();
-                        let message = operation_history_message(&operation, false);
-                        let redoable = committed.is_undoable();
-                        let redo_record = committed.into_record();
-                        if this.sidebar.browsing_trash {
-                            match &operation {
-                                OperationRecord::Trash { records } => this.remove_trash_entries(
-                                    records
-                                        .iter()
-                                        .map(|record| record.backing_path().to_path_buf())
-                                        .collect(),
-                                    cx,
-                                ),
-                                OperationRecord::Restore { .. } => {
-                                    this.upsert_trash_entries(
-                                        redo_record
-                                            .as_ref()
-                                            .and_then(OperationRecord::trash_records)
-                                            .unwrap_or_default()
-                                            .to_vec(),
-                                        cx,
-                                    );
-                                }
-                                _ => {}
-                            }
-                        } else {
-                            this.apply_directory_changes(changes, reveal.then_some(path), cx);
-                        }
-                        // The undo committed. Losing its record only costs
-                        // Redo, so never report the undo itself as failed.
-                        if let Some(record) = redo_record {
-                            this.operations.finish_undo(record);
-                        }
-                        window.push_notification(
-                            Notification::success(format!("{message}{}", redo_note(redoable))),
-                            cx,
-                        );
-                    }
-                    // Nothing reached the disk, so the record still describes
-                    // it exactly and the user can fix the obstacle and retry.
-                    MutationOutcome::Unchanged(error) => {
-                        this.operations.cancel_undo(operation);
-                        window.push_notification(Notification::error(error.to_string()), cx);
-                    }
-                    // The undo crossed its commit point. Whatever compensation
-                    // achieved, the record's identities predate it, so keeping
-                    // it would only produce a "changed or was replaced" refusal
-                    // later that blamed the user for Marcel's own recovery.
-                    MutationOutcome::Discarded { changes, error } => {
-                        this.apply_directory_changes(changes, None, cx);
-                        window.push_notification(
-                            Notification::error(format!(
-                                "{error}; this operation can no longer be undone"
-                            )),
-                            cx,
-                        );
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_undo(origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn start_redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(operation) = self.operations.begin_redo() else {
-            return;
-        };
-
-        let operation_for_task = operation.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || redo_operation(&operation_for_task)));
-
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    MutationOutcome::Committed(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let changes = committed.changes().clone();
-                        let message = operation_history_message(&operation, true);
-                        let undoable = committed.is_undoable();
-                        let undo_record = committed.into_record();
-                        if this.sidebar.browsing_trash {
-                            match &operation {
-                                OperationRecord::Trash { .. } => {
-                                    this.upsert_trash_entries(
-                                        undo_record
-                                            .as_ref()
-                                            .and_then(OperationRecord::trash_records)
-                                            .unwrap_or_default()
-                                            .to_vec(),
-                                        cx,
-                                    );
-                                }
-                                OperationRecord::Restore { records } => {
-                                    this.remove_trash_entries(
-                                        records
-                                            .iter()
-                                            .map(|record| record.backing_path().to_path_buf())
-                                            .collect(),
-                                        cx,
-                                    );
-                                }
-                                _ => {}
-                            }
-                        } else {
-                            this.apply_directory_changes(changes, Some(path), cx);
-                        }
-                        // The redo committed. Losing its record only costs Undo.
-                        if let Some(record) = undo_record {
-                            this.operations.finish_redo(record);
-                        }
-                        window.push_notification(
-                            Notification::success(format!("{message}{}", undo_note(undoable))),
-                            cx,
-                        );
-                    }
-                    MutationOutcome::Unchanged(error) => {
-                        this.operations.cancel_redo(operation);
-                        window.push_notification(Notification::error(error.to_string()), cx);
-                    }
-                    MutationOutcome::Discarded { changes, error } => {
-                        this.apply_directory_changes(changes, None, cx);
-                        window.push_notification(
-                            Notification::error(format!(
-                                "{error}; this operation can no longer be redone"
-                            )),
-                            cx,
-                        );
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_redo(origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn stage_selection(&mut self, mode: TransferMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -1944,8 +1595,11 @@ impl Marcel {
             return;
         }
         let count = paths.len();
-        self.operations
-            .set_clipboard(Some(FileClipboard { mode, paths }));
+        // The clipboard is the application's, so cutting here and pasting in
+        // another window is one gesture rather than two disconnected ones.
+        self.operations.update(cx, |operations, _| {
+            operations.set_clipboard(Some(FileClipboard { mode, paths }));
+        });
         self.ui.entry_menu = None;
         let verb = match mode {
             TransferMode::Copy => "Copied",
@@ -1959,7 +1613,7 @@ impl Marcel {
     }
 
     fn start_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = self.operations.clipboard().cloned() else {
+        let Some(clipboard) = self.operations.read(cx).clipboard().cloned() else {
             return;
         };
         self.start_transfer(
@@ -1979,47 +1633,14 @@ impl Marcel {
             .into_iter()
             .filter(|path| selected.contains(path))
             .collect::<Vec<_>>();
-        if paths.is_empty() || !self.operations.begin_simple() {
+        if paths.is_empty() {
             return;
         }
         self.ui.entry_menu = None;
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || trash_paths(&paths)));
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let outcome = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                let changes = DirectoryChanges {
-                    removed: outcome.completed.clone(),
-                    ..DirectoryChanges::default()
-                };
-                if !outcome.records.is_empty() {
-                    this.operations.record(OperationRecord::Trash {
-                        records: outcome.records,
-                    });
-                }
-                this.apply_directory_changes(changes, None, cx);
-                if outcome.failures.is_empty() {
-                    window.push_notification(
-                        Notification::success(format!(
-                            "Moved {} item(s) to Trash",
-                            outcome.completed.len()
-                        )),
-                        cx,
-                    );
-                } else {
-                    let mut message = summarize_trash_failures(&outcome.failures);
-                    if outcome.undo_unavailable {
-                        message.push_str("; some successful items are not available to Undo");
-                    }
-                    window.push_notification(Notification::error(message), cx);
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_trash(paths, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn start_restore_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2030,57 +1651,14 @@ impl Marcel {
             .filter(|path| selected.contains(path))
             .filter_map(|path| self.sidebar.trash_records.get(&path).cloned())
             .collect::<Vec<_>>();
-        if records.is_empty() || !self.operations.begin_simple() {
+        if records.is_empty() {
             return;
         }
         self.ui.entry_menu = None;
-        let count = records.len();
-        let backing_paths = records
-            .iter()
-            .map(|record| record.backing_path().to_path_buf())
-            .collect::<Vec<_>>();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || restore_trash_records(&records)));
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                match result {
-                    Ok(restored) => {
-                        // The payloads are restored. Losing the journal entry
-                        // only costs Undo; the Trash view must still update.
-                        let undoable = restored.undoable;
-                        if undoable {
-                            this.operations.record(OperationRecord::Restore {
-                                records: restored.records,
-                            });
-                        }
-                        this.remove_trash_entries(backing_paths, cx);
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Restored {count} item(s){}",
-                                undo_note(undoable)
-                            )),
-                            cx,
-                        );
-                    }
-                    Err(failure) => {
-                        if failure.committed {
-                            // Payloads moved before the failure. Compensation
-                            // may not have returned all of them, so the listing
-                            // can no longer be trusted to match the Trash.
-                            this.start_trash_load(false, cx);
-                        }
-                        window
-                            .push_notification(Notification::error(failure.error.to_string()), cx);
-                    }
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_restore(records, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn open_permanent_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2236,80 +1814,10 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let source_count = trash_records
-            .as_ref()
-            .map_or(paths.len(), |records| records.len());
-        let Some(progress) = self.operations.begin_permanent_delete(kind, source_count) else {
-            return;
-        };
-        self.start_operation_progress_refresh(cx);
-        let task_progress = progress.clone();
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            if let Some(records) = trash_records {
-                let outcome = purge_trash_records(&records, task_progress);
-                PermanentDeleteResult::Trash {
-                    outcome,
-                    requested: records,
-                }
-            } else {
-                PermanentDeleteResult::Files(delete_paths(&paths, task_progress))
-            }
-        }));
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let result = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                let (completed, failure, removed_paths) = match result {
-                    PermanentDeleteResult::Files(outcome) => {
-                        let failure = (!outcome.failures.is_empty())
-                            .then(|| summarize_delete_failures(&outcome.failures));
-                        let removed = outcome.completed.clone();
-                        (outcome.completed.len(), failure, removed)
-                    }
-                    PermanentDeleteResult::Trash { outcome, requested } => {
-                        let failure = (!outcome.failures.is_empty())
-                            .then(|| summarize_trash_failures(&outcome.failures));
-                        let completed_set =
-                            outcome.completed.iter().cloned().collect::<HashSet<_>>();
-                        let removed = requested
-                            .iter()
-                            .filter(|record| completed_set.contains(record.original_path()))
-                            .map(|record| record.backing_path().to_path_buf())
-                            .collect();
-                        (outcome.completed.len(), failure, removed)
-                    }
-                };
-                if this.sidebar.browsing_trash {
-                    this.remove_trash_entries(removed_paths, cx);
-                } else {
-                    this.apply_directory_changes(
-                        DirectoryChanges {
-                            removed: removed_paths,
-                            ..DirectoryChanges::default()
-                        },
-                        None,
-                        cx,
-                    );
-                }
-                if let Some(failure) = failure {
-                    let message = if completed > 0 {
-                        format!("Permanently deleted {completed} item(s); {failure}")
-                    } else {
-                        failure
-                    };
-                    window.push_notification(Notification::error(message), cx);
-                } else {
-                    let message = match kind {
-                        OperationProgressKind::EmptyTrash => "Trash emptied".to_string(),
-                        _ => format!("Permanently deleted {completed} item(s)"),
-                    };
-                    window.push_notification(Notification::success(message), cx);
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_permanent_delete(paths, trash_records, kind, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
     fn start_drag_move(
@@ -2341,217 +1849,10 @@ impl Marcel {
         self.start_transfer(paths, destination, TransferMode::Copy, None, window, cx);
     }
 
-    fn start_operation_progress_refresh(&mut self, cx: &mut Context<Self>) {
-        let progress_task = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(80))
-                    .await;
-                let keep_running = this
-                    .update(cx, |this, cx| {
-                        let keep_running = this.operations.progress().is_some();
-                        if keep_running {
-                            cx.notify();
-                        }
-                        keep_running
-                    })
-                    .unwrap_or(false);
-                if !keep_running {
-                    break;
-                }
-            }
-        });
-        self.operations.set_progress_task(progress_task);
-    }
-
     fn cancel_active_operation(&mut self, cx: &mut Context<Self>) {
-        if self.operations.request_cancel() {
+        if self.operations.read(cx).request_cancel() {
             cx.notify();
         }
-    }
-
-    /// Ask the user about one destination conflict.
-    ///
-    /// The transfer thread is blocked on the answer, so every route out of this
-    /// dialog must produce one. Dropping the pending question answers it as a
-    /// cancellation, which is why the dialog cannot be dismissed by clicking
-    /// away: an accidental dismissal would abandon the whole transfer.
-    fn ask_about_conflict(
-        &mut self,
-        pending: PendingConflict,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let request = pending.request().clone();
-        let name = request
-            .destination
-            .file_name()
-            .map(display_filename)
-            .unwrap_or_default();
-        let folder = request
-            .destination
-            .parent()
-            .map(|parent| display_filename(parent.as_os_str()))
-            .unwrap_or_default();
-        let kind = if request.destination_is_directory {
-            "folder"
-        } else {
-            "file"
-        };
-        let suggestion = request
-            .destination
-            .file_name()
-            .and_then(|name| {
-                request
-                    .destination
-                    .parent()
-                    .and_then(|parent| unique_name_in(parent, name, request.source_is_directory))
-            })
-            .map(|name| display_filename(&name))
-            .unwrap_or_else(|| name.clone());
-
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(suggestion));
-        // The dialog callbacks are shared closures, so the one-shot answer has
-        // to be taken out of somewhere they can all reach.
-        let pending = Rc::new(RefCell::new(Some(pending)));
-        // Scoped to this one question: the sticky answer it produces lives in
-        // the operation's policy, not here.
-        let apply_to_all = Rc::new(Cell::new(false));
-        let is_merge = request.is_merge();
-
-        let input_for_dialog = input.clone();
-        let view = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let input = input_for_dialog.clone();
-            // Read the live value, because the checkbox draws whatever it is
-            // told. It cannot come from the entity: this closure runs while
-            // Marcel is already borrowed by the update that opened the dialog,
-            // so reading it here panics.
-            let applies_to_all = apply_to_all.get();
-            let answer = {
-                let pending = pending.clone();
-                move |response: ConflictResponse| {
-                    if let Some(pending) = pending.borrow_mut().take() {
-                        pending.answer(ConflictDecision {
-                            response,
-                            apply_to_all: applies_to_all,
-                        });
-                    }
-                }
-            };
-            let toggle = apply_to_all.clone();
-            let redraw = view.clone();
-            let (skip, replace, rename, cancel) = (
-                answer.clone(),
-                answer.clone(),
-                answer.clone(),
-                answer.clone(),
-            );
-
-            dialog
-                .title(if request.destination_is_directory {
-                    "Folder Already Exists"
-                } else {
-                    "File Already Exists"
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(format!(
-                            "A {kind} named “{name}” already exists in “{folder}”."
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(div().text_sm().child("Rename it to"))
-                                .child(Input::new(&input)),
-                        )
-                        .child(
-                            Checkbox::new("conflict-apply-to-all")
-                                .checked(applies_to_all)
-                                .label(if is_merge {
-                                    "Do this for every folder"
-                                } else {
-                                    "Do this for every file"
-                                })
-                                .on_click(move |checked, _, cx| {
-                                    toggle.set(*checked);
-                                    // A click is dispatched outside any entity
-                                    // update, so asking for a redraw here is
-                                    // safe and is what makes the new value
-                                    // visible.
-                                    redraw.update(cx, |_, cx| cx.notify());
-                                }),
-                        ),
-                )
-                // Each button answers and dismisses on its own rather than
-                // sitting inside a DialogClose wrapper. The wrapper closes on a
-                // click of its own surrounding element, which a button with its
-                // own handler never delivers — so every answer was sent while
-                // the dialog stayed on screen, and the next conflict opened
-                // another one on top of it.
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("conflict-cancel")
-                                .label("Cancel")
-                                .outline()
-                                .on_click(move |_, window, cx| {
-                                    cancel(ConflictResponse::Cancel);
-                                    window.close_dialog(cx);
-                                }),
-                        )
-                        .child(
-                            Button::new("conflict-skip")
-                                .label("Skip")
-                                .outline()
-                                .on_click(move |_, window, cx| {
-                                    skip(ConflictResponse::Skip);
-                                    window.close_dialog(cx);
-                                }),
-                        )
-                        .child(
-                            Button::new("conflict-rename")
-                                .label("Rename")
-                                .outline()
-                                .on_click({
-                                    let input = input.clone();
-                                    move |_, window, cx| {
-                                        // A typed name cannot answer later
-                                        // conflicts, so applying to all means
-                                        // Marcel picks the names.
-                                        rename(if applies_to_all {
-                                            ConflictResponse::AutoRename
-                                        } else {
-                                            ConflictResponse::Rename(OsString::from(
-                                                input.read(cx).value().trim().to_string(),
-                                            ))
-                                        });
-                                        window.close_dialog(cx);
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new("conflict-replace")
-                                .label(if is_merge { "Merge" } else { "Replace" })
-                                .with_variant(ButtonVariant::Danger)
-                                .on_click(move |_, window, cx| {
-                                    replace(ConflictResponse::Replace);
-                                    window.close_dialog(cx);
-                                }),
-                        ),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-        });
-        // The suggested name is selected, so typing over it replaces it and
-        // Rename works without reaching for the pointer.
-        input.update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
     }
 
     fn start_transfer(
@@ -2563,138 +1864,56 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((cancel, progress)) =
-            self.operations
-                .begin_transfer(mode, sources.len(), destination.clone())
-        else {
-            return;
-        };
         self.ui.entry_menu = None;
-        self.start_operation_progress_refresh(cx);
-        // Questions arrive one at a time: the transfer thread waits for each
-        // answer, so a second conflict cannot be raised while the first is on
-        // screen.
-        let (resolver, questions) = PromptingResolver::new();
-        cx.spawn_in(window, async move |this, window| {
-            while let Ok(pending) = questions.recv().await {
-                if this
-                    .update_in(window, |this, window, cx| {
-                        this.ask_about_conflict(pending, window, cx);
-                    })
-                    .is_err()
-                {
-                    // The window is gone, so dropping the question cancels the
-                    // transfer instead of leaving it waiting.
-                    break;
-                }
-            }
-        })
-        .detach();
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            let mut policy = ConflictPolicy::interactive(resolver);
-            transfer_paths_with_conflicts(
-                &sources,
-                &destination,
-                mode,
-                cancel,
-                progress,
-                &mut policy,
-            )
-        }));
-
-        let operation_task = cx.spawn_in(window, async move |this, window| {
-            let outcome = task.await;
-            let _ = this.update_in(window, |this, window, cx| {
-                // Reconcile from the exact recorded transfers. Deriving this
-                // from the undo record instead dropped every item that
-                // committed without one, leaving a moved source on screen
-                // until a watcher event corrected it.
-                let changes = transfer_changes(&outcome, mode);
-                if let Some(operation) = outcome.operation {
-                    this.operations.record(operation);
-                }
-
-                if mode == TransferMode::Move
-                    && !outcome.completed.is_empty()
-                    && let Some(clipboard) = clipboard
-                {
-                    this.operations
-                        .retain_uncompleted_move(clipboard, &outcome.completed);
-                }
-
-                let reveal = outcome
-                    .completed
-                    .iter()
-                    .find(|transfer| {
-                        transfer.destination.parent() == Some(this.directory.current_dir.as_path())
-                    })
-                    .map(|transfer| transfer.destination.clone());
-                this.apply_directory_changes(changes, reveal, cx);
-
-                // Dropping a selection onto the folder it already lives in asks
-                // for nothing. Announcing "Moved 0 items" would answer a
-                // question the user did not ask.
-                if outcome.completed.is_empty()
-                    && outcome.failures.is_empty()
-                    && outcome.skipped.is_empty()
-                    && outcome.cancelled.is_empty()
-                    && !outcome.already_in_place.is_empty()
-                {
-                    this.operations.finish_active();
-                    cx.notify();
-                    return;
-                }
-
-                if outcome.failures.is_empty() {
-                    let verb = match mode {
-                        TransferMode::Copy => "Copied",
-                        TransferMode::Move => "Moved",
-                    };
-                    let skipped = match outcome.skipped.len() {
-                        0 => String::new(),
-                        count => format!(", skipped {count}"),
-                    };
-                    window.push_notification(
-                        Notification::success(format!(
-                            "{verb} {} item(s){skipped}{}",
-                            outcome.completed.len(),
-                            undo_note(!outcome.undo_unavailable)
-                        )),
-                        cx,
-                    );
-                } else {
-                    let mut message = summarize_failures(&outcome.failures);
-                    if outcome.undo_unavailable {
-                        message.push_str("; some completed items are not available to Undo");
-                    }
-                    window.push_notification(Notification::error(message), cx);
-                }
-                this.operations.finish_active();
-                cx.notify();
-            });
+        let origin = window.window_handle();
+        self.operations.clone().update(cx, |operations, cx| {
+            operations.start_transfer(sources, destination, mode, clipboard, origin, cx);
         });
-        self.operations.set_task(operation_task);
-        cx.notify();
     }
 
-    /// Apply a mutation that has already committed to the filesystem.
+    /// Fold an application-wide operation effect into this window.
     ///
-    /// The browser reducer runs from the committed effect whether or not undo
-    /// bookkeeping survived, so the projection can never disagree with the
-    /// disk. Returns whether the operation is undoable, for the notification.
-    fn apply_committed_operation(
+    /// Every window hears every effect, so a second window showing the folder a
+    /// transfer landed in reconciles from the operation itself rather than
+    /// waiting for a watcher event. Reveal is the one part that is not shared:
+    /// it belongs to the window that asked for the work.
+    fn on_operation_event(
         &mut self,
-        committed: CommittedOperation,
-        reveal: Option<PathBuf>,
+        event: &OperationEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let changes = committed.changes().clone();
-        let undoable = committed.is_undoable();
-        if let Some(record) = committed.into_record() {
-            self.operations.record(record);
+    ) {
+        match event {
+            OperationEvent::Applied {
+                changes,
+                reveal,
+                origin,
+            } => {
+                let reveal = origin
+                    .is_none_or(|origin| origin == window.window_handle())
+                    .then(|| {
+                        reveal
+                            .iter()
+                            .find(|path| {
+                                path.parent() == Some(self.directory.current_dir.as_path())
+                            })
+                            .cloned()
+                    })
+                    .flatten();
+                self.apply_directory_changes(changes.clone(), reveal, cx);
+            }
+            OperationEvent::TrashRemoved(backing_paths) => {
+                self.remove_trash_entries(backing_paths.clone(), cx);
+            }
+            OperationEvent::TrashUpserted(records) => {
+                self.upsert_trash_entries(records.clone(), cx);
+            }
+            OperationEvent::TrashInvalidated => {
+                if self.sidebar.browsing_trash {
+                    self.start_trash_load(false, cx);
+                }
+            }
         }
-        self.apply_directory_changes(changes, reveal, cx);
-        undoable
     }
 
     fn apply_directory_changes(
@@ -2938,7 +2157,8 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.operations.is_busy() && self.operations.request_cancel() {
+        let operations = self.operations.read(cx);
+        if operations.is_busy() && operations.request_cancel() {
             window.push_notification(Notification::info("Cancelling file operation…"), cx);
             return;
         }
@@ -3976,13 +3196,13 @@ impl Marcel {
         // Popovers and `accent` share the raised surface in Marcel palettes.
         // Use the translucent primary tint for an unambiguous menu hover.
         let radius = cx.theme().radius;
-        let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection);
-        let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll);
-        let new_folder_enabled = self.command_enabled(BrowserCommand::NewFolder);
-        let open_terminal_enabled = self.command_enabled(BrowserCommand::OpenTerminal);
-        let rename_enabled = self.command_enabled(BrowserCommand::RenameSelection);
-        let compress_enabled = self.command_enabled(BrowserCommand::CompressSelection);
-        let extract_enabled = self.command_enabled(BrowserCommand::ExtractSelection);
+        let open_with_enabled = self.command_enabled(BrowserCommand::OpenWithSelection, cx);
+        let select_all_enabled = self.command_enabled(BrowserCommand::SelectAll, cx);
+        let new_folder_enabled = self.command_enabled(BrowserCommand::NewFolder, cx);
+        let open_terminal_enabled = self.command_enabled(BrowserCommand::OpenTerminal, cx);
+        let rename_enabled = self.command_enabled(BrowserCommand::RenameSelection, cx);
+        let compress_enabled = self.command_enabled(BrowserCommand::CompressSelection, cx);
+        let extract_enabled = self.command_enabled(BrowserCommand::ExtractSelection, cx);
         let extract_visible = self.directory.selection.selected().len() == 1
             && self
                 .directory
@@ -3992,19 +3212,19 @@ impl Marcel {
                 .is_some_and(|entry| {
                     entry.kind != EntryKind::Directory && is_supported_archive(&entry.path)
                 });
-        let copy_enabled = self.command_enabled(BrowserCommand::CopySelection);
-        let cut_enabled = self.command_enabled(BrowserCommand::CutSelection);
-        let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles);
-        let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
-        let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
+        let copy_enabled = self.command_enabled(BrowserCommand::CopySelection, cx);
+        let cut_enabled = self.command_enabled(BrowserCommand::CutSelection, cx);
+        let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles, cx);
+        let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation, cx);
+        let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation, cx);
         let trash_menu_command = if self.sidebar.browsing_trash {
             BrowserCommand::RestoreSelection
         } else {
             BrowserCommand::TrashSelection
         };
-        let trash_menu_enabled = self.command_enabled(trash_menu_command);
-        let permanent_delete_enabled = self.command_enabled(BrowserCommand::DeletePermanently);
-        let empty_trash_enabled = self.command_enabled(BrowserCommand::EmptyTrash);
+        let trash_menu_enabled = self.command_enabled(trash_menu_command, cx);
+        let permanent_delete_enabled = self.command_enabled(BrowserCommand::DeletePermanently, cx);
+        let empty_trash_enabled = self.command_enabled(BrowserCommand::EmptyTrash, cx);
         let window_size = window.bounds().size;
         let menu_height = match menu.target {
             ContextMenuTarget::Entry => {
@@ -5151,7 +4371,7 @@ impl Marcel {
         } else {
             !self.sidebar.browsing_trash && self.directory.current_dir == place.path
         };
-        let operation_busy = self.operations.is_busy();
+        let operation_busy = self.operations.read(cx).is_busy();
         let drop_path = place.path.clone();
         let external_drop_path = place.path.clone();
         let navigate_path = place.path.clone();
@@ -5258,7 +4478,7 @@ impl Marcel {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
         let active = self.directory.current_dir == bookmark.path;
-        let operation_busy = self.operations.is_busy();
+        let operation_busy = self.operations.read(cx).is_busy();
         let insertion_here = self.sidebar.bookmark_insertion == Some(BookmarkInsertion { index });
         let navigate_path = bookmark.path.clone();
         let drop_path = bookmark.path.clone();
@@ -5270,10 +4490,10 @@ impl Marcel {
         };
         let bookmark_row_bounds = self.sidebar.bookmark_row_bounds.clone();
         let icon = self
-            .sidebar
-            .bookmark_icons
-            .get(&bookmark.path)
-            .cloned()
+            .bookmarks
+            .read(cx)
+            .icon(&bookmark.path)
+            .map(Path::to_path_buf)
             .map(|path| {
                 img(path)
                     .size(px(20.0))
@@ -5437,7 +4657,7 @@ impl Marcel {
                         } else {
                             Self::single_file_drag(&path, navigable)
                         };
-                        let operation_busy = this.operations.is_busy();
+                        let operation_busy = this.operations.read(cx).is_busy();
                         let dragging_enabled =
                             !this.sidebar.browsing_trash && rename_input.is_none();
                         let entry_hit_bounds = this.drag.entry_hit_bounds.clone();
@@ -5665,7 +4885,7 @@ impl Marcel {
                             } else {
                                 Self::single_file_drag(&path, navigable)
                             };
-                            let operation_busy = this.operations.is_busy();
+                            let operation_busy = this.operations.read(cx).is_busy();
                             let dragging_enabled =
                                 !this.sidebar.browsing_trash && rename_input.is_none();
                             let display_name = elide_filename(&entry.name, GRID_LABEL_COLUMNS);
@@ -6004,7 +5224,7 @@ impl Marcel {
             },
         };
         let directory_scroll = self.ui.directory_scroll.clone();
-        let operation_busy = self.operations.is_busy();
+        let operation_busy = self.operations.read(cx).is_busy();
         let can_drop_path = self.directory.current_dir.clone();
         let internal_drop_path = self.directory.current_dir.clone();
         let external_drop_path = self.directory.current_dir.clone();
@@ -6435,8 +5655,8 @@ impl Render for Marcel {
             self.drag.file_pointer = None;
             self.drag.file_scroll_task.take();
         }
-        let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation);
-        let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation);
+        let undo_enabled = self.command_enabled(BrowserCommand::UndoFileOperation, cx);
+        let redo_enabled = self.command_enabled(BrowserCommand::RedoFileOperation, cx);
         let window_width = f32::from(window.bounds().size.width);
         let sidebar_width = self.places_sidebar_width(window, cx);
         let workspace_width =
@@ -6454,9 +5674,9 @@ impl Render for Marcel {
             .enumerate()
             .map(|(index, place)| self.render_place(index, place, cx))
             .collect::<Vec<_>>();
-        let bookmark_buttons = self
-            .sidebar
-            .bookmarks
+        let bookmarks = self.bookmarks.read(cx).bookmarks().to_vec();
+        let bookmarks_loading = self.bookmarks.read(cx).is_loading();
+        let bookmark_buttons = bookmarks
             .clone()
             .into_iter()
             .enumerate()
@@ -6464,9 +5684,9 @@ impl Render for Marcel {
             .collect::<Vec<_>>();
         let bookmark_final_insertion = self.sidebar.bookmark_insertion
             == Some(BookmarkInsertion {
-                index: self.sidebar.bookmarks.len(),
+                index: bookmarks.len(),
             });
-        let bookmarks_ready = !self.sidebar.bookmarks_loading;
+        let bookmarks_ready = !bookmarks_loading;
         let bookmark_region_bounds = self.sidebar.bookmark_region_bounds.clone();
         let hidden_switch_view = cx.entity();
         let hidden_switch = Switch::new("show-hidden-files")
@@ -6619,7 +5839,7 @@ impl Render for Marcel {
                                 .sidebar
                                 .bookmark_insertion
                                 .map(|insertion| insertion.index)
-                                .unwrap_or(this.sidebar.bookmarks.len());
+                                .unwrap_or(this.bookmarks.read(cx).bookmarks().len());
                             this.move_bookmark(drag.index, insertion, window, cx);
                         }))
                         .on_drop(cx.listener(|this, drag: &FileDrag, window, cx| {
@@ -6636,7 +5856,7 @@ impl Render for Marcel {
                                 .child("Bookmarks"),
                         )
                         .children(bookmark_buttons)
-                        .when(self.sidebar.bookmarks_loading, |this| {
+                        .when(bookmarks_loading, |this| {
                             this.child(
                                 div()
                                     .px_3()
@@ -6646,19 +5866,16 @@ impl Render for Marcel {
                                     .child("Loading bookmarks…"),
                             )
                         })
-                        .when(
-                            !self.sidebar.bookmarks_loading && self.sidebar.bookmarks.is_empty(),
-                            |this| {
-                                this.child(
-                                    div()
-                                        .px_3()
-                                        .py_1()
-                                        .text_xs()
-                                        .text_color(colors.muted_foreground)
-                                        .child("Drag folders here"),
-                                )
-                            },
-                        )
+                        .when(!bookmarks_loading && bookmarks.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child("Drag folders here"),
+                            )
+                        })
                         .child(div().h(px(2.0)).mx_2().rounded_full().bg(
                             if bookmark_final_insertion {
                                 colors.primary
@@ -7193,74 +6410,6 @@ fn rename_stem_end(name: &str, is_directory: bool) -> usize {
             (character == '.' && index > 0).then(|| name[..index].chars().count())
         })
         .unwrap_or_else(|| name.chars().count())
-}
-
-fn operation_history_message(operation: &OperationRecord, redo: bool) -> String {
-    let name = operation
-        .path()
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_default();
-    match (operation, redo) {
-        (OperationRecord::CreateDirectory { .. }, false) => {
-            format!("Undid creation of “{name}”")
-        }
-        (OperationRecord::CreateDirectory { .. }, true) => format!("Recreated folder “{name}”"),
-        (OperationRecord::Copy { .. }, false) => "Undid copy".to_string(),
-        (OperationRecord::Copy { .. }, true) => "Repeated copy".to_string(),
-        (OperationRecord::Move { .. }, false) => "Undid move".to_string(),
-        (OperationRecord::Move { .. }, true) => "Repeated move".to_string(),
-        (OperationRecord::Trash { .. }, false) => "Restored item(s) from Trash".to_string(),
-        (OperationRecord::Trash { .. }, true) => "Moved item(s) to Trash again".to_string(),
-        (OperationRecord::Restore { .. }, false) => {
-            "Moved restored item(s) back to Trash".to_string()
-        }
-        (OperationRecord::Restore { .. }, true) => "Restored item(s) again".to_string(),
-        (OperationRecord::Rename { source, .. }, false) => {
-            let original = source
-                .file_name()
-                .map(|name| name.to_string_lossy())
-                .unwrap_or_default();
-            format!("Restored name “{original}”")
-        }
-        (OperationRecord::Rename { destination, .. }, true) => {
-            let renamed = destination
-                .file_name()
-                .map(|name| name.to_string_lossy())
-                .unwrap_or_default();
-            format!("Renamed to “{renamed}” again")
-        }
-        (OperationRecord::ArchiveCreate { .. }, false) => {
-            format!("Removed created ZIP “{name}”")
-        }
-        (OperationRecord::ArchiveCreate { .. }, true) => {
-            format!("Created ZIP “{name}” again")
-        }
-        (OperationRecord::ArchiveExtract { .. }, false) => {
-            format!("Removed extracted item “{name}”")
-        }
-        (OperationRecord::ArchiveExtract { .. }, true) => {
-            format!("Extracted “{name}” again")
-        }
-    }
-}
-
-/// Suffix used when a mutation committed but its undo record was lost. Marcel
-/// reports that as success with a caveat, never as a failed operation.
-fn undo_note(undoable: bool) -> &'static str {
-    if undoable {
-        ""
-    } else {
-        " · not available to Undo"
-    }
-}
-
-fn redo_note(redoable: bool) -> &'static str {
-    if redoable {
-        ""
-    } else {
-        " · not available to Redo"
-    }
 }
 
 fn can_move_files_to(paths: &[PathBuf], destination: &Path) -> bool {

@@ -1,12 +1,24 @@
+//! The user's bookmarks, and the application's single writer for them.
+//!
+//! The file is published atomically, but that only makes each write
+//! indivisible; it does not make two writers agree. While every window kept its
+//! own list and its own save task, a window that had not seen the other's
+//! addition would write its stale list over the top, and the lost bookmark left
+//! no parse error behind to notice. Browser view state can tolerate
+//! last-writer-wins; user data cannot.
+
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::Write as _,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result, bail};
+use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Task};
 use url::Url;
+
+use crate::surface::{self, Report};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bookmark {
@@ -98,6 +110,176 @@ pub fn add(bookmarks: &mut Vec<Bookmark>, path: PathBuf) -> bool {
 
 pub fn remove(bookmarks: &mut Vec<Bookmark>, index: usize) -> Option<Bookmark> {
     (index < bookmarks.len()).then(|| bookmarks.remove(index))
+}
+
+struct GlobalBookmarks(Entity<BookmarkStore>);
+
+impl Global for GlobalBookmarks {}
+
+/// The application's bookmark store, created and loaded on first use.
+pub fn global(home: &Path, cx: &mut App) -> Entity<BookmarkStore> {
+    if let Some(existing) = cx.try_global::<GlobalBookmarks>() {
+        return existing.0.clone();
+    }
+    let store = cx.new(|cx| BookmarkStore::load(default_path(home), cx));
+    cx.set_global(GlobalBookmarks(store.clone()));
+    store
+}
+
+/// One list, one writer, however many windows are showing it.
+pub struct BookmarkStore {
+    path: PathBuf,
+    bookmarks: Vec<Bookmark>,
+    icons: HashMap<PathBuf, PathBuf>,
+    loading: bool,
+    _load_task: Option<Task<()>>,
+    save_task: Option<Task<()>>,
+}
+
+impl BookmarkStore {
+    fn load(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        let load_path = path.clone();
+        let loaded = cx.background_executor().spawn(smol::unblock(move || {
+            let bookmarks = load(&load_path)?;
+            let mut icon_provider = crate::icons::IconProvider::discover();
+            let icons = bookmarks
+                .iter()
+                .filter_map(|bookmark| {
+                    icon_provider
+                        .icon_for(&bookmark.path, true)
+                        .map(|icon| (bookmark.path.clone(), icon))
+                })
+                .collect();
+            anyhow::Ok((bookmarks, icons))
+        }));
+
+        let load_task = cx.spawn(async move |this, cx| {
+            let result = loaded.await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok((bookmarks, icons)) => {
+                        this.bookmarks = bookmarks;
+                        this.icons = icons;
+                    }
+                    Err(error) => eprintln!("Could not load Marcel bookmarks: {error:#}"),
+                }
+                cx.notify();
+            });
+        });
+
+        Self {
+            path,
+            bookmarks: Vec::new(),
+            icons: HashMap::new(),
+            loading: true,
+            _load_task: Some(load_task),
+            save_task: None,
+        }
+    }
+
+    pub fn bookmarks(&self) -> &[Bookmark] {
+        &self.bookmarks
+    }
+
+    pub fn icon(&self, path: &Path) -> Option<&Path> {
+        self.icons.get(path).map(PathBuf::as_path)
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// Add every path that is not bookmarked already, returning how many were.
+    pub fn add(
+        &mut self,
+        paths: &[(PathBuf, Option<PathBuf>)],
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let mut added = 0;
+        for (path, icon) in paths {
+            if !add(&mut self.bookmarks, path.clone()) {
+                continue;
+            }
+            if let Some(icon) = icon {
+                self.icons.insert(path.clone(), icon.clone());
+            }
+            added += 1;
+        }
+        if added > 0 {
+            self.start_save(origin, cx);
+            cx.notify();
+        }
+        added
+    }
+
+    pub fn remove_at(
+        &mut self,
+        index: usize,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<Bookmark> {
+        let bookmark = remove(&mut self.bookmarks, index)?;
+        self.icons.remove(&bookmark.path);
+        self.start_save(origin, cx);
+        cx.notify();
+        Some(bookmark)
+    }
+
+    pub fn move_to(
+        &mut self,
+        from: usize,
+        insertion: usize,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !reorder(&mut self.bookmarks, from, insertion) {
+            return false;
+        }
+        self.start_save(origin, cx);
+        cx.notify();
+        true
+    }
+
+    /// Write the current list, then write again if it moved on while saving.
+    ///
+    /// Coalescing here rather than queueing one write per edit is safe now that
+    /// there is one list: the follow-up write always publishes the newest
+    /// state, whichever window produced it.
+    fn start_save(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
+        if self.save_task.is_some() {
+            return;
+        }
+        let path = self.path.clone();
+        let snapshot = self.bookmarks.clone();
+        let saved_snapshot = snapshot.clone();
+        let saving = cx
+            .background_executor()
+            .spawn(smol::unblock(move || save(&path, &snapshot)));
+
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            let result = saving.await;
+            let report = this.update(cx, |this, cx| {
+                // Clearing this drops the handle to the task running right now,
+                // which cancels whatever it has left to do. Everything after it
+                // — including delivering the report — must therefore stay
+                // synchronous, with no further await.
+                this.save_task = None;
+                cx.notify();
+                match result {
+                    Err(error) => Some(Report::Error(format!("Could not save bookmarks: {error}"))),
+                    Ok(()) => {
+                        if this.bookmarks != saved_snapshot {
+                            this.start_save(origin, cx);
+                        }
+                        None
+                    }
+                }
+            });
+            surface::deliver(origin, report.ok().flatten(), cx);
+        }));
+    }
 }
 
 pub fn reorder(bookmarks: &mut Vec<Bookmark>, from: usize, insertion: usize) -> bool {

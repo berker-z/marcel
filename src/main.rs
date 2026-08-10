@@ -33,6 +33,7 @@ fn main() {
         marcel::identity::init(cx);
         marcel::theme::init(cx);
         marcel::commands::init(cx);
+        marcel::operations::init(cx);
 
         let initial_window = open_marcel_window(start_path.clone(), cx)
             .expect("failed to open Marcel's initial window");

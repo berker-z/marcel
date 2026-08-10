@@ -17,7 +17,7 @@ pub mod identity;
 mod image_preview;
 pub mod launch;
 mod local_fs;
-mod operations;
+pub mod operations;
 mod pdf_preview;
 mod places;
 pub mod preview;
@@ -25,6 +25,7 @@ mod preview_controller;
 pub mod selection;
 mod sidebar_controller;
 mod state;
+mod surface;
 #[cfg(target_os = "linux")]
 mod system_open;
 #[cfg(target_os = "linux")]
