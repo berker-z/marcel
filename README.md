@@ -2,9 +2,9 @@
 
 A graphical file manager for Linux, written in Rust. Fast, built around a preview pane that is genuinely useful, and careful about touching your files. It does not depend on GTK or Qt.
 
-Marcel renders its own interface through GPUI (https://github.com/zed-industries/zed), the UI framework behind Zed, so it doesn't pull in a desktop toolkit or inherit its theming and startup cost. Select a file and you see it straight away: text, images, PDFs, or the contents of a folder.
+Marcel renders its own interface through [GPUI](https://github.com/zed-industries/zed), the UI framework behind Zed, so it doesn't pull in a desktop toolkit or inherit its theming and startup cost. Select a file and you see it straight away: text, images, PDFs, or the contents of a folder.
 
-It borrows heavily from Yazi (https://github.com/sxyazi/yazi). The filesystem layer, the incremental directory updates, the preview scheduling, and the copy semantics are all built on ideas taken from reading Yazi's source. Marcel is a graphical application rather than a terminal one, so the interface is its own, but the parts underneath owe Yazi a lot. `THIRD_PARTY_NOTICES.md` records what was adapted, file by file, down to the upstream commit.
+It borrows heavily from [Yazi](https://github.com/sxyazi/yazi). The filesystem layer, the incremental directory updates, the preview scheduling, and the copy semantics are all built on ideas taken from reading Yazi's source. Marcel is a graphical application rather than a terminal one, so the interface is its own, but the parts underneath owe Yazi a lot. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) records what was adapted, file by file, down to the upstream commit.
 
 ## Status
 
@@ -110,7 +110,7 @@ Then apply its overlay and install the package:
 }
 ```
 
-Installing Marcel does not change your MIME associations and does not take over the generic file manager registration on D-Bus. Both are opt-in, and are covered in `docs/release.md`.
+Installing Marcel does not change your MIME associations and does not take over the generic file manager registration on D-Bus. Both are opt-in, and are covered in [`docs/release.md`](docs/release.md).
 
 ## Declarative settings
 
@@ -146,12 +146,12 @@ The development shell is required. A plain shell will not find the system librar
 
 ## Credits
 
-Built with GPUI (https://github.com/zed-industries/zed) (Apache-2.0) and gpui-component (https://github.com/longbridge/gpui-component). PDF rendering goes through Poppler, archives through 7-Zip. Icons are a small subset of Nordzy (https://github.com/alvatip/Nordzy-icon) (GPL-3.0) and the bundled font is a subset of Iosevka (https://github.com/be5invis/Iosevka) (SIL OFL).
+Built with [GPUI](https://github.com/zed-industries/zed) (Apache-2.0) and [gpui-component](https://github.com/longbridge/gpui-component). PDF rendering goes through Poppler, archives through 7-Zip. Icons are a small subset of [Nordzy](https://github.com/alvatip/Nordzy-icon) (GPL-3.0) and the bundled font is a subset of [Iosevka](https://github.com/be5invis/Iosevka) (SIL OFL).
 
 And Yazi, again, for most of the thinking underneath.
 
 ## License
 
-MIT, see `LICENSE`.
+MIT, see [`LICENSE`](LICENSE).
 
-Bundled assets keep their own licenses, which are not MIT. The icon set is GPL-3.0 and the font is under the SIL Open Font License. Full details, along with the record of adapted code, are in `THIRD_PARTY_NOTICES.md`.
+Bundled assets keep their own licenses, which are not MIT. The icon set is GPL-3.0 and the font is under the SIL Open Font License. Full details, along with the record of adapted code, are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
