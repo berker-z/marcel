@@ -456,8 +456,10 @@ The packaging contract, current dependency caveats, target formats, and
   statement, alpha status and safety expectations, feature tour, keyboard
   shortcuts, honest gap list, installation, declarative settings, credits, and
   licensing. Maintainer detail moved out rather than being summarized twice, and
-  the roadmap prose is gone because this file is the roadmap. One hole remains:
-  the page reserves a spot for a hero image and there is no screenshot yet.
+  the roadmap prose is gone because this file is the roadmap.
+- [x] Add a hero screenshot, at `docs/screenshots/marcel.png`. A short GIF of
+  navigation, filtering, and one safe file action is still wanted and is the
+  better artefact; the still is what exists today.
 - The support matrix and the reserved sections for artifacts that do not exist
   are deliberately absent. Nix is the only route today and the README says so in
   one line; a table of empty rows advertises formats Marcel does not ship.

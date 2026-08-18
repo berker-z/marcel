@@ -16,7 +16,7 @@ Back up anything you would be upset to lose.
 
 Linux only. Wayland is the tested target. X11 mostly works, but dragging files out of Marcel into other applications is not implemented there.
 
-<!-- screenshot goes here -->
+![Marcel in grid view, with a folder of two files on the left and a PDF open in the preview pane on the right, showing the cover and first page of text](docs/screenshots/marcel.png)
 
 ## What it does
 
