@@ -126,7 +126,8 @@ This order favors evidence-driven hardening over novelty. Steps after the
 manual acceptance phase are intentionally parked, not current commitments.
 
 1. Run [Sprint 20](sprints/020-cleanup-interlude.md)'s graphical acceptance
-   matrix — the two-window ownership checks inherited from Sprint 19, Sprint
+   matrix, together with [Sprint 21](sprints/021-a-launch-is-a-window.md)'s
+   shorter one — the two-window ownership checks inherited from Sprint 19, Sprint
    18's remaining interaction checks, and Sprint 17's remaining pointer and
    marquee checks. This is the only thing standing between the current tree and
    a release-readiness decision.
@@ -406,6 +407,14 @@ The packaging contract, current dependency caveats, target formats, and
   give grid names three lines and make their visuals fill more of each tile.
 - [x] Replace the static path display with clickable breadcrumbs and an
   editable, validation-reporting `Ctrl+L` location field.
+- [x] Open a window per launch: running `marcel`, with or without a path, opens
+  a window rather than navigating the one already in front of the user, and a
+  folder's context menu offers Open in New Window. See
+  [`Sprint 21`](sprints/021-a-launch-is-a-window.md). `Ctrl+N` and tabs are
+  deliberately not part of it.
+- Per-window view state is still last-writer-wins, which was invisible with one
+  window and will be noticeable with two: set grid view in one window, close the
+  other, and it can snap back. Left alone until it actually irritates someone.
 - Persist pane sizes, view mode, sort mode, and other user preferences.
 - Add conventional context menus and properties.
 - Add configurable sorting, grouping, hidden-file display, and zoom.

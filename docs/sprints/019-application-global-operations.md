@@ -232,6 +232,9 @@ interface defects passed `cargo test`.
 - A user-facing New Window action. Additional windows still arrive only through
   a D-Bus request carrying more than one location, which is what made A1 low
   priority rather than invalid. Nothing here depends on adding one.
+  [Sprint 21](021-a-launch-is-a-window.md) added one anyway, for a reason this
+  sprint did not anticipate: with no way for a person to open a second window,
+  the acceptance list below was not something anyone could reasonably run.
 - Merging the browser-state writer. Last-writer-wins is acceptable for view
   state and the cleanup stays in [`TODO.md`](../TODO.md).
 - A shared progress surface listing several concurrent operations. The busy lock

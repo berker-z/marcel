@@ -33,6 +33,7 @@ mod system_terminal;
 pub mod theme;
 mod thumbnails;
 mod trash_ops;
+pub mod window;
 mod window_ui_state;
 
 pub use app::Marcel;

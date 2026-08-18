@@ -36,12 +36,21 @@ the 2026-08-10 plan are done.
 eight multi-window checks and Sprint 18's four interaction checks unchanged, and
 none of them can be reached by `cargo test`.
 
+[Sprint 21](sprints/021-a-launch-is-a-window.md) then fixed the thing that made
+that matrix impractical. Running `marcel` while Marcel is open used to navigate
+the window you were reading — or, with no argument, raise it and ignore the
+folder you were standing in. A launch now opens a window, folders have an
+Open in New Window entry, and the application owns the window list rather than
+`main.rs` keeping a private one.
+
 ## Next: the graphical acceptance matrix, then release readiness
 
 In order:
 
-1. Run Sprint 20's manual list with two real windows. That is the last thing
-   between the current tree and a release-readiness conversation.
+1. Run Sprint 20's manual list with two real windows — now reachable with two
+   terminal commands rather than a hand-written `gdbus call`. That is the last
+   thing between the current tree and a release-readiness conversation. Run
+   Sprint 21's own short list while you are there.
 2. Fix what it exposes, with focused regression coverage.
 3. Then, and only then, reopen [Sprint 16](sprints/016-public-release-presentation.md):
    hosted CI, release metadata, and a tagged `0.1.0`.
@@ -78,7 +87,7 @@ it, and one fresh code path used `?` after a commit anyway.
 See `CLAUDE.md`. In short: capture the `nix develop` environment once, then run
 fmt, clippy, and tests as one sandboxed command with a short `TMPDIR`. Confirm a
 green `desktop_integration::tests::private_session_bus_integration` outside the
-sandbox. The suite is 250 library tests plus 1 binary test.
+sandbox. The suite is 252 library tests plus 1 binary test.
 
 Automated checks did not catch a single one of Sprint 18's three interface
 defects, and did not catch either of Review D's P0s. Drive the real windows

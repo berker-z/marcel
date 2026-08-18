@@ -1085,6 +1085,12 @@ impl Marcel {
                     && self.directory.error.is_none()
                     && self.directory.current_dir.is_dir()
             }
+            // Folders only. A second window showing a file is not a thing
+            // Marcel can do, and a Trash entry's backing path is not somewhere
+            // the user should be browsing.
+            BrowserCommand::OpenInNewWindow => {
+                !self.sidebar.browsing_trash && self.selected_directory().is_some()
+            }
             BrowserCommand::RenameSelection => {
                 !self.sidebar.browsing_trash
                     && !self.operations.read(cx).is_busy()
@@ -1244,6 +1250,7 @@ impl Marcel {
             BrowserCommand::EmptyTrash => self.open_empty_trash_dialog(window, cx),
             BrowserCommand::NewFolder => self.open_new_folder_dialog(window, cx),
             BrowserCommand::OpenTerminal => self.open_terminal(window, cx),
+            BrowserCommand::OpenInNewWindow => self.open_selection_in_new_window(cx),
             BrowserCommand::RenameSelection => self.begin_rename(window, cx),
             BrowserCommand::CompressSelection => self.open_compress_dialog(window, cx),
             BrowserCommand::ExtractSelection => self.start_extract_selection(window, cx),
@@ -3234,6 +3241,9 @@ impl Marcel {
                 .is_some_and(|entry| {
                     entry.kind != EntryKind::Directory && is_supported_archive(&entry.path)
                 });
+        // Shown only for a folder, and only where a second window makes sense,
+        // rather than shown disabled beside every file.
+        let new_window_visible = self.command_enabled(BrowserCommand::OpenInNewWindow, cx);
         let copy_enabled = self.command_enabled(BrowserCommand::CopySelection, cx);
         let cut_enabled = self.command_enabled(BrowserCommand::CutSelection, cx);
         let paste_enabled = self.command_enabled(BrowserCommand::PasteFiles, cx);
@@ -3250,7 +3260,9 @@ impl Marcel {
         let window_size = window.bounds().size;
         let menu_height = match menu.target {
             ContextMenuTarget::Entry => {
-                ENTRY_MENU_HEIGHT + if extract_visible { 28.0 } else { 0.0 }
+                ENTRY_MENU_HEIGHT
+                    + if extract_visible { 28.0 } else { 0.0 }
+                    + if new_window_visible { 28.0 } else { 0.0 }
             }
             ContextMenuTarget::CurrentDirectory if self.sidebar.browsing_trash => {
                 DIRECTORY_MENU_HEIGHT + 36.0
@@ -3593,6 +3605,26 @@ impl Marcel {
                                 .child("Enter"),
                         ),
                 )
+                .when(new_window_visible, |this| {
+                    this.child(
+                        h_flex()
+                            .id("entry-menu-open-in-new-window")
+                            .h(px(28.0))
+                            .px_3()
+                            .rounded(radius)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(colors.list_active))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.ui.entry_menu = None;
+                                this.execute_browser_command(
+                                    BrowserCommand::OpenInNewWindow,
+                                    window,
+                                    cx,
+                                );
+                            }))
+                            .child("Open in New Window"),
+                    )
+                })
                 .child(
                     h_flex()
                         .id("entry-menu-open-with")
@@ -4382,6 +4414,27 @@ impl Marcel {
             Notification::error("Open in Terminal is currently available only on Linux"),
             cx,
         );
+    }
+
+    /// The one selected folder, if the selection is exactly that.
+    fn selected_directory(&self) -> Option<&Path> {
+        if self.directory.selection.selected().len() != 1 {
+            return None;
+        }
+        let entry = self.directory.entry(self.directory.selection.primary()?)?;
+        (entry.kind == EntryKind::Directory).then_some(entry.path.as_path())
+    }
+
+    /// Show the selected folder in a window of its own.
+    ///
+    /// Nothing is carried over: the new window is a surface like any other, and
+    /// the journal, clipboard, and bookmarks it reads are the application's
+    /// already.
+    fn open_selection_in_new_window(&mut self, cx: &mut Context<Self>) {
+        let Some(directory) = self.selected_directory().map(Path::to_path_buf) else {
+            return;
+        };
+        let _ = crate::window::open(directory, cx);
     }
 
     fn render_place(&self, index: usize, place: Place, cx: &mut Context<Self>) -> AnyElement {

@@ -8,8 +8,13 @@ durable product, engineering, and release records used to build it.
 Marcel has reached the personal daily-driver milestone. Feature and release work
 remain paused for hardening.
 
-[Sprint 20: cleanup interlude](sprints/020-cleanup-interlude.md) is the current
-document. It closed [Review D](review-2026-08-18.md)'s findings together with
+[Sprint 21: a launch is a window](sprints/021-a-launch-is-a-window.md) is the
+current document. Running `marcel` while Marcel is open now opens a window
+instead of navigating the one in front of you, which is both the conventional
+behaviour and what makes Sprint 20's two-window acceptance matrix something a
+person can actually run.
+
+[Sprint 20: cleanup interlude](sprints/020-cleanup-interlude.md) precedes it. It closed [Review D](review-2026-08-18.md)'s findings together with
 the remaining code queue from
 [Sprint 17](sprints/017-stability-and-architecture-hardening.md),
 [Sprint 18](sprints/018-destination-conflict-decisions.md), and

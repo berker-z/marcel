@@ -22,6 +22,18 @@ where
         .unwrap_or(current_dir)
 }
 
+/// The location a launch hands to a Marcel that is already running.
+///
+/// Always a location, argument or not. `marcel` in a terminal means "show me
+/// this folder", and a launch that forwarded nothing could only ask the running
+/// Marcel to raise whichever window it already had — which is what it used to
+/// do, ignoring the folder the user was standing in.
+pub fn launch_uris(start_path: &Path) -> Option<Vec<String>> {
+    url::Url::from_file_path(start_path)
+        .map(|uri| vec![String::from(uri)])
+        .ok()
+}
+
 pub fn resolve_location(
     value: &str,
     current_dir: &Path,

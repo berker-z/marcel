@@ -79,6 +79,7 @@ pub enum BrowserCommand {
     EmptyTrash,
     NewFolder,
     OpenTerminal,
+    OpenInNewWindow,
     RenameSelection,
     CompressSelection,
     ExtractSelection,

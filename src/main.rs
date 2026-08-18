@@ -1,21 +1,13 @@
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, sync::OnceLock};
-
-use gpui::{App, AppContext, Bounds, Entity, WindowBounds, WindowHandle, WindowOptions, px, size};
-use gpui_component::Root;
-use marcel::Marcel;
+use gpui::App;
+use marcel::window;
 
 fn main() {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let has_location_argument = !arguments.is_empty();
     let start_path = marcel::launch::start_path(arguments, current_dir);
 
     let desktop_runtime = {
-        let initial_uris = has_location_argument.then(|| {
-            url::Url::from_file_path(&start_path)
-                .map(|uri| vec![uri.into()])
-                .unwrap_or_default()
-        });
+        let initial_uris = marcel::launch::launch_uris(&start_path);
         match smol::block_on(marcel::desktop_integration::acquire_or_forward(
             initial_uris,
         )) {
@@ -34,22 +26,16 @@ fn main() {
         marcel::theme::init(cx);
         marcel::commands::init(cx);
         marcel::operations::init(cx);
+        marcel::window::init(cx);
 
-        let initial_window = open_marcel_window(start_path.clone(), cx)
-            .expect("failed to open Marcel's initial window");
+        window::open(start_path.clone(), cx).expect("failed to open Marcel's initial window");
 
         if let Some(runtime) = desktop_runtime {
             let requests = runtime.requests();
-            let windows = Rc::new(RefCell::new(vec![initial_window]));
-            let windows_on_close = windows.clone();
-            let window_close_subscription = cx.on_window_closed(move |cx, _| {
-                prune_closed_windows(&mut windows_on_close.borrow_mut(), cx);
-            });
             cx.spawn(async move |cx| {
                 let _runtime = runtime;
-                let _window_close_subscription = window_close_subscription;
                 while let Ok(request) = requests.recv().await {
-                    cx.update(|cx| handle_desktop_request(request, &mut windows.borrow_mut(), cx));
+                    cx.update(|cx| handle_desktop_request(request, cx));
                 }
                 Ok::<_, anyhow::Error>(())
             })
@@ -60,139 +46,87 @@ fn main() {
     });
 }
 
-#[derive(Clone)]
-struct MarcelWindow {
-    handle: WindowHandle<Root>,
-    view: Entity<Marcel>,
-}
-
-fn open_marcel_window(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
-    let bounds = Bounds::centered(None, size(px(1200.0), px(760.0)), cx);
-    let mut view = None;
-    let handle = cx.open_window(
-        WindowOptions {
-            app_id: Some(marcel::desktop_integration::APPLICATION_ID.to_string()),
-            icon: window_icon(),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Marcel".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        |window, cx| {
-            window.set_window_title("Marcel");
-            let marcel = cx.new(|cx| Marcel::new(path, window, cx));
-            marcel.update(cx, |view, cx| view.focus_browser(window, cx));
-            view = Some(marcel.clone());
-            cx.new(|cx| Root::new(marcel, window, cx))
-        },
-    )?;
-
-    Ok(MarcelWindow {
-        handle,
-        view: view.expect("window builder must initialize Marcel"),
-    })
-}
-
-fn window_icon() -> Option<Arc<image::RgbaImage>> {
-    static ICON: OnceLock<Arc<image::RgbaImage>> = OnceLock::new();
-    if let Some(icon) = ICON.get() {
-        return Some(icon.clone());
-    }
-    let icon = Arc::new(
-        image::load_from_memory(include_bytes!(
-            "../assets/icons/hicolor/256x256/apps/io.github.berker_z.Marcel.png"
-        ))
-        .ok()?
-        .into_rgba8(),
-    );
-    let _ = ICON.set(icon.clone());
-    Some(icon)
-}
-
-fn handle_desktop_request(
-    request: marcel::desktop_integration::DesktopRequest,
-    windows: &mut Vec<MarcelWindow>,
-    cx: &mut App,
-) {
+fn handle_desktop_request(request: marcel::desktop_integration::DesktopRequest, cx: &mut App) {
     use marcel::desktop_integration::{DesktopRequest, RevealedLocation};
 
-    prune_closed_windows(windows, cx);
+    let registry = window::global(cx);
+    registry.update(cx, |registry, cx| registry.prune(cx));
+    // A launch gets a window of its own; only a reveal may take over the one
+    // the user is reading.
+    let may_reuse = window::may_reuse_a_window(&request);
     match request {
+        // Clicking an application's icon means "show me the Marcel I have",
+        // not "give me another one". A launch is the other signal, and it
+        // arrives as `Open`.
         DesktopRequest::Activate => {
             cx.activate(true);
-            if let Some(active) = windows.last() {
-                let _ = active
+            let current = registry.read(cx).current(cx);
+            if let Some(current) = current {
+                let _ = current
                     .handle
                     .update(cx, |_, window, _| window.activate_window());
             }
         }
         DesktopRequest::Open(locations) | DesktopRequest::ShowItems(locations) => {
-            open_desktop_locations(locations, windows, cx);
+            show_locations(locations, may_reuse, cx);
         }
-        DesktopRequest::ShowFolders(folders) => {
-            open_desktop_locations(
-                folders
-                    .into_iter()
-                    .map(|directory| RevealedLocation {
-                        directory,
-                        items: Vec::new(),
-                    })
-                    .collect(),
-                windows,
-                cx,
-            );
-        }
+        DesktopRequest::ShowFolders(folders) => show_locations(
+            folders
+                .into_iter()
+                .map(|directory| RevealedLocation {
+                    directory,
+                    items: Vec::new(),
+                })
+                .collect(),
+            may_reuse,
+            cx,
+        ),
         DesktopRequest::ShowItemProperties(_) => {}
     }
 }
 
-fn open_desktop_locations(
+/// Show each location, in a window each, reusing one for the first if allowed.
+fn show_locations(
     locations: Vec<marcel::desktop_integration::RevealedLocation>,
-    windows: &mut Vec<MarcelWindow>,
+    may_reuse: bool,
     cx: &mut App,
 ) {
+    let registry = window::global(cx);
     for (index, location) in locations.into_iter().enumerate() {
-        let directory = location.directory;
-        let reveal = location.items;
-        let reused_existing = if index == 0 {
-            windows.last().is_some_and(|active| {
-                let directory = directory.clone();
-                let reveal = reveal.clone();
-                active
+        let reused = may_reuse
+            && index == 0
+            && registry.read(cx).current(cx).is_some_and(|current| {
+                let directory = location.directory.clone();
+                let items = location.items.clone();
+                current
                     .handle
                     .update(cx, |_, window, cx| {
-                        active.view.update(cx, |view, cx| {
-                            view.open_external_location(directory, reveal, window, cx);
+                        current.view.update(cx, |view, cx| {
+                            view.open_external_location(directory, items, window, cx);
                         });
                         window.activate_window();
                     })
                     .is_ok()
-            })
-        } else {
-            false
-        };
-        if reused_existing {
-            continue;
-        }
-
-        if let Ok(window) = open_marcel_window(directory.clone(), cx) {
-            if !reveal.is_empty() {
-                let _ = window.handle.update(cx, |_, gpui_window, cx| {
-                    window.view.update(cx, |view, cx| {
-                        view.open_external_location(directory, reveal, gpui_window, cx);
-                    });
-                });
-            }
-            windows.push(window);
+            });
+        if !reused {
+            open_new_window(location, cx);
         }
     }
     cx.activate(true);
 }
 
-fn prune_closed_windows(windows: &mut Vec<MarcelWindow>, cx: &App) {
-    windows.retain(|window| window.handle.read(cx).is_ok());
+fn open_new_window(location: marcel::desktop_integration::RevealedLocation, cx: &mut App) {
+    let Ok(opened) = window::open(location.directory.clone(), cx) else {
+        return;
+    };
+    if location.items.is_empty() {
+        return;
+    }
+    let _ = opened.handle.update(cx, |_, window, cx| {
+        opened.view.update(cx, |view, cx| {
+            view.open_external_location(location.directory, location.items, window, cx);
+        });
+    });
 }
 
 #[cfg(test)]
@@ -201,7 +135,7 @@ mod tests {
 
     #[test]
     fn bundled_window_icon_decodes_at_the_declared_size() {
-        let icon = window_icon().expect("bundled Marcel icon must decode");
+        let icon = window::window_icon().expect("bundled Marcel icon must decode");
         assert_eq!((icon.width(), icon.height()), (256, 256));
     }
 }
