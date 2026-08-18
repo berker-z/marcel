@@ -1,161 +1,107 @@
 # Marcel
 
-Marcel is a fast, preview-first graphical file explorer built with Rust,
-[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and
-[gpui-component](https://github.com/longbridge/gpui-component).
+A graphical file manager for Linux, written in Rust. Fast, built around a preview pane that is genuinely useful, and careful about touching your files. It does not depend on GTK or Qt.
 
-It is a conventional, pointer-friendly file manager—not a terminal file
-manager transplanted into a window. Its defining interface is a persistent,
-responsive preview pane alongside list and icon views.
+Marcel renders its own interface through GPUI (https://github.com/zed-industries/zed), the UI framework behind Zed, so it doesn't pull in a desktop toolkit or inherit its theming and startup cost. Select a file and you see it straight away: text, images, PDFs, or the contents of a folder.
 
-## Alpha status
+It borrows heavily from Yazi (https://github.com/sxyazi/yazi). The filesystem layer, the incremental directory updates, the preview scheduling, and the copy semantics are all built on ideas taken from reading Yazi's source. Marcel is a graphical application rather than a terminal one, so the interface is its own, but the parts underneath owe Yazi a lot. `THIRD_PARTY_NOTICES.md` records what was adapted, file by file, down to the upstream commit.
 
-Marcel is a working Linux-first **pre-release alpha**. It already performs real
-filesystem mutations, including copy, move, Trash, restore, and permanent
-deletion. Use disposable data while evaluating it and keep backups of anything
-important.
+## Status
 
-The Nix flake provides an installable package, application, and downstream
-overlay, and that package has been tested in a real NixOS configuration.
-Marcel does not yet publish stable release artifacts or promise configuration
-compatibility between alpha versions.
+Alpha. I use Marcel as my daily file manager, and it has been through two rounds of external review focused on filesystem safety. It has not been used widely by anyone else yet.
 
-### Browsing and interaction
+Copy, move, rename, Trash, restore, archive creation, and extraction can all be undone. Marcel checks that files are still what and where it thinks they are before touching them, and refuses rather than guessing. Permanent deletion is the exception.
 
-- Asynchronous, incremental directory enumeration with virtualized list and
-  icon views.
-- Native directory watching with coalesced incremental updates, polling
-  fallback, and stale-generation protection.
-- Incremental reconciliation after Marcel-owned file operations, preserving
-  the active directory session and scroll position instead of flashing through
-  a full reload.
-- Conventional click, Control-click, Shift-click, keyboard, and empty-space
-  marquee selection.
-- Back, forward, parent, Places, XDG user directories, and navigation history.
-- Clickable path breadcrumbs with compact narrow-window presentation and
-  `Ctrl+L` editing for paths and local `file://` URIs.
-- Window-wide type-to-filter fuzzy matching for the current directory.
-- Persistent bookmarks created by dragging folders into the sidebar, with
-  pointer reordering and safe removal.
-- Internal drag-and-drop moves onto browser folders, Places, and bookmarks,
-  including edge auto-scroll and operation-specific drop feedback.
-- Native Wayland file drag-and-drop with browsers, desktops, and other file
-  managers. Incoming external files are copied through Marcel's bounded,
-  cancellable, no-overwrite transfer path.
-- A private Nordzy semantic-icon baseline, explicit theme overrides, ambient
-  GTK fallback for uncovered names, and progressive image thumbnails backed
-  by the standard freedesktop thumbnail cache.
-- Resizable browser and preview workspace with a fixed, content-sized Places
-  sidebar.
+Back up anything you would be upset to lose.
 
-### Preview pane
+Linux only. Wayland is the tested target. X11 mostly works, but dragging files out of Marcel into other applications is not implemented there.
 
-- Still images and animated GIFs.
-- Continuously scrollable PDF pages rendered through bounded Poppler worker
-  processes and an identity-aware page cache.
-- Rendered Markdown, source code, plain text, and generic file metadata.
-- Bounded text work: reads stop at 256 KiB, rich rendering stops at 32 KiB, and
-  larger files use a Unicode-aware, soft-wrapped, virtualized fallback.
-- Cancellable folder previews that stream a selected directory's immediate
-  children without recursively scanning it or creating a second selection
-  model.
-- Default application opening through GIO, with a desktop-portal fallback and
-  an explicit portal-backed **Open With…** chooser.
-- **Open in Terminal** for the displayed directory, with default-terminal and
-  cross-desktop fallbacks.
+<!-- screenshot goes here -->
+
+## What it does
+
+### Browsing
+
+List and grid views. Breadcrumbs, plus `Ctrl+L` to type a path. Start typing to filter the current folder with fuzzy matching. Marquee and keyboard selection. Bookmarks and the usual XDG places in a sidebar. Folders update as they change on disk instead of reloading. Comfortable at 50,000 entries.
+
+### Preview
+
+Text and code files, images, PDFs with continuous scrolling, and a listing of what a folder holds. Thumbnails use the freedesktop cache, so they are shared with other applications rather than duplicated.
 
 ### File operations
 
-- New Folder with conflict refusal and identity-validating Undo/Redo.
-- Multi-selection Copy, Cut, and Paste within Marcel.
-- Same-filesystem moves, including pointer-driven internal moves.
-- Bottom-right item/byte progress, cancellation for safe-to-cancel transfers,
-  and explicit partial-success reporting.
-- Native freedesktop Trash placement, an aggregated Trash entry in Places,
-  exact-entry Restore, and identity-validating Trash Undo/Redo.
-- Confirmed permanent deletion through `Shift+Delete` or the item menu,
-  including selected deletion inside Trash and **Empty Trash**.
-- ZIP creation for files, directories, and multi-selection, plus safe
-  broad-format **Extract** beside an archive through a supervised 7-Zip
-  backend. Both support cancellation and identity-validating Undo/Redo.
-- A bounded operation journal with centralized command state shared by
-  shortcuts, menus, and toolbar controls.
+Copy and move with progress and cancellation. When a destination is taken, Marcel asks: replace, rename, skip, or merge the two folders, and you can answer once for the rest of the operation. Undo and redo. Move to Trash and restore. Permanent deletion behind a confirmation, kept out of undo history. Inline rename. Create folders. Create zip archives, extract most common formats.
 
-Marcel never silently overwrites, merges, or invents a destination name.
-Occupied destinations are refused. Copy outputs are assembled under hidden
-staging names and published with Linux `RENAME_NOREPLACE`.
+### Desktop integration
 
-Successful local copies preserve regular-file contents, directory structure,
-symlinks without following them, supported modes and timestamps, `user.*`
-xattrs, POSIX ACL attributes, sparse extents, and hardlinks within one copied
-tree. See [Copy semantics](docs/copy-semantics.md) for the exact contract and
-intentional non-goals.
+Drag files to and from other applications on Wayland. Registers as a file manager over D-Bus, so "show in folder" from other applications works. One Marcel process per session, and running `marcel` again opens a new window rather than taking over the one you were using.
 
-Permanent deletion is never placed in Undo history. After explicit
-confirmation, Marcel atomically quarantines the complete top-level selection,
-plans a no-symlink-follow traversal, revalidates filesystem identities, and
-removes leaves before directories. It is intentionally not cancellable once
-erasure begins because cancellation would itself be a partial destructive
-result.
+### Appearance
 
-## Keyboard essentials
+Several built-in themes. Marcel ships its own icons and font and uses them first, so it looks the same on a bare system. It falls back to your system icon theme only for icons it doesn't ship, and an explicit theme setting overrides both.
 
-| Shortcut | Action |
-|---|---|
-| Arrow keys | Move the primary selection |
-| `Shift` + navigation | Extend the selection |
-| `Enter` | Open the primary item |
-| `Ctrl+Up` | Open the parent directory |
-| `Ctrl+Left` / `Ctrl+Right` | Back / forward |
-| `Ctrl+L` | Edit the current location |
-| `Ctrl+A` | Select all |
-| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
-| `Delete` | Move the selection to Trash |
-| `Shift+Delete` | Confirm permanent deletion |
-| `Ctrl+Shift+N` | New Folder |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
-| `Ctrl+F` | Focus the current-directory filter |
-| `Escape` | Clear the active filter or selection state |
+## Keyboard shortcuts
 
-Direct typing starts filtering regardless of whether the browser or preview
-currently has focus, but yields to dialogs and other text editors. Filtering is
-in-memory and limited to the current directory; it is not recursive search.
+| Key                                              | Action               |
+| ------------------------------------------------ | -------------------- |
+| Arrow keys                                       | Move selection       |
+| Home / End                                       | First / last item    |
+| Page Up / Page Down                              | Move a page          |
+| Enter                                            | Open                 |
+| Escape                                           | Clear selection      |
+| Ctrl+Up                                          | Parent folder        |
+| Ctrl+Left / Ctrl+Right                           | Back / forward       |
+| Ctrl+L                                           | Edit the location    |
+| Ctrl+F                                           | Focus the filter     |
+| any character                                    | Start filtering      |
+| Shift with arrows, Home, End, Page Up, Page Down | Extend the selection |
+| Ctrl+A                                           | Select all           |
+| Ctrl+C / Ctrl+X / Ctrl+V                         | Copy / cut / paste   |
+| Delete                                           | Move to Trash        |
+| Shift+Delete                                     | Delete permanently   |
+| Ctrl+Shift+N                                     | New folder           |
+| F2                                               | Rename               |
+| Ctrl+Z / Ctrl+Y                                  | Undo / redo          |
 
-## Installation
+## What it does not do
 
-### Nix flake (currently supported)
+Known gaps, roughly in the order they are likely to be addressed:
 
-Run Marcel without installing it:
+* No search. You can filter the folder you are in, but there is no recursive search by name or content.
+* No Properties dialog and no New File. Both are planned.
+* Moving between filesystems is refused. Marcel will not quietly turn a move across drives into a copy followed by a delete. It says it cannot do it. Copying across drives works.
+* No Duplicate or Move To.
+* No removable volumes, network shares, or remote locations. Local paths only.
+* No media playback, and no thumbnails for video.
+* Sorting is fixed, and preferences other than view mode and hidden files are not persisted.
+* Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer.
+* RAR extraction needs a separate build. The default package ships only free components.
+* No Flatpak. Nix is the only packaging route today.
+
+Not planned: tabs, as I do not like them very much.
+
+## Installing
+
+Marcel ships as a Nix flake.
+
+Run it without installing anything:
 
 ```sh
 nix run github:berker-z/marcel -- ~/Downloads
 ```
 
-Install the current package into a user profile:
-
-```sh
-nix profile install github:berker-z/marcel
-```
-
-These commands currently follow `master`; pin a commit for reproducible
-personal use:
-
-```sh
-nix profile install github:berker-z/marcel/FULL_COMMIT_HASH
-```
-
-### Use from another Nix flake
-
-Add Marcel as an input:
+To install it properly, add Marcel to your system flake:
 
 ```nix
-inputs.marcel = {
-  url = "github:berker-z/marcel";
-  inputs.nixpkgs.follows = "nixpkgs";
-};
+{
+  inputs.marcel = {
+    url = "github:berker-z/marcel";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+}
 ```
 
-Apply its overlay and install the package:
+Then apply its overlay and install the package:
 
 ```nix
 {
@@ -164,267 +110,48 @@ Apply its overlay and install the package:
 }
 ```
 
-This installs Marcel without changing any MIME association or generic
-file-manager D-Bus ownership. Marcel's default package uses nixpkgs' free
-`_7zz` backend and does not require `allowUnfree`.
+Installing Marcel does not change your MIME associations and does not take over the generic file manager registration on D-Bus. Both are opt-in, and are covered in `docs/release.md`.
 
-### Declarative Marcel settings
+## Declarative settings
 
-The flake exports Home Manager and NixOS modules for declarative visual
-configuration. With Home Manager:
+The flake exports NixOS and Home Manager modules for theme, icon theme, and font:
 
 ```nix
 {
-  imports = [inputs.marcel.homeManagerModules.default];
+  imports = [inputs.marcel.nixosModules.default];
 
   programs.marcel = {
     enable = true;
     settings = {
       theme = "tokyo-night";
-      icon_theme = "Breeze";
-      ui_font = "IBM Plex Mono";
+      icon_theme = null;
+      ui_font = null;
     };
   };
 }
 ```
 
-Use `imports = [inputs.marcel.nixosModules.default]` for the same
-`programs.marcel` options in a NixOS module. Both modules install a configured
-wrapper while leaving MIME defaults and generic FileManager1 ownership alone.
-Set `icon_theme = null` to preserve Marcel's Nordzy-first icon resolution and
-`ui_font = null` to use bundled Iosevka; both are the defaults.
+`imports = [inputs.marcel.homeManagerModules.default]` gives the same options per user. Leaving `icon_theme` and `ui_font` as `null` keeps Marcel's bundled icons and font, which is the default.
 
-View mode and Show Hidden are deliberately not Nix options. Marcel treats them
-as interaction state and remembers the last selected values in
-`$XDG_CONFIG_HOME/marcel/state.conf`, or `~/.config/marcel/state.conf` when
-`XDG_CONFIG_HOME` is unset. First-run defaults are grid view with hidden files
-visible.
+View mode and hidden file visibility are deliberately not Nix options. Marcel treats them as interaction state and remembers what you last chose in `$XDG_CONFIG_HOME/marcel/state.conf`.
 
-When using the overlay directly, the same wrapper is available without a
-module:
-
-```nix
-environment.systemPackages = [
-  (pkgs.marcel.withSettings {
-    theme = "gruvbox-dark";
-    icon_theme = null;
-    ui_font = null;
-  })
-];
-```
-
-The flake separately exposes `packages.<system>.file-manager1-service` as a
-complete wrapped Marcel package for a downstream configuration that explicitly
-wants Marcel to own the generic `org.freedesktop.FileManager1` activation
-service. Install this variant instead of the ordinary `marcel` output; its
-wrapper and both activation files consistently request the branded and generic
-names.
-
-For Home Manager, make Marcel the default directory handler declaratively:
-
-```nix
-{
-  xdg.mimeApps = {
-    enable = true;
-    associations.added."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
-    defaultApplications."inode/directory" = ["io.github.berker_z.Marcel.desktop"];
-  };
-}
-```
-
-The desktop identifier is `io.github.berker_z.Marcel.desktop`.
-`marcel.desktop` remains a hidden compatibility alias. Marcel does not claim
-ZIP, 7z, RAR, tar, or other archive MIME types.
-
-### Fonts and icons
-
-Marcel ships a private, compact Iosevka Mono subset and a curated private
-subset of twenty Nordzy semantic icons. Regular and semibold font faces plus
-the SVG icons and their licenses occupy approximately 804 KiB uncompressed,
-instead of depending on a complete Nerd Font or the approximately 89 MiB
-Nordzy package.
-
-The bundled resources provide Marcel's deliberate default appearance without
-installing a font or icon theme system-wide. An explicit Marcel icon-theme
-override replaces Nordzy; the ambient GTK theme does not. Instead, the GTK
-theme supplies icons missing from Marcel's curated bundle before the final
-generic-glyph fallback. Both the UI and monospace text roles use the private
-`Marcel Iosevka` family by default. Set `MARCEL_FONT_FAMILY` to the exact name
-of an installed family to override both roles. Marcel's own branded launcher
-icon remains a separate original asset that must be added before the first
-release.
-
-The pinned upstream versions, hashes, Unicode ranges, licenses, and
-reproducible generator live in [`assets/README.md`](assets/README.md) and
-[`scripts/build_identity_assets.py`](scripts/build_identity_assets.py).
-
-There are no nixpkgs or Flatpak/Flathub releases yet. Until the first tagged
-release, the repository flake is the supported installation route.
-
-## Development
-
-Run the local packaged application against a path:
-
-```sh
-nix run . -- ~/Downloads
-```
-
-Or enter the reproducible development shell:
+## Building
 
 ```sh
 nix develop
 cargo run
 ```
 
-Without an argument, Marcel opens the directory it was launched from. It also
-accepts absolute or relative local paths and `file://` URIs. Release mode is
-substantially faster for large directories and thumbnail-heavy views:
+The development shell is required. A plain shell will not find the system libraries the build needs.
 
-```sh
-cargo run --release
-```
+## Credits
 
-The first build is intentionally large because GPUI, gpui-component, image
-decoders, and other dependencies must be compiled. Dependencies are optimized
-even in Marcel's development profile so decode and rendering behavior remains
-representative; subsequent Marcel-only builds are incremental.
+Built with GPUI (https://github.com/zed-industries/zed) (Apache-2.0) and gpui-component (https://github.com/longbridge/gpui-component). PDF rendering goes through Poppler, archives through 7-Zip. Icons are a small subset of Nordzy (https://github.com/alvatip/Nordzy-icon) (GPL-3.0) and the bundled font is a subset of Iosevka (https://github.com/be5invis/Iosevka) (SIL OFL).
 
-The Nix shell supplies the current stable Rust toolchain from the locked
-`nixpkgs` and `rust-overlay` inputs, plus Poppler, FFmpeg, the free official
-7-Zip backend, and native GPUI dependencies. Update the environment
-intentionally:
+And Yazi, again, for most of the thinking underneath.
 
-```sh
-nix flake update
-cargo update
-```
+## License
 
-Build the installable package and desktop metadata with:
+MIT, see `LICENSE`.
 
-```sh
-nix build
-```
-
-The package installs `marcel`, the branded
-`io.github.berker_z.Marcel.desktop` entry, a hidden `marcel.desktop`
-compatibility alias, the branded D-Bus activation service, Poppler/GIO runtime
-tools, and a private free 7-Zip backend. RAR and CBR extraction are disabled in
-the default package because their decoder is non-free. Advanced users can opt
-in with both `MARCEL_7ZZ=/path/to/rar-capable-7zz` and
-`MARCEL_ENABLE_RAR=1`. Marcel advertises only `inode/directory`; archive
-double-click behavior remains owned by the user's archive viewer.
-
-Required checks:
-
-```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-```
-
-Nord is the default semantic palette. The Settings button beside the
-list/icon-view control opens a theme selector whose changes apply immediately.
-Marcel currently includes Nord, Gruvbox Dark, Tokyo Night, Catppuccin Mocha,
-Dracula, One Dark, Solarized Dark, Everforest Dark, Rosé Pine, Kanagawa Wave,
-System Dark, and System Light. Development-facing palette and icon-theme
-overrides are also available:
-
-```sh
-MARCEL_THEME=tokyo-night cargo run
-MARCEL_THEME=catppuccin-mocha cargo run
-MARCEL_ICON_THEME=breeze cargo run
-MARCEL_FONT_FAMILY="IBM Plex Mono" cargo run
-```
-
-The Places footer exposes Show Hidden, list/icon view, and the Settings button.
-Font selection has one source of truth rather than a session toggle: bundled
-Iosevka Mono unless `MARCEL_FONT_FAMILY` explicitly selects an installed
-family.
-
-## Known limitations
-
-Marcel is not ready to replace a mature system file manager for every workflow:
-
-- A read-only Properties presentation, non-Nix release artifacts, and release
-  automation are not implemented. Marcel's branded application icon is
-  installed by the Nix package and used for X11 window metadata.
-  Branded D-Bus activation, single-instance routing, and the FileManager1
-  navigation methods are implemented. Installing the ordinary package still
-  does not take ownership of the generic file-manager D-Bus service.
-- Native file drag-and-drop is implemented inbound on Wayland and X11 and
-  outbound on Wayland. X11 outbound support and desktop clipboard
-  interoperability remain open.
-- Cut/move is currently same-filesystem. Cross-filesystem moves and interactive
-  conflict decisions are parked; occupied destinations are safely refused.
-- New File, Duplicate, Move To, and Properties are not implemented yet.
-- Removable-volume navigation, mount management, and remote locations are not
-  implemented. Disposable mounted-volume Trash, restore, and read-only failure
-  behavior pass their manual acceptance checks.
-- Trashed directories can be previewed but not navigated as virtual locations.
-- Loaded folders warn about interrupted `.marcel-delete-*` quarantine remnants
-  and give conservative recovery guidance. Partial failures also report the
-  exact remnant path; a one-click recovery UI is not implemented.
-- Recursive filename/content search is not implemented.
-- Audio/video metadata, explicit playback, and ebook previews are not
-  implemented.
-- List/grid view and hidden-file visibility persist as interaction state.
-  Broader preference persistence—including pane sizes, sorting, and zoom—is
-  still roadmap work; visual identity is declaratively configurable on Nix.
-- Sorting, grouping, zoom, and complete accessibility coverage remain roadmap
-  work.
-- PDF resizing has a non-blocking visual quirk that is explicitly parked.
-  Thumbnail failure/loading presentation is complete; the remaining manual
-  fixture matrix still needs closure.
-
-## Roadmap
-
-The personal daily-driver milestone is reached. Marcel is now in a deliberate
-hardening phase: new features and public-release work are parked while the
-remaining filesystem, desktop-integration, and recovery acceptance matrix is
-run.
-
-1. Finish Sprint 17's remaining high-DPI, token-bearing activation, and
-   interaction acceptance passes.
-2. Fix any correctness, recovery, diagnostics, or ownership defects those
-   checks expose, with focused regression tests.
-3. Resume Sprint 16 only when public release work is wanted; it owns hosted CI,
-   public documentation, artwork, AppStream metadata, and release presentation.
-4. Resume Properties, New File, Duplicate, Move To, desktop clipboard, remote
-   locations, media playback, and other feature work only after hardening is
-   accepted.
-
-The authoritative cross-sprint roadmap lives in the
-[product backlog](docs/TODO.md). The
-[release and distribution plan](docs/release.md) records packaging caveats,
-release automation, and the routes to nixpkgs and other Linux distributions.
-The
-[interaction model](docs/interaction-model.md) defines selection, shortcuts,
-menus, reversibility, and destructive-operation behavior. Detailed
-implementation and acceptance history is recorded under
-[`docs/sprints/`](docs/sprints/). Marcel has progressed through seventeen
-numbered implementation sprints. The automated portion of
-[Sprint 17](docs/sprints/017-stability-and-architecture-hardening.md) is
-implemented and awaits its desktop/manual acceptance matrix;
-[Sprint 16](docs/sprints/016-public-release-presentation.md) is intentionally
-deferred.
-
-## Acknowledgements and provenance
-
-[Yazi](https://github.com/sxyazi/yazi) is a major inspiration and an explicit
-source of architectural ideas and MIT-licensed implementations. Marcel is
-deliberately transparent about that relationship: meaningful conceptual and
-code adaptations are identified near the relevant implementation and recorded
-with upstream files, commits, licenses, and the nature of reuse in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-[Zed](https://github.com/zed-industries/zed) is the primary real-world
-reference for using GPUI. We study Zed's application source as practical GPUI
-documentation, but do not copy GPL-covered Zed application code into Marcel.
-GPUI itself is Apache-2.0.
-
-[gpui-component](https://github.com/longbridge/gpui-component) is Marcel's
-default component library. We prefer an existing component over custom UI
-unless a measured performance, missing interaction, or accessibility
-requirement gives us a concrete reason not to.
-
-Marcel is licensed under the [MIT License](LICENSE).
+Bundled assets keep their own licenses, which are not MIT. The icon set is GPL-3.0 and the font is under the SIL Open Font License. Full details, along with the record of adapted code, are in `THIRD_PARTY_NOTICES.md`.

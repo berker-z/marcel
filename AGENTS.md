@@ -44,6 +44,19 @@ media inspection off GPUI's foreground executor. Preview work must be
 cancellable or safely superseded, bounded in memory use, and unable to publish
 stale results as current.
 
+## Keyboard shortcuts
+
+The README carries the user-facing list of shortcuts. That list is what people
+read instead of the source, so update it in the same change that adds, removes,
+or rebinds one. A shortcut that only exists in the code is a shortcut nobody
+knows about, and a documented one that no longer works is worse.
+
+Shortcuts are registered in two places, so check both before editing the list:
+
+- `commands.rs` registers the ordinary bindings through `KeyBinding::new`.
+- `app.rs`'s `on_window_key_down` handles the ones that must keep working while
+  another surface holds focus, currently `Ctrl+L` and `Ctrl+F`.
+
 ## Quality checks
 
 Before considering a change complete, run:

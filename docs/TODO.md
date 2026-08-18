@@ -452,13 +452,15 @@ The packaging contract, current dependency caveats, target formats, and
 
 ## Documentation and public presentation
 
-- Restructure the root README into a product-first landing page:
-  - short identity statement and maturity/support badge;
-  - one representative hero image or short GIF before implementation detail;
-  - compact feature tour and safety expectations;
-  - platform-neutral installation table;
-  - configuration/state distinction;
-  - links to focused contributor, release, roadmap, and architecture docs.
+- [x] Restructure the root README into a product-first landing page: identity
+  statement, alpha status and safety expectations, feature tour, keyboard
+  shortcuts, honest gap list, installation, declarative settings, credits, and
+  licensing. Maintainer detail moved out rather than being summarized twice, and
+  the roadmap prose is gone because this file is the roadmap. One hole remains:
+  the page reserves a spot for a hero image and there is no screenshot yet.
+- The support matrix and the reserved sections for artifacts that do not exist
+  are deliberately absent. Nix is the only route today and the README says so in
+  one line; a table of empty rows advertises formats Marcel does not ship.
 - Record and optimize a short deterministic GIF showing navigation, filtering,
   preview, list/grid switching, and one safe file action. Avoid personal paths
   or data, provide meaningful alt text, include a static fallback image, and
