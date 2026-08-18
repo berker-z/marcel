@@ -7,6 +7,7 @@
   makeWrapper,
   pkg-config,
   cmake,
+  lld,
   dbus,
   alsa-lib,
   expat,
@@ -48,9 +49,16 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   # rustc recommends increasing its worker-thread stack when LLVM exhausts the
   # default during code generation. Marcel's thin-LTO release build has
-  # otherwise produced a nondeterministic libLLVM.so crash with LLVM 21, while
-  # this size completed the same package build without changing optimization.
-  RUST_MIN_STACK = "16777216";
+  # otherwise produced a nondeterministic libLLVM.so crash with LLVM 21, in
+  # `gpui_linux` rather than in Marcel's own code.
+  #
+  # 16 MiB held for a while and then stopped: the same crash returned on
+  # rustc 1.97.1 with LLVM 21.1.8, in `SimplifyCFGPass`. This is the size rustc
+  # itself names in the failure, and it changes no optimization setting. If it
+  # comes back again, the fix is not to keep doubling this in the dark: capture
+  # which crate and which LLVM pass, because a stack that large usually means
+  # one function is being inlined into something enormous.
+  RUST_MIN_STACK = "33554432";
 
   src = lib.fileset.toSource {
     root = ../.;
@@ -74,12 +82,25 @@ rustPlatform.buildRustPackage (finalAttrs: {
     };
   };
 
+  # Link with LLD rather than the default `ld.bfd`.
+  #
+  # GNU ld fails this package's thin-LTO link with `.eh_frame_hdr refers to
+  # overlapping FDEs`, a long-standing interaction between LTO output and
+  # ld.bfd's exception-table merging rather than anything wrong with the
+  # objects. LLD merges the same input without complaint, and pairing it with
+  # an LLVM-produced LTO build is the more usual combination anyway.
+  #
+  # Turning thin-LTO off would also clear the error. That trades a real
+  # optimization away to accommodate one linker, so the linker moves instead.
+  RUSTFLAGS = "-C link-arg=-fuse-ld=lld";
+
   nativeBuildInputs = [
     rustPlatform.bindgenHook
     copyDesktopItems
     makeWrapper
     pkg-config
     cmake
+    lld
   ];
 
   nativeCheckInputs = [ dbus ];
