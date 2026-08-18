@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 
 use crate::{
-    delete_ops::delete_trash_backings,
+    delete_ops::{RenameIdentity, delete_trash_backings},
     file_ops::TransferProgress,
     local_fs::{PathOccupancy, path_occupancy, rename_no_replace},
 };
@@ -75,13 +75,39 @@ pub fn path_overlaps_system_trash(path: &Path) -> Result<bool> {
         .any(|root| paths_overlap_trash_root(path, root)))
 }
 
-pub fn list_trash_records() -> Result<Vec<TrashRecord>> {
-    let records = trash::os_limited::list()
-        .context("Could not inspect the system Trash")?
-        .into_iter()
-        .filter_map(|item| record_from_item(item).ok())
-        .collect();
-    Ok(records)
+/// What one enumeration of the system Trash found.
+///
+/// `unreadable` exists because dropping entries Marcel cannot describe made the
+/// listing look complete when it was not — and made Empty Trash offer to empty
+/// a Trash it had only partly seen.
+#[derive(Debug, Default)]
+pub struct TrashListing {
+    pub records: Vec<TrashRecord>,
+    pub unreadable: Vec<String>,
+}
+
+/// One sentence naming what a Trash listing could not describe, if anything.
+pub fn unreadable_trash_warning(unreadable: &[String]) -> Option<String> {
+    let first = unreadable.first()?;
+    Some(if unreadable.len() == 1 {
+        format!("One Trash entry could not be read and is not shown: {first}")
+    } else {
+        format!(
+            "{} Trash entries could not be read and are not shown (first: {first})",
+            unreadable.len()
+        )
+    })
+}
+
+pub fn list_trash_records() -> Result<TrashListing> {
+    let mut listing = TrashListing::default();
+    for item in trash::os_limited::list().context("Could not inspect the system Trash")? {
+        match record_from_item(item) {
+            Ok(record) => listing.records.push(record),
+            Err(error) => listing.unreadable.push(error.to_string()),
+        }
+    }
+    Ok(listing)
 }
 
 pub fn purge_trash_records(
@@ -112,11 +138,21 @@ pub fn purge_trash_records(
         }
     }
 
-    let backing_paths = records
+    // Carry the identity each record was just validated against into the
+    // deletion, so the purge and the delete agree on which object they mean.
+    let backings = records
         .iter()
-        .map(|record| record.backing_path.clone())
+        .map(|record| {
+            (
+                record.backing_path.clone(),
+                RenameIdentity::new(
+                    record.payload_identity.device,
+                    record.payload_identity.inode,
+                ),
+            )
+        })
         .collect::<Vec<_>>();
-    let deleted = delete_trash_backings(&backing_paths, progress);
+    let deleted = delete_trash_backings(&backings, progress);
     let mut completed = Vec::new();
     let mut failures = deleted
         .failures
@@ -626,8 +662,38 @@ fn object_key(metadata: &fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
+/// Whether `path` lies inside a Trash root, or contains one.
+///
+/// Compared physically rather than lexically. A symbolic link anywhere above
+/// the path gives the same directory two spellings, and a prefix test on the
+/// spelling the user happened to type sees only one of them — so a Trash root
+/// reachable through a link would not be recognized as one.
+///
+/// The object itself is deliberately left unresolved: deleting a symbolic link
+/// that points into the Trash removes the link, not what it points at, and
+/// resolving the leaf would refuse a deletion that is perfectly safe. The
+/// lexical answer is kept as well, so a path that cannot be resolved at all
+/// stays refused instead of quietly becoming deletable.
 fn paths_overlap_trash_root(path: &Path, trash_root: &Path) -> bool {
-    path.starts_with(trash_root) || trash_root.starts_with(path)
+    if path.starts_with(trash_root) || trash_root.starts_with(path) {
+        return true;
+    }
+    let path = resolve_parent_of(path);
+    let root = trash_root
+        .canonicalize()
+        .unwrap_or_else(|_| trash_root.to_path_buf());
+    path.starts_with(&root) || root.starts_with(&path)
+}
+
+/// Resolve everything above the final component, and nothing of it.
+fn resolve_parent_of(path: &Path) -> PathBuf {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    };
+    match parent.canonicalize() {
+        Ok(parent) => parent.join(name),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn remove_matching_trash_info(record: &TrashRecord) -> Result<()> {
@@ -709,6 +775,39 @@ mod tests {
             Path::new("/home/test/Documents"),
             root
         ));
+    }
+
+    /// A symbolic link gives one directory two spellings, and the guard has to
+    /// recognize the Trash under either of them.
+    #[test]
+    fn a_trash_root_reached_through_a_symlink_is_still_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Trash");
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::write(root.join("files/note.txt"), b"trashed").unwrap();
+        std::os::unix::fs::symlink(&root, temp.path().join("shortcut")).unwrap();
+
+        let through_link = temp.path().join("shortcut/files/note.txt");
+        assert!(
+            paths_overlap_trash_root(&through_link, &root),
+            "the same object under another spelling is still in the Trash"
+        );
+
+        // The object itself is never resolved: deleting a link that points into
+        // the Trash removes the link, which is safe and must stay allowed.
+        let elsewhere = temp.path().join("pointer");
+        std::os::unix::fs::symlink(root.join("files/note.txt"), &elsewhere).unwrap();
+        assert!(!paths_overlap_trash_root(&elsewhere, &root));
+    }
+
+    #[test]
+    fn an_unreadable_trash_entry_is_announced_rather_than_dropped() {
+        assert!(unreadable_trash_warning(&[]).is_none());
+        let one = unreadable_trash_warning(&["bad.trashinfo".to_string()]).unwrap();
+        assert!(one.contains("bad.trashinfo"), "{one}");
+        let many =
+            unreadable_trash_warning(&["bad.trashinfo".to_string(), "worse".to_string()]).unwrap();
+        assert!(many.contains('2'), "{many}");
     }
 
     #[test]

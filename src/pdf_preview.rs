@@ -13,6 +13,8 @@ use std::{
 
 use md5::{Digest, Md5};
 
+use crate::local_fs::create_private_dir_all;
+
 const PDF_RENDER_LIMIT: u32 = 1_800;
 const PDF_JPEG_QUALITY: u8 = 85;
 const PDF_PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -34,7 +36,7 @@ pub struct PdfDocument {
 pub fn inspect_pdf(source: &Path, cancelled: &Arc<AtomicBool>) -> io::Result<PdfDocument> {
     check_cancelled(cancelled)?;
     let cache_dir = pdf_cache_dir();
-    fs::create_dir_all(&cache_dir)?;
+    create_private_dir_all(&cache_dir)?;
     let identity = file_identity(source)?;
     let pages = page_count(source, &cache_dir, &identity, cancelled)?;
     Ok(PdfDocument {
@@ -59,7 +61,7 @@ pub fn render_pdf_page(
     check_cancelled(cancelled)?;
 
     let cache_dir = pdf_cache_dir();
-    fs::create_dir_all(&cache_dir)?;
+    create_private_dir_all(&cache_dir)?;
     let identity = file_identity(source)?;
     let pages = page_count(source, &cache_dir, &identity, cancelled)?;
     let page = requested_page.clamp(1, pages);
@@ -89,6 +91,9 @@ pub fn render_pdf_page(
         .arg(format!("quality={PDF_JPEG_QUALITY}"))
         .arg("-scale-to")
         .arg(PDF_RENDER_LIMIT.to_string())
+        // A path is data, never more options, whatever it starts with. The same
+        // rule `archive_ops` already applies to its backend.
+        .arg("--")
         .arg(source)
         .arg(&output_prefix)
         .stdout(Stdio::null())
@@ -141,6 +146,7 @@ fn run_pdfinfo(
 
     let mut command = Command::new("pdfinfo");
     command
+        .arg("--")
         .arg(source)
         .stdout(Stdio::from(stdout_writer))
         .stderr(Stdio::from(stderr_writer));

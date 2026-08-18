@@ -53,7 +53,8 @@ use crate::{
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
     file_ops::{
-        DirectoryChanges, TransferMode, reclaim_abandoned_quarantines, validate_entry_name,
+        DirectoryChanges, RECOVERY_REMNANT_PREFIX, TransferMode, reclaim_abandoned_quarantines,
+        validate_entry_name,
     },
     fs::{
         DirectoryUpdate, EntryKind, FileEntry, display_filename, format_size, merge_sorted_entries,
@@ -71,7 +72,7 @@ use crate::{
     state::{self, BrowserState, BrowserView},
     theme::{self, Palette},
     thumbnails,
-    trash_ops::{TrashRecord, list_trash_records},
+    trash_ops::{TrashRecord, list_trash_records, unreadable_trash_warning},
     window_ui_state::{ContextMenuTarget, EntryMenu, ViewMode, WindowUiState},
 };
 
@@ -841,13 +842,21 @@ impl Marcel {
         self.clear_selection();
 
         let load = cx.background_executor().spawn(smol::unblock(move || {
-            let records = list_trash_records()?;
+            let listing = list_trash_records()?;
             let mut icons = crate::icons::IconProvider::discover();
-            let mut entries = Vec::with_capacity(records.len());
-            let mut by_backing = HashMap::with_capacity(records.len());
-            for record in records {
-                let Ok(mut entry) = FileEntry::from_path(record.backing_path(), &mut icons) else {
-                    continue;
+            let mut entries = Vec::with_capacity(listing.records.len());
+            let mut by_backing = HashMap::with_capacity(listing.records.len());
+            let mut unreadable = listing.unreadable;
+            for record in listing.records {
+                // A record Marcel parsed but cannot present is as absent from
+                // the listing as one it could not parse, and is missing from
+                // Empty Trash for the same reason.
+                let mut entry = match FileEntry::from_path(record.backing_path(), &mut icons) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        unreadable.push(format!("“{}”: {error}", record.original_path().display()));
+                        continue;
+                    }
                 };
                 if let Some(name) = record.original_path().file_name() {
                     entry.set_name(name.to_os_string());
@@ -860,7 +869,7 @@ impl Marcel {
                 entries.push(entry);
             }
             crate::fs::sort_entries(&mut entries);
-            anyhow::Ok((entries, by_backing))
+            anyhow::Ok((entries, by_backing, unreadable))
         }));
 
         self.directory.load_task = Some(cx.spawn(async move |this, cx| {
@@ -870,11 +879,15 @@ impl Marcel {
                     return;
                 }
                 match result {
-                    Ok((entries, records)) => {
+                    Ok((entries, records, unreadable)) => {
                         this.sidebar.trash_records = records;
                         let reconcile = this.directory.merge_batch(entries);
                         this.apply_selection_reconcile(reconcile, cx);
                         this.directory.finish_load();
+                        // Say what is missing rather than presenting a partial
+                        // enumeration as the whole Trash.
+                        this.directory.warning = unreadable_trash_warning(&unreadable);
+                        this.sidebar.unreadable_trash_entries = unreadable.len();
                     }
                     Err(error) => this.directory.fail_load(error.to_string()),
                 }
@@ -1754,6 +1767,10 @@ impl Marcel {
             return;
         }
         let count = records.len();
+        // Emptying what Marcel could enumerate is still the right action, but
+        // calling it "empty the Trash" when part of it was never read would
+        // promise something this operation cannot deliver.
+        let unreadable = self.sidebar.unreadable_trash_entries;
         let view = cx.entity();
         let danger = cx.theme().colors.danger;
         window.open_dialog(cx, move |dialog, _, _| {
@@ -1769,6 +1786,11 @@ impl Marcel {
                         .child(format!(
                             "Permanently delete all {count} item(s) currently shown in Trash?"
                         ))
+                        .when(unreadable > 0, |this| {
+                            this.child(div().text_sm().child(format!(
+                                "{unreadable} further Trash entr(y/ies) could not be read and will be left behind."
+                            )))
+                        })
                         .child(
                             div()
                                 .text_sm()
@@ -6728,30 +6750,61 @@ fn dialog_footer(
         )
 }
 
+/// Guidance for data Marcel is holding but no longer manages.
+///
+/// Two unrelated things end up here. An interrupted permanent deletion leaves a
+/// quarantine no live process owns. A failed restoration leaves the *original*
+/// of a replacement Marcel could not put back — which is the user's only copy,
+/// which is why it carries no process id and no sweep will ever remove it.
+/// Both are pointed at rather than hidden, because guidance naming a path the
+/// browser refuses to show cannot be followed.
 fn quarantine_recovery_warning(entries: &[FileEntry]) -> Option<String> {
     let current_process_prefix = format!(".marcel-delete-{}-", std::process::id());
-    let mut remnants = entries
+    let interrupted = remnant_paths(entries, |name| {
+        is_delete_quarantine_name(name) && !name.starts_with(&current_process_prefix)
+    });
+    let unrestored = remnant_paths(entries, |name| name.starts_with(RECOVERY_REMNANT_PREFIX));
+
+    let mut notices = Vec::new();
+    if let Some(first) = interrupted.first() {
+        notices.push(if interrupted.len() == 1 {
+            format!(
+                "An interrupted permanent deletion left data quarantined at “{}”. Inspect this hidden path and move anything you want to recover to a free destination",
+                first.display()
+            )
+        } else {
+            format!(
+                "{} interrupted permanent deletions left quarantined data here (first: “{}”). Inspect these hidden paths and move anything you want to recover to free destinations",
+                interrupted.len(),
+                first.display()
+            )
+        });
+    }
+    if let Some(first) = unrestored.first() {
+        notices.push(if unrestored.len() == 1 {
+            format!(
+                "Marcel could not put back an item it had moved aside to replace, and preserved your original at “{}”. Move it somewhere safe",
+                first.display()
+            )
+        } else {
+            format!(
+                "{} originals Marcel could not put back are preserved here (first: “{}”). Move them somewhere safe",
+                unrestored.len(),
+                first.display()
+            )
+        });
+    }
+    (!notices.is_empty()).then(|| notices.join(". "))
+}
+
+fn remnant_paths(entries: &[FileEntry], matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    let mut paths = entries
         .iter()
-        .filter(|entry| {
-            is_delete_quarantine_name(&entry.name)
-                && !entry.name.starts_with(&current_process_prefix)
-        })
+        .filter(|entry| matches(&entry.name))
         .map(|entry| entry.path.clone())
         .collect::<Vec<_>>();
-    remnants.sort();
-    let first = remnants.first()?;
-    Some(if remnants.len() == 1 {
-        format!(
-            "An interrupted permanent deletion left data quarantined at “{}”. Inspect this hidden path and move anything you want to recover to a free destination",
-            first.display()
-        )
-    } else {
-        format!(
-            "{} interrupted permanent deletions left quarantined data here (first: “{}”). Inspect these hidden paths and move anything you want to recover to free destinations",
-            remnants.len(),
-            first.display()
-        )
-    })
+    paths.sort();
+    paths
 }
 
 fn is_delete_quarantine_name(name: &str) -> bool {
@@ -6870,6 +6923,33 @@ mod tests {
         assert!(warning.contains("interrupted permanent deletion"));
         assert!(warning.contains(".marcel-delete-"));
         assert!(warning.contains("move anything you want to recover"));
+    }
+
+    /// An original Marcel failed to put back is the user's only copy of it, so
+    /// it is pointed at rather than hidden — and it is not process-scoped, so
+    /// the process that created it is irrelevant to the guidance.
+    #[test]
+    fn completed_load_points_at_an_original_that_could_not_be_put_back() {
+        let preserved = test_file_entry("/folder/.marcel-recovered-0-report.txt");
+        let warning = quarantine_recovery_warning(std::slice::from_ref(&preserved)).unwrap();
+        assert!(
+            warning.contains(".marcel-recovered-0-report.txt"),
+            "{warning}"
+        );
+        assert!(warning.contains("could not put back"), "{warning}");
+        assert!(
+            !crate::file_ops::is_internal_working_name(&preserved.name_os),
+            "guidance that names a hidden path cannot be followed"
+        );
+
+        // Both kinds of remnant can be present, and both are reported.
+        let interrupted = test_file_entry(&format!(
+            "/folder/.marcel-delete-{}-4-thesis",
+            std::process::id().saturating_add(1)
+        ));
+        let warning = quarantine_recovery_warning(&[preserved, interrupted]).unwrap();
+        assert!(warning.contains(".marcel-recovered-"), "{warning}");
+        assert!(warning.contains(".marcel-delete-"), "{warning}");
     }
 
     #[test]

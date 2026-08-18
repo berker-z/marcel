@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
@@ -9,6 +9,8 @@ use anyhow::{Context as _, Result, bail};
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits, metadata::Orientation};
 use md5::{Digest, Md5};
 use url::Url;
+
+use crate::local_fs::create_private_dir_all;
 
 const THUMBNAIL_EDGE: u32 = 128;
 const MAX_SOURCE_PIXELS: u64 = 25_000_000;
@@ -82,7 +84,7 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
     let cache_dir = cache_path
         .parent()
         .context("thumbnail cache path has no parent")?;
-    fs::create_dir_all(cache_dir)?;
+    create_private_dir_all(cache_dir)?;
     let mut temporary = tempfile::NamedTempFile::new_in(cache_dir)?;
     {
         let writer = BufWriter::new(temporary.as_file_mut());

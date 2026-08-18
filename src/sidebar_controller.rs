@@ -27,6 +27,9 @@ pub struct SidebarController {
     pub places_task: Option<Task<()>>,
     pub browsing_trash: bool,
     pub trash_records: HashMap<PathBuf, TrashRecord>,
+    /// How many Trash entries the last listing could not describe. Empty Trash
+    /// must not offer to empty a Trash it has only partly seen.
+    pub unreadable_trash_entries: usize,
     pub bookmark_insertion: Option<BookmarkInsertion>,
     pub bookmark_menu: Option<BookmarkMenu>,
     pub bookmark_region_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -43,6 +46,7 @@ impl SidebarController {
             places_task: None,
             browsing_trash: false,
             trash_records: HashMap::new(),
+            unreadable_trash_entries: 0,
             bookmark_insertion: None,
             bookmark_menu: None,
             bookmark_region_bounds: Rc::new(Cell::new(None)),

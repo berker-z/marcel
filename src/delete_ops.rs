@@ -12,7 +12,9 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 
 use crate::{
-    file_ops::TransferProgress, local_fs::rename_no_replace, trash_ops::path_overlaps_system_trash,
+    file_ops::{TransferProgress, quarantined_name},
+    local_fs::rename_no_replace,
+    trash_ops::path_overlaps_system_trash,
 };
 
 // Conceptually adapted from Yazi's no-follow, leaf-before-directory delete
@@ -35,12 +37,44 @@ struct DeleteIdentity {
     changed_seconds: i64,
     changed_nanoseconds: i64,
     mode: u32,
+    links: u64,
+}
+
+impl DeleteIdentity {
+    /// Whether `found` is still the object this describes.
+    ///
+    /// Removing one hard link moves the shared inode's ctime, so a plan holding
+    /// both links to a file cannot compare ctime for the second one: its own
+    /// earlier removal is what changed it. Directories have the same problem
+    /// and solve it by refreshing after each child; a file has no parent to
+    /// refresh, so the relaxation is here instead, and only for objects that
+    /// said up front that another name for them exists.
+    ///
+    /// Device, inode, and mode still pin the object either way.
+    fn describes(self, found: Self) -> bool {
+        let same_object =
+            (self.device, self.inode, self.mode) == (found.device, found.inode, found.mode);
+        let unchanged = (self.changed_seconds, self.changed_nanoseconds)
+            == (found.changed_seconds, found.changed_nanoseconds);
+        same_object && (unchanged || self.links > 1)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RenameIdentity {
+pub(crate) struct RenameIdentity {
     device: u64,
     inode: u64,
+}
+
+impl RenameIdentity {
+    /// The key a caller carries across a commit boundary it does not own.
+    ///
+    /// A Trash purge validates its payload, then hands the deletion a path.
+    /// Without the key the deletion re-reads that path and agrees with whatever
+    /// it finds, which is not the same object the purge approved.
+    pub(crate) fn new(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,18 +111,28 @@ pub struct DeleteOutcome {
 }
 
 pub fn delete_paths(paths: &[PathBuf], progress: Arc<TransferProgress>) -> DeleteOutcome {
-    delete_paths_with_policy(paths, progress, false)
+    delete_paths_with_policy(paths, &HashMap::new(), progress, false)
 }
 
+/// Delete Trash payloads a purge has already identified.
+///
+/// Each backing arrives with the identity its record was validated against, so
+/// the deletion refuses a substitution rather than trusting the path.
 pub(crate) fn delete_trash_backings(
-    paths: &[PathBuf],
+    backings: &[(PathBuf, RenameIdentity)],
     progress: Arc<TransferProgress>,
 ) -> DeleteOutcome {
-    delete_paths_with_policy(paths, progress, true)
+    let paths = backings
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let expected = backings.iter().cloned().collect::<HashMap<_, _>>();
+    delete_paths_with_policy(&paths, &expected, progress, true)
 }
 
 fn delete_paths_with_policy(
     paths: &[PathBuf],
+    expected_identities: &HashMap<PathBuf, RenameIdentity>,
     progress: Arc<TransferProgress>,
     allow_trash_backings: bool,
 ) -> DeleteOutcome {
@@ -133,6 +177,19 @@ fn delete_paths_with_policy(
             );
         }
         let expected = rename_identity(&metadata);
+        // A fresh stat agrees with itself whatever happened since the caller
+        // decided to delete this. Only the key the caller carried across that
+        // boundary can tell the payload it approved from what replaced it.
+        if expected_identities
+            .get(&original)
+            .is_some_and(|recorded| *recorded != expected)
+        {
+            let message = format!(
+                "Cannot permanently delete “{}”: it changed or was replaced since it was checked",
+                original.display()
+            );
+            return failed_after_rollback(&quarantined, original, message);
+        }
         let quarantine = match reserve_quarantine_path(&original) {
             Ok(path) => path,
             Err(error) => {
@@ -354,9 +411,11 @@ fn reserve_quarantine_path(original: &Path) -> Result<PathBuf> {
     let name = original.file_name().context("Delete target has no name")?;
     for _ in 0..1024 {
         let sequence = DELETE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let mut quarantine_name = format!(".marcel-delete-{}-{sequence}-", std::process::id());
-        quarantine_name.push_str(&name.to_string_lossy());
-        let candidate = parent.join(quarantine_name);
+        let candidate = parent.join(quarantined_name(
+            &format!(".marcel-delete-{}-", std::process::id()),
+            sequence,
+            name,
+        ));
         match fs::symlink_metadata(&candidate) {
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
@@ -387,7 +446,7 @@ fn display_path(root: &QuarantinedRoot, staged_path: &Path) -> PathBuf {
 fn validate_identity(path: &Path, expected: DeleteIdentity) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("Cannot continue: “{}” is missing", path.display()))?;
-    if identity(&metadata) != expected {
+    if !expected.describes(identity(&metadata)) {
         bail!(
             "Cannot continue: “{}” changed or was replaced",
             path.display()
@@ -473,6 +532,7 @@ fn identity(metadata: &fs::Metadata) -> DeleteIdentity {
         changed_seconds: metadata.ctime(),
         changed_nanoseconds: metadata.ctime_nsec(),
         mode: metadata.mode(),
+        links: metadata.nlink(),
     }
 }
 
@@ -508,6 +568,62 @@ fn failed_after_rollback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Removing one hard link moves the shared inode's ctime, which used to
+    /// make the plan's own first removal invalidate the entry for the second.
+    /// Copy preserves hard links, so a tree like this is one paste away.
+    #[test]
+    fn a_tree_holding_two_links_to_one_file_is_deleted_completely() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("tree");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("first"), b"shared").unwrap();
+        fs::hard_link(target.join("first"), target.join("second")).unwrap();
+
+        let outcome = delete_paths(
+            std::slice::from_ref(&target),
+            Arc::new(TransferProgress::default()),
+        );
+
+        assert!(outcome.failures.is_empty(), "{outcome:?}");
+        assert!(!target.exists());
+    }
+
+    /// A Trash purge validates the payload, then hands this the path. Between
+    /// those two moments the object can be replaced, and a fresh `stat` cannot
+    /// tell: only the key the caller carried across can.
+    #[test]
+    fn a_trash_backing_that_changed_since_it_was_checked_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let backing = temp.path().join("payload.txt");
+        fs::write(&backing, b"the object the purge approved").unwrap();
+        let approved = rename_identity(&fs::symlink_metadata(&backing).unwrap());
+
+        // Something else takes the path afterwards, published the way anything
+        // is published atomically. Both files exist at once, so the replacement
+        // cannot be handed the inode number the original still holds.
+        let replacement = temp.path().join("elsewhere.txt");
+        fs::write(&replacement, b"someone else's data").unwrap();
+        fs::rename(&replacement, &backing).unwrap();
+
+        let outcome = delete_trash_backings(
+            &[(backing.clone(), approved)],
+            Arc::new(TransferProgress::default()),
+        );
+
+        assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+        assert!(outcome.completed.is_empty(), "{outcome:?}");
+        assert_eq!(fs::read(&backing).unwrap(), b"someone else's data");
+
+        // The payload it actually approved is deleted as before.
+        let approved = rename_identity(&fs::symlink_metadata(&backing).unwrap());
+        let outcome = delete_trash_backings(
+            &[(backing.clone(), approved)],
+            Arc::new(TransferProgress::default()),
+        );
+        assert!(outcome.failures.is_empty(), "{outcome:?}");
+        assert!(!backing.exists());
+    }
 
     #[test]
     fn permanently_deletes_files_directories_and_symlinks_without_following() {

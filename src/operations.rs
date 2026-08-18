@@ -212,23 +212,19 @@ impl OperationCoordinator {
     /// before it finishes leaves the quarantine for the next process to
     /// reclaim, which is the same guarantee a crash already relies on.
     fn release_unreachable_quarantines(&mut self) {
+        // The whole item travels, not just its path: erasure validates the
+        // recorded identity before removing anything.
         let unreachable = self
             .journal
             .drain()
-            .flat_map(|record| {
-                record
-                    .replaced_items()
-                    .iter()
-                    .map(|item| item.quarantine().to_path_buf())
-                    .collect::<Vec<_>>()
-            })
+            .flat_map(|record| record.replaced_items().to_vec())
             .collect::<Vec<_>>();
         if unreachable.is_empty() {
             return;
         }
         std::thread::spawn(move || {
-            for path in unreachable {
-                crate::file_ops::erase_replacement_quarantine(&path);
+            for item in &unreachable {
+                crate::file_ops::erase_replacement_quarantine(item);
             }
         });
     }
