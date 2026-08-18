@@ -71,10 +71,26 @@ where
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     match command.spawn() {
-        Ok(_) => Ok(true),
+        Ok(child) => {
+            reap(child);
+            Ok(true)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).context("launching a terminal"),
     }
+}
+
+/// Wait for a launched terminal, elsewhere, so it does not become a zombie.
+///
+/// The child deliberately outlives the request that started it — a terminal
+/// stays open for as long as the user wants one — so nothing on the operation
+/// path can wait for it. Marcel is its parent regardless, and a parent that
+/// never waits leaves an entry in the process table for the life of the
+/// application. One detached thread per launch ends when that terminal closes.
+fn reap(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 fn terminal_fallbacks(directory: &Path) -> Vec<(&'static str, Vec<OsString>)> {

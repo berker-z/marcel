@@ -53,6 +53,8 @@ async fn run_gio(path: &Path) -> Result<bool> {
     let mut command = smol::process::Command::new("gio");
     command
         .arg("open")
+        // A path is data, never more options, whatever it starts with.
+        .arg("--")
         .arg(path)
         // The Nix development shell supplies Marcel's native runtime libraries
         // through LD_LIBRARY_PATH. Letting that private search path leak into
