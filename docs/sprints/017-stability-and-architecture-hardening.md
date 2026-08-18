@@ -1,8 +1,10 @@
 # Sprint 17: stability and architecture hardening
 
 **Status:** Implemented — the automated hardening slice and post-migration
-Wayland drag validation are complete. Feature and release work remain paused
-while the outstanding desktop/manual acceptance matrix is run.
+Wayland drag validation are complete, and this sprint's remaining code queue was
+delivered in [Sprint 20](020-cleanup-interlude.md). Feature and release work
+remain paused while the outstanding desktop/manual acceptance matrix is run; the
+one unchecked box below is carried there.
 
 ## Goal
 
@@ -137,19 +139,28 @@ and does not add features, distribution formats, or release automation.
 - [x] Keep moved trees holding a socket, FIFO, or device node undoable, while
   archive creation, extraction, and snapshotted-tree removal still refuse them.
 - [x] Bound the operation journal to 20 records per stack.
-- [ ] Give Move the same bounded snapshot budget as Copy, and make the budget
-  journal-wide rather than per-operation.
-- [ ] Carry a pre-commit object key into every post-commit identity refresh, and
-  into `delete_trash_backings` from `purge_trash_records`.
-- [ ] Make undo of copy and archive output quarantine-first, reusing
+- [x] Give Move the same bounded snapshot budget as Copy. Delivered in
+  [Sprint 20](020-cleanup-interlude.md); one `UNDO_SNAPSHOT_LIMIT` now covers
+  copied sources and output, merge additions, and moved trees. The journal-wide
+  budget the same line asks for is still open and tracked in [`TODO.md`](../TODO.md).
+- [x] Carry a pre-commit object key into every post-commit identity refresh, and
+  into `delete_trash_backings` from `purge_trash_records`. Delivered in
+  [Sprint 20](020-cleanup-interlude.md).
+- [x] Make undo of copy and archive output quarantine-first, reusing
   `delete_ops`, so a partial erase cannot leave the record claiming a whole
-  tree.
-- [ ] Account for every requested source exactly once across completed, failed,
-  and cancelled outcomes.
-- [ ] Compare physical location, not lexical prefix, when refusing to
-  permanently delete inside a Trash root.
-- [ ] Surface malformed or unreadable Trash entries instead of dropping them
-  from the listing, and stop Empty Trash implying it emptied them.
+  tree. Delivered in [Sprint 20](020-cleanup-interlude.md), which also exposed
+  and fixed a permanent-delete defect on trees holding two hard links to one
+  file.
+- [x] Account for every requested source exactly once across completed, failed,
+  and cancelled outcomes. Closed by Sprint 18 for the ordinary paths and by
+  [Sprint 20](020-cleanup-interlude.md) for the merge path, which reported a
+  cancelled source as a failure.
+- [x] Compare physical location, not lexical prefix, when refusing to
+  permanently delete inside a Trash root. Delivered in
+  [Sprint 20](020-cleanup-interlude.md).
+- [x] Surface malformed or unreadable Trash entries instead of dropping them
+  from the listing, and stop Empty Trash implying it emptied them. Delivered in
+  [Sprint 20](020-cleanup-interlude.md).
 - [x] Move active filesystem operations, the operation journal, and the busy
   lock to an application-global owner so closing a window cannot orphan work or
   discard history. Delivered in

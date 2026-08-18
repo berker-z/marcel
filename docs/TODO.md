@@ -17,39 +17,36 @@ Sprint status uses four consistent meanings:
 
 ## Current priorities
 
-- Keep feature and release work frozen. The automated implementation in
-  [`Sprint 17`](sprints/017-stability-and-architecture-hardening.md) closes the
-  confirmed review findings; the next work is its desktop/manual acceptance
-  matrix and any hardening defects that matrix reveals.
-- A third review is cross-checked in
-  [`review-2026-08-10.md`](review-2026-08-10.md). Its transaction-integrity
-  findings are closed: undo, redo, and the Trash mutations now report which side
-  of their commit boundary a failure landed on, and no path reinstates a record
-  that compensation invalidated. Its remaining open findings are tracked as
-  unchecked Sprint 17 acceptance boxes, in the order the review recommends:
-  journal-wide snapshot budget, pre-commit identity keys carried through every
-  post-commit refresh and into Trash purge, quarantine-first undo deletion,
-  complete per-source accounting, physical Trash-root comparison, honest Trash
-  enumeration, and the application-global operation owner.
-  One finding was rejected: its permanent-delete change would report a
-  provably complete deletion as failed.
+- Keep feature and release work frozen. The hardening code queue is now closed;
+  the next work is the graphical acceptance matrix in
+  [`Sprint 20`](sprints/020-cleanup-interlude.md) and whatever it reveals.
+  Nothing on that list can be reached by `cargo test`, and automated checks have
+  now twice been green over defects a reader found by hand.
+- A fourth review is cross-checked in
+  [`review-2026-08-18.md`](review-2026-08-18.md), the first to read the tree
+  Sprints 18 and 19 produced. All four of its findings reproduced, one of them a
+  data-loss path where a failed rollback left the user's only copy in storage a
+  later Marcel would sweep. A fifth defect in the same function — a cancelled
+  merge reported as a failure — is recorded there and was missed by the review.
+  All five are closed in Sprint 20.
+- The plan in [`review-2026-08-10.md`](review-2026-08-10.md) is complete through
+  Stage 5 and Stage 7. Stage 6 is partly done: every transfer path now shares
+  one bounded snapshot budget, and the journal-wide budget it asks for remains
+  open. Stage 8, hosted CI, is Sprint 16 scope. One finding stays rejected: its
+  permanent-delete change would report a provably complete deletion as failed.
 - The critical and high findings in
   [`review-2026-08-05.md`](review-2026-08-05.md) are fixed and covered by
-  regression tests. Its remaining lower-tier backlog is open:
-  - Hide Marcel's own `.marcel-copy-*` and `.marcel-archive-*` staging from the
-    browser reducer while operations run.
+  regression tests. Its lower-tier backlog is now closed except for these:
   - Decide and document a setuid/setgid/sticky policy for copy in
     [`copy-semantics.md`](copy-semantics.md); Marcel currently preserves them
     where `cp` does not.
-  - Diagnose filesystems without `RENAME_NOREPLACE` explicitly instead of
-    failing every rename, move, publication, restore, and quarantine with a
-    generic error.
   - Compare device identity when deciding drop acceptance so cross-filesystem
-    targets read as refused rather than accepted-then-failed.
-  - Reap terminal children spawned by Open in Terminal.
-  - Create the freedesktop thumbnail cache directory as `0700`.
+    targets read as refused rather than accepted-then-failed. Sprint 20 declined
+    to do this the cheap way: the acceptance predicate runs while the pointer
+    moves, so it needs a device cached for the life of the drag session, plus a
+    graphical run to confirm the hover styling. The failure message is already
+    accurate, so what is missing is the affordance, not the outcome.
   - Reuse one `IconProvider` per watcher instead of rebuilding it per batch.
-  - Pass `--` to `pdftoppm`, `pdfinfo`, and `gio open`, matching `archive_ops`.
   - Optional cleanup: one process-level coalescing writer for browser state,
     replacing the per-window writers. Bookmarks no longer need this — Sprint 19
     gave them an application-global store, because last-writer-wins there was
@@ -128,9 +125,11 @@ personal release.
 This order favors evidence-driven hardening over novelty. Steps after the
 manual acceptance phase are intentionally parked, not current commitments.
 
-1. Accept [Sprint 17](sprints/017-stability-and-architecture-hardening.md) by
-   finishing its now-narrow high-DPI, token-bearing activation, and remaining
-   interaction matrix.
+1. Run [Sprint 20](sprints/020-cleanup-interlude.md)'s graphical acceptance
+   matrix — the two-window ownership checks inherited from Sprint 19, Sprint
+   18's remaining interaction checks, and Sprint 17's remaining pointer and
+   marquee checks. This is the only thing standing between the current tree and
+   a release-readiness decision.
 2. Fix any correctness, recovery, diagnostics, or ownership problems exposed
    by that matrix, with focused regression coverage.
 3. When release work resumes, complete
@@ -282,8 +281,12 @@ The packaging contract, current dependency caveats, target formats, and
   replace, and cancel, each able to answer the rest of the operation. Never
   overwrite without an explicit decision, hold a replaced item aside so undo
   can restore it, and refuse a transfer whose destination is its own source.
-  See [`Sprint 18`](sprints/018-destination-conflict-decisions.md); directory
-  merge and drag-and-drop conflicts remain open there.
+  See [`Sprint 18`](sprints/018-destination-conflict-decisions.md). Merging a
+  folder into an existing one is implemented for copying, and
+  [`Sprint 20`](sprints/020-cleanup-interlude.md) made a merge that stops part
+  way describable and a cancelled one honest. Merging while *moving* remains a
+  deliberate gap: it is a recursive move with per-leaf decisions, which is a
+  design question rather than a cleanup.
 - [x] Accept native local-file drops from desktop applications into Places,
   bookmarks, folders, and the current browser directory, using safe copy
   semantics.

@@ -5,20 +5,22 @@ durable product, engineering, and release records used to build it.
 
 ## Current milestone
 
-Marcel has reached the personal daily-driver milestone. Feature and release
-work are now paused for
-[Sprint 17: stability and architecture hardening](sprints/017-stability-and-architecture-hardening.md).
-It closes confirmed correctness and hostile-input problems, pays down manual
-validation debt, and mechanically extracts cohesive ownership from the
-application coordinator.
+Marcel has reached the personal daily-driver milestone. Feature and release work
+remain paused for hardening.
 
-[Sprint 18: destination conflict decisions](sprints/018-destination-conflict-decisions.md)
-runs alongside it. An occupied destination is now a question rather than a
-failure, and it precedes Sprint 17's application-global operation owner because
-interactive operations must be able to reach a user interface.
+[Sprint 20: cleanup interlude](sprints/020-cleanup-interlude.md) is the current
+document. It closed [Review D](review-2026-08-18.md)'s findings together with
+the remaining code queue from
+[Sprint 17](sprints/017-stability-and-architecture-hardening.md),
+[Sprint 18](sprints/018-destination-conflict-decisions.md), and
+[`review-2026-08-10.md`](review-2026-08-10.md), because those three lists
+overlapped in the same files. Its code slice is complete; what remains is the
+graphical acceptance matrix it inherits from
+[Sprint 19](sprints/019-application-global-operations.md) and Sprint 18, which
+`cargo test` cannot reach.
 
 [Sprint 16: public release presentation and metadata](sprints/016-public-release-presentation.md)
-remains planned but deprioritized until the hardening sprint is complete.
+remains planned but deprioritized until that matrix is run.
 
 ## Source-of-truth documents
 
@@ -35,6 +37,10 @@ remains planned but deprioritized until the hardening sprint is complete.
 - [`review-2026-08-05.md`](review-2026-08-05.md): two cross-checked operation
   layer reviews with per-finding verdicts, reproductions, and remediation
   status. Unlike `external-review.md`, its confirmed findings were defects.
+- [`review-2026-08-18.md`](review-2026-08-18.md): cross-check of the fourth
+  review, the first to read the tree Sprints 18 and 19 produced. Its four
+  findings all reproduced; it records a fifth in the same function that the
+  review missed, and the evidence for each. The plan is Sprint 20.
 - [`review-2026-08-10.md`](review-2026-08-10.md): cross-check of a third review,
   with per-finding verdicts and re-tiering, one rejected finding, three findings
   it missed, and the Yazi and Nautilus evidence that decided the remediation

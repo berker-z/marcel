@@ -2,7 +2,15 @@
 
 **Status:** Implemented — the sprint's scope is present and accepted in a
 graphical session, apart from the named acceptance checks below that remain
-unrun. Merging a folder while *moving* it is the one deliberate gap.
+unrun and are carried into [Sprint 20](020-cleanup-interlude.md). Merging a
+folder while *moving* it is the one deliberate gap.
+
+[Review D](../review-2026-08-18.md) later found two defects in this sprint's
+merge and replacement code, both closed in Sprint 20: a merge that stopped part
+way reported no committed effect while half of it sat in the destination, and a
+failed rollback left the user's only copy in storage a later Marcel would sweep.
+The second lived precisely in the gap this sprint's last acceptance box named
+and did not cover.
 
 ## Goal
 
@@ -188,8 +196,11 @@ must not become the one place where data leaves without a way back.
   imply merge-all or skip-all. Covered by unit tests; unverified in a window.
 - [x] A rename response that collides again re-enters the conflict decision
   instead of failing or overwriting.
-- [ ] Cancelling from a conflict stops the operation and is reported as
-  cancellation, not as failure.
+- [x] Cancelling from a conflict stops the operation and is reported as
+  cancellation, not as failure — in code. It was *not* true for a merge, which
+  reported cancellation as a failure and kept going;
+  [Sprint 20](020-cleanup-interlude.md) fixed that and covered it. The window
+  run is carried there and remains unrun.
 - [x] Completed, skipped, replaced, failed, and cancelled outcomes account for
   every requested source exactly once.
 - [x] Undo restores an item that a replace overwrote, or the operation reported
@@ -231,8 +242,11 @@ must not become the one place where data leaves without a way back.
   record still pointed at.
 - [x] Marcel's own working files stay out of the browser, so a replacement does
   not make a hidden sibling appear beside its target.
-- [ ] Deterministic failure-injection coverage for a failure arriving after a
+- [x] Deterministic failure-injection coverage for a failure arriving after a
   replacement has been quarantined but before the replacement is published.
+  Delivered in [Sprint 20](020-cleanup-interlude.md), which built the seam and
+  found a data-loss path in exactly this gap: a restoration that also failed
+  left the original in storage a later Marcel would sweep.
 - [x] Pass `cargo fmt --check`,
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo test --all-targets` in the declared development environment.

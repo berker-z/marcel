@@ -3,7 +3,12 @@
 **Status:** Implemented — the ownership move, the effect broadcast, the shared
 conflict surface, and the shared bookmark store are in place and pass the local
 quality gate. The multi-window acceptance checks below are unrun; they need a
-graphical session.
+graphical session, and they are carried unchanged into
+[Sprint 20](020-cleanup-interlude.md), which is where they will be run.
+
+[Review D](../review-2026-08-18.md) read this work and endorsed both the
+ownership model and the decision not to accept the sprint until that list is
+run.
 
 ## Goal
 

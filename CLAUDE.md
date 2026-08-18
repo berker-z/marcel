@@ -33,6 +33,14 @@ cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings &&
 Chain the whole gate into a single invocation rather than three. If the captured
 environment goes stale (a `flake.nix` change), recapture it.
 
+## Keep `TMPDIR` short
+
+Several `file_ops` tests bind Unix sockets to prove that a tree holding a
+special file still moves. `sun_path` is 108 bytes, so a long `TMPDIR` — a
+per-session scratchpad path, for instance — makes six of them fail at once with
+errors that look like permission or sandbox problems and are neither. Point
+`TMPDIR` at something short (`/tmp/claude-1000`) before running the suite.
+
 ## The one test that needs an unsandboxed run
 
 `desktop_integration::tests::private_session_bus_integration` spawns
