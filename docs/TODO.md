@@ -224,10 +224,12 @@ The packaging contract, current dependency caveats, target formats, and
   versioning, release checks on `x86_64-linux` and `aarch64-linux`, and hosted
   release automation that publishes exact derivations to a signed Nix binary
   cache alongside the GitHub Release.
-- [ ] Submit `marcel` to nixpkgs as a tagged-source package with a free closure,
-  a maintainer, complete `meta`, and a package test. Run `nixfmt`,
-  `nixpkgs-review`, the package build/tests, and use the conventional
-  `marcel: init at 0.1.0` commit.
+- [ ] Submit `marcel-rs` to nixpkgs as a tagged-source package with a free
+  closure, a maintainer, complete `meta`, and a package test. Resolve both the
+  existing `pkgs.marcel` attribute and `bin/marcel` executable collisions
+  consistently across distribution routes. Run `nixfmt`, `nixpkgs-review`, the
+  package build/tests, and use the conventional
+  `marcel-rs: init at 0.1.0` commit.
 - [ ] Treat Flatpak as a separate compatibility project, not a repackaging
   checkbox: prototype host-filesystem access, portals, D-Bus activation,
   external file DnD, Trash, subprocesses, and icon discovery inside the

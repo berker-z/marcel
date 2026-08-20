@@ -38,6 +38,10 @@ distribution formats already exist.
   metadata, project URLs, license, content rating, and release version aligned.
 - Describe the free archive baseline and private bundled visual resources
   accurately.
+- Resolve the existing nixpkgs `pkgs.marcel` and `bin/marcel` collisions before
+  `v0.1.0`. The collision-free plan is `marcel-rs` for the nixpkgs attribute,
+  package name, and installed command across distribution routes; keep the GUI,
+  application ID, icon, configuration directory, and D-Bus identity as Marcel.
 
 ## Acceptance checks
 
@@ -47,6 +51,8 @@ distribution formats already exist.
 - [ ] Add representative screenshots with intentional filenames and sizes.
 - [x] Add the original branded icon in scalable and required raster sizes.
 - [ ] Install and validate complete AppStream metadata.
+- [ ] Apply the `marcel-rs` package and command naming contract consistently to
+      the flake app, wrappers, desktop entries, D-Bus services, docs, and tests.
 - [ ] Add a platform support/install matrix with no fictional commands.
 - [ ] Separate install, default-handler, and generic FileManager1 instructions.
 - [ ] Add a contributor quickstart and automated Markdown-link checking.
