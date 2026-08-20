@@ -1,6 +1,6 @@
 # Marcel session handoff
 
-**Prepared:** 2026-08-18
+**Prepared:** 2026-08-18, amended 2026-08-20
 **Branch:** `master`
 **Workspace:** `/home/berkerz/Projects/marcel`
 
@@ -42,6 +42,17 @@ the window you were reading — or, with no argument, raise it and ignore the
 folder you were standing in. A launch now opens a window, folders have an
 Open in New Window entry, and the application owns the window list rather than
 `main.rs` keeping a private one.
+
+**2026-08-20:** a fifth review,
+[`review-2026-08-20.md`](review-2026-08-20.md), read the *whole* tree — the
+first to look past the operations core — and found its defects almost entirely
+in the code the earlier reviews never read: the load/watcher seam, the preview
+surface (a FIFO permanently wedged worker threads), bookmarks persistence (a
+failed load became an empty list the next edit saved), the D-Bus surface, and
+the Sprint 21 window layer. Everything confirmed is fixed with regression
+coverage in [Sprint 22](sprints/022-read-the-whole-tree.md), which also adds
+its own checks to the graphical matrix; four items are deliberately deferred
+into `TODO.md` with reasons.
 
 ## Next: the graphical acceptance matrix, then release readiness
 
@@ -87,7 +98,7 @@ it, and one fresh code path used `?` after a commit anyway.
 See `CLAUDE.md`. In short: capture the `nix develop` environment once, then run
 fmt, clippy, and tests as one sandboxed command with a short `TMPDIR`. Confirm a
 green `desktop_integration::tests::private_session_bus_integration` outside the
-sandbox. The suite is 252 library tests plus 1 binary test.
+sandbox. The suite is 260 library tests plus 1 binary test.
 
 Automated checks did not catch a single one of Sprint 18's three interface
 defects, and did not catch either of Review D's P0s. Drive the real windows

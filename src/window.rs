@@ -35,6 +35,13 @@ const WINDOW_CASCADE_STEP: f32 = 32.0;
 /// How many steps the cascade takes before returning to the centre.
 const WINDOW_CASCADE_LENGTH: usize = 8;
 
+/// The most windows Marcel will hold open at once.
+///
+/// A launch is a window, and launches arrive from the session bus — where any
+/// peer may send `Open` with dozens of URIs in a loop. Far past what a person
+/// uses, well before a window flood freezes the session.
+pub const MAX_LIVE_WINDOWS: usize = 32;
+
 #[derive(Clone)]
 pub struct MarcelWindow {
     pub handle: WindowHandle<Root>,
@@ -73,10 +80,16 @@ pub fn open(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
     let registry = global(cx);
     let cascade = registry.update(cx, |registry, cx| {
         registry.prune(cx);
+        if registry.windows.len() >= MAX_LIVE_WINDOWS {
+            return None;
+        }
         let step = registry.opened % WINDOW_CASCADE_LENGTH;
         registry.opened += 1;
-        WINDOW_CASCADE_STEP * step as f32
+        Some(WINDOW_CASCADE_STEP * step as f32)
     });
+    let Some(cascade) = cascade else {
+        anyhow::bail!("Marcel already has {MAX_LIVE_WINDOWS} windows open; not opening more");
+    };
 
     let (width, height) = DEFAULT_WINDOW_SIZE;
     let mut bounds = Bounds::centered(None, size(px(width), px(height)), cx);

@@ -1,6 +1,5 @@
 use std::{
-    fs::File,
-    io::{self, Read},
+    io::{self, Read, Seek as _, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -9,6 +8,7 @@ use gpui::RenderImage;
 
 use crate::fs::{FileEntry, format_size};
 use crate::image_preview;
+use crate::local_fs::open_regular_file;
 use crate::pdf_preview::inspect_pdf;
 
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
@@ -60,10 +60,26 @@ pub fn load_preview(
         });
     }
 
-    let inferred = infer::get_from_path(&entry.path)
-        .ok()
-        .flatten()
-        .map(|kind| kind.mime_type().to_string());
+    // Everything below previews regular files only, and `open(2)` on a FIFO
+    // with no writer blocks forever — a blocked open cannot be interrupted by
+    // the cancellation flag, so the worker thread would be lost for the life
+    // of the process. Refuse every other object on the opened descriptor.
+    let mut file = match open_regular_file(&entry.path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            return Ok(Preview::Metadata {
+                summary: format!(
+                    "{}\n{}\nNo preview is available for this kind of file",
+                    entry.display_kind(),
+                    format_size(entry.size)
+                ),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let mut head = [0_u8; 8192];
+    let head_read = read_up_to(&mut file, &mut head)?;
+    let inferred = infer::get(&head[..head_read]).map(|kind| kind.mime_type().to_string());
 
     if inferred
         .as_deref()
@@ -87,7 +103,7 @@ pub fn load_preview(
 
     let markdown = has_extension(&entry.path, &["md", "markdown", "mdown", "mkd"]);
     let language = language_for_path(&entry.path);
-    let mut file = File::open(&entry.path)?;
+    file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.by_ref()
         .take(MAX_TEXT_BYTES + 1)
@@ -117,6 +133,20 @@ pub fn load_preview(
             inferred.unwrap_or_else(|| "Unknown format".to_string())
         ),
     })
+}
+
+/// Read as much of `buffer` as the file can fill, tolerating short reads.
+fn read_up_to(file: &mut std::fs::File, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
 }
 
 fn should_render_rich(byte_len: usize) -> bool {

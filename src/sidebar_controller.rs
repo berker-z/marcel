@@ -14,9 +14,13 @@ pub struct BookmarkInsertion {
     pub index: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct BookmarkMenu {
     pub index: usize,
+    /// The bookmark the menu opened on. Another window can mutate the shared
+    /// list while the menu is up, so a destructive click re-verifies the path
+    /// rather than trusting the index.
+    pub path: PathBuf,
     pub position: Point<Pixels>,
 }
 

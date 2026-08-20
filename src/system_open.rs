@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     os::fd::AsFd,
     path::{Path, PathBuf},
     process::Stdio,
@@ -25,7 +24,10 @@ pub async fn open_file_with(path: PathBuf) -> Result<()> {
 
 async fn open_through_portal(path: PathBuf, ask: bool) -> Result<()> {
     let file_path = path.clone();
-    let file = smol::unblock(move || File::open(&file_path))
+    // A FIFO would block this open forever and strand the worker thread;
+    // `open_regular_file` refuses anything but a regular file on the opened
+    // descriptor itself.
+    let file = smol::unblock(move || crate::local_fs::open_regular_file(&file_path))
         .await
         .with_context(|| format!("opening {}", path.display()))?;
 

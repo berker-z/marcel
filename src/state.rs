@@ -33,6 +33,8 @@ impl Default for BrowserState {
 pub fn default_path(home: &Path) -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
+        // The XDG base-directory spec says a relative value must be ignored.
+        .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(".config"))
         .join("marcel")
         .join("state.conf")
@@ -53,6 +55,9 @@ pub fn load(path: &Path) -> Result<BrowserState> {
 }
 
 pub fn save(path: &Path, state: BrowserState) -> Result<()> {
+    // Resolve a symlinked state file to its target: `persist` is a rename,
+    // which would otherwise replace the user's link with a regular file.
+    let path = &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let parent = path
         .parent()
         .context("State file has no parent directory")?;

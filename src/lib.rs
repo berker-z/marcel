@@ -25,7 +25,7 @@ mod preview_controller;
 pub mod selection;
 mod sidebar_controller;
 mod state;
-mod surface;
+pub mod surface;
 #[cfg(target_os = "linux")]
 mod system_open;
 #[cfg(target_os = "linux")]

@@ -150,6 +150,10 @@ pub struct OperationCoordinator {
     clipboard: Option<FileClipboard>,
     busy: bool,
     cancel: Option<Arc<AtomicBool>>,
+    /// The window the running operation was started from, while one is
+    /// running. Cancellation shortcuts consult it so Escape pressed in an
+    /// unrelated window cannot abort another window's transfer.
+    operation_origin: Option<AnyWindowHandle>,
     task: Option<Task<()>>,
     progress: Option<ActiveOperationProgress>,
     progress_task: Option<Task<()>>,
@@ -203,6 +207,23 @@ impl OperationCoordinator {
         self.cancel
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    }
+
+    /// Whether a cancellation *shortcut* pressed in `window` may cancel the
+    /// running operation.
+    ///
+    /// The operation belongs to the application, but aborting it is a
+    /// decision, and Escape is easy to press for some other reason — clearing
+    /// a selection, closing a filter. The initiating window keeps that
+    /// authority while it exists; once it is gone the work has re-homed, so
+    /// any surviving window holds it. The explicit Cancel control on the
+    /// progress card is not gated by this: clicking it says what it means.
+    pub fn can_cancel_from(&self, window: AnyWindowHandle, cx: &App) -> bool {
+        self.cancel.is_some()
+            && match self.operation_origin {
+                Some(origin) => origin == window || !cx.windows().contains(&origin),
+                None => true,
+            }
     }
 
     /// Erase every quarantine no live record can still restore.
@@ -343,6 +364,7 @@ impl OperationCoordinator {
     fn finish_active(&mut self) {
         self.busy = false;
         self.cancel = None;
+        self.operation_origin = None;
         self.progress = None;
         // Dropping the progress loop is how it stops. The operation's own task
         // is deliberately left in place: this runs inside it, and dropping a
@@ -570,6 +592,7 @@ impl OperationCoordinator {
         ) else {
             return;
         };
+        self.operation_origin = Some(origin);
         self.start_progress_refresh(cx);
         let task = cx.background_executor().spawn(smol::unblock(move || {
             create_zip_operation(&sources, &destination, cancel)
@@ -615,6 +638,7 @@ impl OperationCoordinator {
         ) else {
             return;
         };
+        self.operation_origin = Some(origin);
         self.start_progress_refresh(cx);
         let task = cx.background_executor().spawn(smol::unblock(move || {
             extract_archive_operation(&archive, cancel)
@@ -939,11 +963,7 @@ impl OperationCoordinator {
         self.start_progress_refresh(cx);
         let task = cx.background_executor().spawn(smol::unblock(move || {
             if let Some(records) = trash_records {
-                let outcome = purge_trash_records(&records, progress);
-                PermanentDeleteResult::Trash {
-                    outcome,
-                    requested: records,
-                }
+                PermanentDeleteResult::Trash(purge_trash_records(&records, progress))
             } else {
                 PermanentDeleteResult::Files(delete_paths(&paths, progress))
             }
@@ -965,14 +985,17 @@ impl OperationCoordinator {
                         });
                         (outcome.completed.len(), failure)
                     }
-                    PermanentDeleteResult::Trash { outcome, requested } => {
+                    PermanentDeleteResult::Trash(outcome) => {
                         let failure = (!outcome.failures.is_empty())
                             .then(|| summarize_trash_failures(&outcome.failures));
-                        let completed = outcome.completed.iter().cloned().collect::<HashSet<_>>();
+                        // Reconcile the Trash view from the exact purged
+                        // records. Matching by original path removed a
+                        // surviving twin entry — the same file trashed twice —
+                        // from the listing when only one purge succeeded.
                         cx.emit(OperationEvent::TrashRemoved(
-                            requested
+                            outcome
+                                .records
                                 .iter()
-                                .filter(|record| completed.contains(record.original_path()))
                                 .map(|record| record.backing_path().to_path_buf())
                                 .collect(),
                         ));
@@ -1015,6 +1038,7 @@ impl OperationCoordinator {
         else {
             return;
         };
+        self.operation_origin = Some(origin);
         self.start_progress_refresh(cx);
         // Questions arrive one at a time: the transfer thread waits for each
         // answer, so a second conflict cannot be raised while the first is on
@@ -1125,10 +1149,7 @@ impl OperationCoordinator {
 
 enum PermanentDeleteResult {
     Files(DeleteOutcome),
-    Trash {
-        outcome: TrashOutcome,
-        requested: Vec<TrashRecord>,
-    },
+    Trash(TrashOutcome),
 }
 
 /// Ask the user about one destination conflict.

@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io::{self, BufReader},
     path::Path,
     sync::Arc,
@@ -13,6 +12,8 @@ use image::{
     codecs::{gif::GifDecoder, webp::WebPDecoder},
     metadata::Orientation,
 };
+
+use crate::local_fs::open_regular_file;
 
 const PREVIEW_EDGE: u32 = 2_048;
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -31,7 +32,11 @@ pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<Arc<RenderImage>> 
         bail!("image exceeds the 64 MiB preview source limit");
     }
 
-    let format = ImageReader::open(path)?.with_guessed_format()?.format();
+    // Every open below goes through `open_regular_file`: a FIFO named like an
+    // image would otherwise block the preview worker forever.
+    let format = ImageReader::new(BufReader::new(open_regular_file(path)?))
+        .with_guessed_format()?
+        .format();
     let format = format.context("image format could not be identified")?;
     let frames =
         if matches!(format, ImageFormat::Gif | ImageFormat::WebP) && is_animated(path, format)? {
@@ -48,7 +53,7 @@ fn decode_bounded_still(path: &Path, cancelled: &AtomicBool) -> Result<Frame> {
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
     limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
-    let mut reader = ImageReader::open(path)?;
+    let mut reader = ImageReader::new(BufReader::new(open_regular_file(path)?));
     reader.limits(limits);
     let mut decoder = reader.with_guessed_format()?.into_decoder()?;
     validate_dimensions(decoder.dimensions())?;
@@ -70,7 +75,7 @@ fn decode_bounded_animation(
     format: ImageFormat,
     cancelled: &AtomicBool,
 ) -> Result<Vec<Frame>> {
-    let reader = BufReader::new(File::open(path)?);
+    let reader = BufReader::new(open_regular_file(path)?);
     let frames = match format {
         ImageFormat::Gif => {
             let mut decoder = GifDecoder::new(reader)?;
@@ -80,8 +85,9 @@ fn decode_bounded_animation(
             decoder.into_frames()
         }
         ImageFormat::WebP => {
-            let decoder = WebPDecoder::new(reader)?;
+            let mut decoder = WebPDecoder::new(reader)?;
             validate_dimensions(decoder.dimensions())?;
+            decoder.set_limits(decode_limits())?;
             decoder.into_frames()
         }
         _ => bail!("unsupported animated image format"),
@@ -128,7 +134,7 @@ fn bound_preview_dimensions(image: DynamicImage) -> DynamicImage {
 }
 
 fn is_animated(path: &Path, format: ImageFormat) -> Result<bool> {
-    let reader = BufReader::new(File::open(path)?);
+    let reader = BufReader::new(open_regular_file(path)?);
     match format {
         ImageFormat::Gif => Ok(true),
         ImageFormat::WebP => Ok(WebPDecoder::new(reader)?.has_animation()),
@@ -169,6 +175,7 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
 mod tests {
     use super::*;
     use image::{Delay, RgbaImage, codecs::gif::GifEncoder};
+    use std::fs::File;
     use std::io::BufWriter;
     use std::sync::atomic::AtomicBool;
 

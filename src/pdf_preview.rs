@@ -21,6 +21,10 @@ const PDF_PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 const PDF_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const MAX_TOOL_OUTPUT_BYTES: u64 = 64 * 1024;
 const MAX_CACHE_FILES: usize = 512;
+/// The page count is read from a document the user merely selected, so it is
+/// untrusted input feeding a uniform-list item count. Cap it rather than
+/// letting one hostile file lay out a scroll region of billions of pages.
+const MAX_PDF_PAGES: usize = 50_000;
 
 #[derive(Clone, Debug)]
 pub struct PdfPage {
@@ -223,13 +227,25 @@ fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
 }
 
 fn parse_page_count(output: &[u8]) -> Option<usize> {
-    String::from_utf8_lossy(output).lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if !name.trim().eq_ignore_ascii_case("pages") {
-            return None;
-        }
-        value.trim().parse().ok().filter(|pages| *pages > 0)
-    })
+    // Document metadata strings (Title, Author, …) print *before* the real
+    // `Pages:` line and may carry embedded newlines straight out of the PDF,
+    // so the first matching line is attacker-writable. The last one is
+    // pdfinfo's own.
+    let lossy = String::from_utf8_lossy(output);
+    lossy
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if !name.trim().eq_ignore_ascii_case("pages") {
+                return None;
+            }
+            value.trim().parse().ok().filter(valid_page_count)
+        })
+        .next_back()
+}
+
+fn valid_page_count(pages: &usize) -> bool {
+    (1..=MAX_PDF_PAGES).contains(pages)
 }
 
 fn cached_page_count(cache_dir: &Path, identity: &str) -> Option<usize> {
@@ -238,6 +254,8 @@ fn cached_page_count(cache_dir: &Path, identity: &str) -> Option<usize> {
         .trim()
         .parse()
         .ok()
+        // A cache written before the bound existed heals itself here.
+        .filter(valid_page_count)
 }
 
 fn file_identity(path: &Path) -> io::Result<String> {
@@ -335,6 +353,33 @@ mod tests {
         assert_eq!(parse_page_count(b"Title: Test\n"), None);
         assert_eq!(parse_page_count(b"Pages: many\n"), None);
         assert_eq!(parse_page_count(b"Pages: 0\n"), None);
+    }
+
+    /// Metadata strings print before the real `Pages:` line and can embed
+    /// newlines straight out of the document, so a first-match parse hands the
+    /// page count to whoever wrote the PDF's title.
+    #[test]
+    fn a_metadata_string_cannot_supply_the_page_count() {
+        assert_eq!(
+            parse_page_count(b"Title: x\nPages: 999999999\nSubject: y\nPages: 18\n"),
+            Some(18)
+        );
+    }
+
+    /// The count sizes a uniform list, so it is bounded like every other value
+    /// a hostile file can choose.
+    #[test]
+    fn page_counts_beyond_the_bound_are_rejected_including_cached_ones() {
+        let over = MAX_PDF_PAGES + 1;
+        assert_eq!(
+            parse_page_count(format!("Pages: {over}\n").as_bytes()),
+            None
+        );
+        assert_eq!(parse_page_count(b"Pages: 50000\n"), Some(MAX_PDF_PAGES));
+
+        let cache = tempfile::tempdir().unwrap();
+        fs::write(cache.path().join("poisoned.pages"), over.to_string()).unwrap();
+        assert_eq!(cached_page_count(cache.path(), "poisoned"), None);
     }
 
     #[test]

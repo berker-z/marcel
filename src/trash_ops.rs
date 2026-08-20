@@ -62,6 +62,10 @@ pub struct TrashFailure {
 
 #[derive(Debug)]
 pub struct TrashOutcome {
+    /// The exact records this outcome affected. For a trash placement these
+    /// carry undo; for a purge they identify what left the Trash, because two
+    /// entries can share one original path and only the record can tell a
+    /// purged entry from its surviving twin.
     pub records: Vec<TrashRecord>,
     pub completed: Vec<PathBuf>,
     pub failures: Vec<TrashFailure>,
@@ -163,11 +167,13 @@ pub fn purge_trash_records(
         })
         .collect::<Vec<_>>();
 
+    let mut purged = Vec::new();
     for backing in deleted.completed {
         let Some(record) = records.iter().find(|record| record.backing_path == backing) else {
             continue;
         };
         completed.push(record.original_path.clone());
+        purged.push(record.clone());
         if let Err(error) = remove_matching_trash_info(record) {
             failures.push(TrashFailure {
                 path: record.original_path.clone(),
@@ -180,7 +186,7 @@ pub fn purge_trash_records(
     }
 
     TrashOutcome {
-        records: Vec::new(),
+        records: purged,
         completed,
         failures,
         undo_unavailable: false,
@@ -951,6 +957,46 @@ mod tests {
         assert!(outcome.failures.is_empty());
         assert!(!record.backing_path.exists());
         assert!(!record.info_path.exists());
+        // The outcome names the exact record it purged: a Trash view must
+        // reconcile by entry, not by original path, because two entries can
+        // share one original.
+        assert_eq!(
+            outcome
+                .records
+                .iter()
+                .map(|record| record.backing_path())
+                .collect::<Vec<_>>(),
+            [record.backing_path()]
+        );
+    }
+
+    /// Two Trash entries can hold the same original path — the same file
+    /// trashed twice. Reconciling a purge by original path removed both from
+    /// the listing when only one was purged.
+    #[test]
+    fn purging_one_of_two_entries_sharing_an_original_names_only_the_purged_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_parent = temp.path().join("original");
+        fs::create_dir(&original_parent).unwrap();
+        let first = seeded_record(&temp.path().join("TrashA"), &original_parent, "note.txt");
+        let second = seeded_record(&temp.path().join("TrashB"), &original_parent, "note.txt");
+        assert_eq!(first.original_path(), second.original_path());
+
+        let outcome = purge_trash_records(
+            std::slice::from_ref(&first),
+            Arc::new(TransferProgress::default()),
+        );
+
+        assert!(outcome.failures.is_empty(), "{outcome:?}");
+        assert_eq!(
+            outcome
+                .records
+                .iter()
+                .map(|record| record.backing_path())
+                .collect::<Vec<_>>(),
+            [first.backing_path()]
+        );
+        assert!(second.backing_path.exists());
     }
 
     #[test]

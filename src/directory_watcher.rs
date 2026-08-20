@@ -21,6 +21,13 @@ const WATCH_COALESCE_MAX: Duration = Duration::from_secs(1);
 const WATCH_CANCEL_POLL: Duration = Duration::from_millis(100);
 const POLL_FALLBACK_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_PATHS_PER_BATCH: usize = 4096;
+/// How many raw notify events one coalescing window will hold.
+///
+/// The raw channel is unbounded, and draining it into a `Vec` for up to a
+/// second let a churning directory (a build tree, a log spray) grow that
+/// vector without limit. Past this the window closes early; the batch then
+/// exceeds `MAX_PATHS_PER_BATCH` or not on its own merits.
+const MAX_RAW_EVENTS_PER_BATCH: usize = 65_536;
 
 #[derive(Debug)]
 pub enum DirectoryWatcherUpdate {
@@ -92,7 +99,7 @@ pub fn watch_directory(
         let started = Instant::now();
         let mut raw = vec![first];
 
-        while started.elapsed() < WATCH_COALESCE_MAX {
+        while started.elapsed() < WATCH_COALESCE_MAX && raw.len() < MAX_RAW_EVENTS_PER_BATCH {
             let remaining = WATCH_COALESCE_MAX.saturating_sub(started.elapsed());
             let timeout = WATCH_COALESCE_IDLE.min(remaining);
             match raw_receiver.recv_timeout(timeout) {

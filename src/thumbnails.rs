@@ -34,6 +34,11 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
         .canonicalize()
         .with_context(|| format!("could not resolve {}", path.display()))?;
     let metadata = canonical.metadata()?;
+    if !metadata.is_file() {
+        // Thumbnail candidates are chosen by file name alone, and opening a
+        // FIFO named like an image would park a worker thread forever.
+        bail!("not a regular file");
+    }
     if metadata.len() > MAX_SOURCE_BYTES {
         bail!("image exceeds thumbnail source-size limit");
     }
@@ -59,7 +64,9 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
     limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
     limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
 
-    let mut reader = ImageReader::open(&canonical)?;
+    let mut reader = ImageReader::new(BufReader::new(crate::local_fs::open_regular_file(
+        &canonical,
+    )?));
     reader.limits(limits);
     let mut decoder = reader.with_guessed_format()?.into_decoder()?;
     let dimensions = decoder.dimensions();

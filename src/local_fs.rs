@@ -29,6 +29,29 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
         .create(path)
 }
 
+/// Open `path` for reading, refusing anything but a regular file.
+///
+/// `open(2)` on a FIFO with no writer blocks forever, and a blocked open cannot
+/// be interrupted by a cancellation flag — the worker thread is leaked for the
+/// life of the process. Opening with `O_NONBLOCK` and verifying the *opened*
+/// descriptor closes that hole without a stat-then-open race; on a regular
+/// file the flag has no effect on reads.
+pub fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("“{}” is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
 pub fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(test)]
     if fault::should_fail(destination) {

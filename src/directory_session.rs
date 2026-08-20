@@ -42,6 +42,13 @@ pub struct DirectorySession {
     pub(crate) watch_task: Option<Task<()>>,
     watch_cancel: Option<Arc<AtomicBool>>,
     pub(crate) pending_reveal: Vec<PathBuf>,
+    /// Paths that changed while a load was streaming, held to be re-validated
+    /// once the enumeration settles. Applying them mid-stream raced the
+    /// stream: an entry inserted by an event was inserted again when the
+    /// stream reached the same name.
+    pending_refresh: HashSet<PathBuf>,
+    /// Whether a full rescan was requested while a load was streaming.
+    pending_rescan: bool,
     entries_revision: u64,
     projection_revision: u64,
     entry_index: RefCell<EntryIndex>,
@@ -64,10 +71,32 @@ impl DirectorySession {
             watch_task: None,
             watch_cancel: None,
             pending_reveal: Vec::new(),
+            pending_refresh: HashSet::new(),
+            pending_rescan: false,
             entries_revision: 1,
             projection_revision: 1,
             entry_index: RefCell::new(EntryIndex::default()),
         }
+    }
+
+    /// Note paths whose state changed while the load streams, so the finished
+    /// load can re-validate them.
+    pub fn defer_refresh(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.pending_refresh.extend(paths);
+    }
+
+    /// Note that the listing cannot be trusted and must be reloaded once the
+    /// load in flight finishes.
+    pub fn defer_rescan(&mut self) {
+        self.pending_rescan = true;
+    }
+
+    pub fn take_pending_refresh(&mut self) -> Vec<PathBuf> {
+        self.pending_refresh.drain().collect()
+    }
+
+    pub fn take_pending_rescan(&mut self) -> bool {
+        std::mem::take(&mut self.pending_rescan)
     }
 
     /// Resolve one entry by path in constant time.
@@ -163,6 +192,8 @@ impl DirectorySession {
         self.stop_watcher();
         self.generation = self.generation.wrapping_add(1);
         self.load_task.take();
+        self.pending_refresh.clear();
+        self.pending_rescan = false;
         self.entries.clear();
         self.mark_entries_changed();
         self.visible_entries.clear();
@@ -313,6 +344,7 @@ impl DirectorySession {
     }
 
     pub fn reconcile_selection(&mut self) -> ReconcileSelection {
+        let previous_primary = self.selection.primary().cloned();
         let visible = self
             .visible_entries
             .iter()
@@ -322,7 +354,20 @@ impl DirectorySession {
         let ordered = self.visible_paths();
         self.selection
             .retain(&ordered, |path| visible.contains(path));
-        if self.selection.primary().is_some() {
+        if let Some(primary) = self.selection.primary().cloned() {
+            // `retain` silently promotes a surviving selected item to primary
+            // when the old primary left the visible set. The preview must
+            // follow, or the pane keeps showing the vanished item while the
+            // footer names the new one.
+            if previous_primary.as_ref() != Some(&primary)
+                && let Some(entry) = self
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == primary)
+                    .cloned()
+            {
+                return ReconcileSelection::Preview(entry);
+            }
             return ReconcileSelection::Unchanged;
         }
 
@@ -730,6 +775,62 @@ mod tests {
 
         session.begin_virtual_load(true);
         assert!(session.entry(Path::new("/folder/b.txt")).is_none());
+    }
+
+    /// When the primary leaves the visible set while other selected items
+    /// stay, `retain` promotes a survivor to primary. The preview must follow
+    /// that promotion; keeping it "unchanged" left the pane showing a vanished
+    /// file while the footer named the new primary.
+    #[test]
+    fn a_promoted_primary_refreshes_the_preview() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.show_hidden = true;
+        session.entries = vec![
+            entry(".bashrc", false, Some(1)),
+            entry("notes.txt", false, Some(2)),
+        ];
+        sort_entries(&mut session.entries);
+        session.rebuild_visible_entries();
+        session
+            .selection
+            .add_all([PathBuf::from("/folder/notes.txt")]);
+        session
+            .selection
+            .add_all([PathBuf::from("/folder/.bashrc")]);
+        session.selection.make_primary(Path::new("/folder/.bashrc"));
+
+        let result = session.set_show_hidden(false);
+
+        assert!(
+            matches!(
+                result,
+                Some(ReconcileSelection::Preview(FileEntry { ref name, .. })) if name == "notes.txt"
+            ),
+            "the promoted primary must be previewed"
+        );
+    }
+
+    /// Deferred work belongs to one load: a new load starts from a clean
+    /// slate, and the finished load hands back exactly what accumulated.
+    #[test]
+    fn deferred_refresh_and_rescan_are_scoped_to_one_load() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.defer_refresh([PathBuf::from("/folder/changed.txt")]);
+        session.defer_rescan();
+
+        assert!(session.take_pending_rescan());
+        assert!(!session.take_pending_rescan(), "taking consumes the flag");
+        assert_eq!(
+            session.take_pending_refresh(),
+            vec![PathBuf::from("/folder/changed.txt")]
+        );
+        assert!(session.take_pending_refresh().is_empty());
+
+        session.defer_refresh([PathBuf::from("/folder/stale.txt")]);
+        session.defer_rescan();
+        session.begin_virtual_load(true);
+        assert!(!session.take_pending_rescan());
+        assert!(session.take_pending_refresh().is_empty());
     }
 
     #[test]

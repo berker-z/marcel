@@ -29,6 +29,14 @@ Sprint status uses four consistent meanings:
   later Marcel would sweep. A fifth defect in the same function — a cancelled
   merge reported as a failure — is recorded there and was missed by the review.
   All five are closed in Sprint 20.
+- A fifth review, [`review-2026-08-20.md`](review-2026-08-20.md), read the
+  whole tree rather than the operations core and found its defects almost
+  entirely outside it — the load/watcher seam, the preview surface, bookmarks
+  persistence, the D-Bus surface, and the window layer. All confirmed findings
+  are fixed with regression coverage in
+  [`Sprint 22`](sprints/022-read-the-whole-tree.md), which also adds its own
+  short list to the graphical acceptance matrix; its four deliberately
+  deferred items are folded into the lists below.
 - The plan in [`review-2026-08-10.md`](review-2026-08-10.md) is complete through
   Stage 5 and Stage 7. Stage 6 is partly done: every transfer path now shares
   one bounded snapshot budget, and the journal-wide budget it asks for remains
@@ -266,7 +274,13 @@ The packaging contract, current dependency caveats, target formats, and
   `.marcel-delete-*` quarantine remnants.
 - Generalize filesystem locations into a virtual-location abstraction so
   trashed directories can be navigated without treating their backing paths as
-  ordinary folders.
+  ordinary folders — and so the Trash view can participate in Back/Forward
+  history, which currently skips over it
+  ([`review-2026-08-20.md`](review-2026-08-20.md)).
+- Give watcher-triggered rescans a backoff, and preserve the selection and any
+  in-progress rename across them. A churning directory (a build tree) can loop
+  full reloads today, each one clearing the user's selection
+  ([`review-2026-08-20.md`](review-2026-08-20.md)).
 - [ ] Implement New File and directory Properties behind their shared
   commands.
 - [x] Implement Open in Terminal through the shared current-directory command,
@@ -368,6 +382,15 @@ The packaging contract, current dependency caveats, target formats, and
 - Consider image thumbnails in folder-preview rows after measuring whether
   their extra scheduling and decoded-image pressure materially improves the
   glanceable preview.
+- Bound the folder preview's child listing: its per-batch merge is quadratic
+  on the foreground executor and the full listing is retained unbounded, which
+  a very large hovered directory turns into real degradation. Deciding what a
+  bounded glanceable preview shows is the product half of the fix
+  ([`review-2026-08-20.md`](review-2026-08-20.md)).
+- Key freedesktop thumbnails by the original URI as the spec requires, rather
+  than the canonicalized path; today Marcel and other applications regenerate
+  instead of sharing thumbnails for symlinked paths. Interop only
+  ([`review-2026-08-20.md`](review-2026-08-20.md)).
 - Add PDF fixtures covering long documents, mixed page sizes, corruption, and
   rapid scrolling.
 - Determine whether PDF page canvases should use actual per-page dimensions

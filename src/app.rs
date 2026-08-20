@@ -357,10 +357,14 @@ impl Marcel {
             })
             .collect::<Vec<_>>();
         let origin = window.window_handle();
-        let added = self
+        // `None` means the store refused and has already said why.
+        let Some(added) = self
             .bookmarks
             .clone()
-            .update(cx, |bookmarks, cx| bookmarks.add(&candidates, origin, cx));
+            .update(cx, |bookmarks, cx| bookmarks.add(&candidates, origin, cx))
+        else {
+            return;
+        };
 
         if added == 0 {
             window.push_notification(
@@ -379,6 +383,7 @@ impl Marcel {
     fn move_bookmark(
         &mut self,
         from: usize,
+        dragged: &Path,
         insertion: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -386,19 +391,23 @@ impl Marcel {
         self.sidebar.bookmark_insertion = None;
         let origin = window.window_handle();
         self.bookmarks.clone().update(cx, |bookmarks, cx| {
-            bookmarks.move_to(from, insertion, origin, cx);
+            bookmarks.move_to(from, dragged, insertion, origin, cx);
         });
         cx.notify();
     }
 
-    fn remove_bookmark(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_bookmark(
+        &mut self,
+        index: usize,
+        expected: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar.bookmark_menu = None;
         let origin = window.window_handle();
-        let Some(bookmark) = self
-            .bookmarks
-            .clone()
-            .update(cx, |bookmarks, cx| bookmarks.remove_at(index, origin, cx))
-        else {
+        let Some(bookmark) = self.bookmarks.clone().update(cx, |bookmarks, cx| {
+            bookmarks.remove_at(index, expected, origin, cx)
+        }) else {
             return;
         };
         window.push_notification(
@@ -413,8 +422,15 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let menu = self.sidebar.bookmark_menu?;
-        self.bookmarks.read(cx).bookmarks().get(menu.index)?;
+        let menu = self.sidebar.bookmark_menu.clone()?;
+        // The menu names a bookmark, not a slot: if another window changed the
+        // list since it opened, the menu no longer describes what a click
+        // would act on, so it goes away instead.
+        self.bookmarks
+            .read(cx)
+            .bookmarks()
+            .get(menu.index)
+            .filter(|bookmark| bookmark.path == menu.path)?;
         let colors = cx.theme().colors;
         // Popovers and `accent` share the raised surface in Marcel palettes.
         // The active-list tint stays visible over that surface on every theme.
@@ -429,6 +445,7 @@ impl Marcel {
             )
             .max(ENTRY_MENU_MARGIN);
         let index = menu.index;
+        let menu_path = menu.path.clone();
 
         Some(
             div()
@@ -458,7 +475,7 @@ impl Marcel {
                         .cursor_pointer()
                         .hover(|this| this.bg(colors.list_active))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.remove_bookmark(index, window, cx);
+                            this.remove_bookmark(index, &menu_path, window, cx);
                         }))
                         .child("Remove Bookmark"),
                 )
@@ -754,6 +771,18 @@ impl Marcel {
         self.preview.reset_thumbnails();
         self.drag.entry_content_bounds.borrow_mut().clear();
         self.clear_selection();
+        if clear_filter {
+            // A navigation shows a new folder from the top. Only a refresh of
+            // the same folder — which never clears the filter — keeps the
+            // user's place; the old pixel offset in a different folder landed
+            // them somewhere arbitrary.
+            self.ui.directory_scroll = UniformListScrollHandle::new();
+        }
+        // Watch from the start of the enumeration, not its end: a change
+        // arriving while a large directory streamed used to be lost for good.
+        // Events that arrive while the stream owns the listing are deferred
+        // and re-validated at `Done`.
+        self.start_directory_watcher(ticket, path.clone(), cx);
 
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
@@ -812,7 +841,23 @@ impl Marcel {
                                             }),
                                     );
                                 }
-                                this.start_directory_watcher(ticket, path.clone(), cx);
+                                // Settle whatever changed while the stream
+                                // owned the listing.
+                                if this.directory.take_pending_rescan() {
+                                    this.start_directory_load(false, cx);
+                                    return false;
+                                }
+                                let deferred = this.directory.take_pending_refresh();
+                                if !deferred.is_empty() {
+                                    this.apply_directory_changes(
+                                        DirectoryChanges {
+                                            removed: Vec::new(),
+                                            upserted: deferred,
+                                        },
+                                        None,
+                                        cx,
+                                    );
+                                }
                             }
                             DirectoryUpdate::Error(error) => {
                                 this.directory.fail_load(error);
@@ -840,6 +885,9 @@ impl Marcel {
         self.drag.entry_content_bounds.borrow_mut().clear();
         self.sidebar.trash_records.clear();
         self.clear_selection();
+        if clear_filter {
+            self.ui.directory_scroll = UniformListScrollHandle::new();
+        }
 
         let load = cx.background_executor().spawn(smol::unblock(move || {
             let listing = list_trash_records()?;
@@ -918,6 +966,20 @@ impl Marcel {
                         }
 
                         match update {
+                            // While the load streams, the stream owns the
+                            // listing: applying events mid-stream inserted
+                            // entries the stream then inserted again. Defer
+                            // the paths; `Done` re-validates them.
+                            DirectoryWatcherUpdate::Events(events) if this.directory.loading => {
+                                if events
+                                    .iter()
+                                    .any(|event| matches!(event, DirectoryEvent::RescanRequired))
+                                {
+                                    this.directory.defer_rescan();
+                                } else {
+                                    this.directory.defer_refresh(directory_event_paths(&events));
+                                }
+                            }
                             DirectoryWatcherUpdate::Events(events) => {
                                 let affected = directory_event_paths(&events);
                                 match this.directory.apply_events(events) {
@@ -931,6 +993,9 @@ impl Marcel {
                                         return false;
                                     }
                                 }
+                            }
+                            DirectoryWatcherUpdate::RescanRequired if this.directory.loading => {
+                                this.directory.defer_rescan();
                             }
                             DirectoryWatcherUpdate::RescanRequired => {
                                 this.start_directory_load(false, cx);
@@ -955,11 +1020,27 @@ impl Marcel {
 
     fn select_pending_loaded_entries(&mut self, cx: &mut Context<Self>) {
         let entries = self.directory.take_pending_visible_entries();
-        if let Some(primary) = self.directory.selection.primary()
-            && let Some(entry) = entries.into_iter().find(|entry| &entry.path == primary)
-        {
-            self.start_preview(entry, cx);
+        let Some(primary) = self.directory.selection.primary().cloned() else {
+            return;
+        };
+        let Some(entry) = entries.into_iter().find(|entry| entry.path == primary) else {
+            return;
+        };
+        // Revealing means *showing*: selecting an item somewhere past the
+        // viewport and leaving the scroll where it was fails the feature's
+        // whole purpose.
+        if let Some(scroll_row) = selected_scroll_row(
+            Some(&primary),
+            &self.directory.entries,
+            &self.directory.visible_entries,
+            self.ui.view_mode,
+            self.grid_columns(),
+        ) {
+            self.ui
+                .directory_scroll
+                .scroll_to_item(scroll_row, ScrollStrategy::Center);
         }
+        self.start_preview(entry, cx);
     }
 
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {
@@ -1059,10 +1140,11 @@ impl Marcel {
             BrowserCommand::ClearSelection => {
                 self.ui.rename_path.is_some() || !self.directory.selection.selected().is_empty()
             }
+            // Staging the clipboard is instantaneous and mutates nothing, so a
+            // running operation is no reason to grey it out — only Paste has
+            // to wait for the busy lock.
             BrowserCommand::CopySelection | BrowserCommand::CutSelection => {
-                !self.sidebar.browsing_trash
-                    && !self.operations.read(cx).is_busy()
-                    && !self.directory.selection.selected().is_empty()
+                !self.sidebar.browsing_trash && !self.directory.selection.selected().is_empty()
             }
             BrowserCommand::PasteFiles => {
                 !self.sidebar.browsing_trash
@@ -1377,8 +1459,11 @@ impl Marcel {
             &input,
             window,
             |this, input, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                    this.submit_rename(input, window, cx);
+                InputEvent::PressEnter { .. } => {
+                    this.submit_rename(input, false, window, cx);
+                }
+                InputEvent::Blur => {
+                    this.submit_rename(input, true, window, cx);
                 }
                 InputEvent::Change | InputEvent::Focus => {}
             },
@@ -1399,6 +1484,7 @@ impl Marcel {
     fn submit_rename(
         &mut self,
         input: &Entity<InputState>,
+        on_blur: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1407,6 +1493,13 @@ impl Marcel {
         };
         let name = input.read(cx).value().to_string();
         if let Err(error) = validate_entry_name(&name) {
+            // Clicking away means "never mind". Pulling focus back into the
+            // input on every blur trapped the pointer in a field the user was
+            // trying to leave; only an explicit Enter argues back.
+            if on_blur {
+                self.cancel_rename(window, cx);
+                return;
+            }
             window.push_notification(Notification::error(error.to_string()), cx);
             input.update(cx, |input, cx| input.focus(window, cx));
             return;
@@ -1956,27 +2049,38 @@ impl Marcel {
         }
 
         let current_dir = self.directory.current_dir.clone();
-        let removed = changes
+        // Every path is re-stat'd before it is applied — the removed ones too.
+        // An operation's `removed` can be stale by the time it lands: an
+        // external process may have recreated the path, and applying the
+        // removal verbatim deleted an existing file from the view.
+        let candidates = changes
             .removed
             .into_iter()
+            .chain(changes.upserted)
             .filter(|path| path.parent() == Some(current_dir.as_path()))
             .collect::<Vec<_>>();
-        let upserted = changes
-            .upserted
-            .into_iter()
-            .filter(|path| path.parent() == Some(current_dir.as_path()))
-            .collect::<Vec<_>>();
-        if removed.is_empty() && upserted.is_empty() {
+        let reveal = reveal.filter(|path| path.parent() == Some(current_dir.as_path()));
+        if candidates.is_empty() && reveal.is_none() {
+            return;
+        }
+
+        if self.directory.loading {
+            // The stream owns the listing; fold this into the catch-up set the
+            // finished load re-validates. The reveal joins the pending set,
+            // which already selects entries as their batches arrive.
+            self.directory.defer_refresh(candidates);
+            if let Some(path) = reveal {
+                self.directory.pending_reveal.push(path);
+            }
             return;
         }
 
         let directory_generation = self.directory.generation;
         let task = cx
             .background_executor()
-            .spawn(smol::unblock(move || revalidate_paths(upserted)));
+            .spawn(smol::unblock(move || revalidate_paths(candidates)));
         cx.spawn(async move |this, cx| {
-            let mut events = task.await;
-            events.extend(removed.into_iter().map(DirectoryEvent::Removed));
+            let events = task.await;
             let _ = this.update(cx, |this, cx| {
                 if this.sidebar.browsing_trash
                     || directory_generation != this.directory.generation
@@ -1986,10 +2090,14 @@ impl Marcel {
                 }
 
                 let affected = directory_event_paths(&events);
-                this.directory.pending_reveal = reveal
-                    .filter(|path| path.parent() == Some(this.directory.current_dir.as_path()))
-                    .into_iter()
-                    .collect();
+                // Only an operation that carries a reveal may touch the
+                // pending set here: replacing it unconditionally wiped out an
+                // in-flight navigation's reveal whenever an unrelated
+                // operation completed.
+                let had_reveal = reveal.is_some();
+                if let Some(path) = reveal {
+                    this.directory.pending_reveal = vec![path];
+                }
                 match this.directory.apply_events(events) {
                     ApplyDirectoryEvents::Applied(reconcile) => {
                         this.invalidate_watched_thumbnails(&affected);
@@ -1998,7 +2106,9 @@ impl Marcel {
                         // Unlike a streamed directory load, this is the only
                         // result batch. Do not retain an impossible reveal
                         // across later unrelated watcher events.
-                        this.directory.pending_reveal.clear();
+                        if had_reveal {
+                            this.directory.pending_reveal.clear();
+                        }
                     }
                     ApplyDirectoryEvents::RescanRequired => {
                         this.start_directory_load(false, cx);
@@ -2044,11 +2154,13 @@ impl Marcel {
                 .into_iter()
                 .filter_map(|record| {
                     let mut entry = FileEntry::from_path(record.backing_path(), &mut icons).ok()?;
-                    entry.name = record
-                        .original_path()
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| entry.name.clone());
+                    // `set_name`, exactly like the initial Trash load: assigning
+                    // only `name` left `name_os` and `folded_name` carrying the
+                    // backing file's identity, so the row sorted and filtered by
+                    // a name the user cannot see.
+                    if let Some(name) = record.original_path().file_name() {
+                        entry.set_name(name.to_os_string());
+                    }
                     entry.navigable = false;
                     Some((entry, record))
                 })
@@ -2187,7 +2299,14 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         let operations = self.operations.read(cx);
-        if operations.is_busy() && operations.request_cancel() {
+        // Escape is easy to press for some other reason, so it only cancels an
+        // operation from the window that started it (or from anywhere once
+        // that window is gone). The progress card's Cancel stays available on
+        // every window.
+        if operations.is_busy()
+            && operations.can_cancel_from(window.window_handle(), cx)
+            && operations.request_cancel()
+        {
             window.push_notification(Notification::info("Cancelling file operation…"), cx);
             return;
         }
@@ -4556,6 +4675,7 @@ impl Marcel {
         let operation_busy = self.operations.read(cx).is_busy();
         let insertion_here = self.sidebar.bookmark_insertion == Some(BookmarkInsertion { index });
         let navigate_path = bookmark.path.clone();
+        let menu_path = bookmark.path.clone();
         let drop_path = bookmark.path.clone();
         let external_drop_path = bookmark.path.clone();
         let can_drop_path = bookmark.path.clone();
@@ -4659,6 +4779,7 @@ impl Marcel {
                             this.ui.entry_menu = None;
                             this.sidebar.bookmark_menu = Some(BookmarkMenu {
                                 index,
+                                path: menu_path.clone(),
                                 position: event.position,
                             });
                             cx.notify();
@@ -5915,7 +6036,7 @@ impl Render for Marcel {
                                 .bookmark_insertion
                                 .map(|insertion| insertion.index)
                                 .unwrap_or(this.bookmarks.read(cx).bookmarks().len());
-                            this.move_bookmark(drag.index, insertion, window, cx);
+                            this.move_bookmark(drag.index, &drag.path, insertion, window, cx);
                         }))
                         .on_drop(cx.listener(|this, drag: &FileDrag, window, cx| {
                             this.add_dragged_bookmarks(&drag.bookmark_candidates, window, cx);
@@ -6729,13 +6850,19 @@ fn selection_target(
     let current = match current {
         Some(current) if current < item_count => current,
         _ => {
-            return Some(match motion {
+            return match motion {
+                // Left and Right are deliberate no-ops in List view, with or
+                // without a selection; answering them from nothing jumped the
+                // selection to the end of the folder.
+                SelectionMotion::Left | SelectionMotion::Right if view_mode == ViewMode::List => {
+                    None
+                }
                 SelectionMotion::Up
                 | SelectionMotion::Left
                 | SelectionMotion::Last
-                | SelectionMotion::PageUp => last,
-                _ => 0,
-            });
+                | SelectionMotion::PageUp => Some(last),
+                _ => Some(0),
+            };
         }
     };
     let columns = columns.max(1);
@@ -6744,7 +6871,10 @@ fn selection_target(
     Some(match motion {
         SelectionMotion::Up => match view_mode {
             ViewMode::List => current.saturating_sub(1),
-            ViewMode::Grid => current.saturating_sub(columns),
+            // The top row has nowhere up to go; jumping to index 0 silently
+            // changed columns.
+            ViewMode::Grid if current < columns => current,
+            ViewMode::Grid => current - columns,
         },
         SelectionMotion::Down => match view_mode {
             ViewMode::List => (current + 1).min(last),
@@ -6812,9 +6942,16 @@ fn dialog_footer(
 /// Both are pointed at rather than hidden, because guidance naming a path the
 /// browser refuses to show cannot be followed.
 fn quarantine_recovery_warning(entries: &[FileEntry]) -> Option<String> {
-    let current_process_prefix = format!(".marcel-delete-{}-", std::process::id());
     let interrupted = remnant_paths(entries, |name| {
-        is_delete_quarantine_name(name) && !name.starts_with(&current_process_prefix)
+        // A quarantine whose owner is still running is a deletion in
+        // progress, not an interrupted one — two Marcel processes can exist
+        // when desktop integration is unavailable, and inviting the user to
+        // move data out from under an active delete would be worse than
+        // saying nothing.
+        is_delete_quarantine_name(name)
+            && delete_quarantine_owner(name).is_none_or(|owner| {
+                owner != std::process::id() && !crate::file_ops::process_is_running(owner)
+            })
     });
     let unrestored = remnant_paths(entries, |name| name.starts_with(RECOVERY_REMNANT_PREFIX));
 
@@ -6858,6 +6995,14 @@ fn remnant_paths(entries: &[FileEntry], matches: impl Fn(&str) -> bool) -> Vec<P
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+fn delete_quarantine_owner(name: &str) -> Option<u32> {
+    name.strip_prefix(".marcel-delete-")?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn is_delete_quarantine_name(name: &str) -> bool {
@@ -6967,9 +7112,15 @@ mod tests {
         );
     }
 
+    /// A pid no Linux kernel hands out: `pid_max` tops out at 2^22, so
+    /// `/proc/<this>` can never exist and the owner is provably dead.
+    fn dead_process_id() -> u32 {
+        u32::MAX
+    }
+
     #[test]
     fn completed_load_warns_about_an_interrupted_delete_quarantine() {
-        let old_process = std::process::id().saturating_add(1);
+        let old_process = dead_process_id();
         let remnant = test_file_entry(&format!("/folder/.marcel-delete-{old_process}-4-thesis"));
         let warning = quarantine_recovery_warning(&[remnant]).unwrap();
 
@@ -6998,7 +7149,7 @@ mod tests {
         // Both kinds of remnant can be present, and both are reported.
         let interrupted = test_file_entry(&format!(
             "/folder/.marcel-delete-{}-4-thesis",
-            std::process::id().saturating_add(1)
+            dead_process_id()
         ));
         let warning = quarantine_recovery_warning(&[preserved, interrupted]).unwrap();
         assert!(warning.contains(".marcel-recovered-"), "{warning}");
@@ -7012,9 +7163,15 @@ mod tests {
             std::process::id()
         ));
         let ordinary = test_file_entry("/folder/.marcel-delete-not-a-quarantine");
+        // A quarantine owned by a *different* live process is a deletion in
+        // progress — another Marcel instance mid-delete — not an interruption.
+        // Warning the user to move data out from under it would be worse than
+        // saying nothing. Pid 1 is always running.
+        let another_live = test_file_entry("/folder/.marcel-delete-1-0-busy");
 
         assert!(quarantine_recovery_warning(&[active]).is_none());
         assert!(quarantine_recovery_warning(&[ordinary]).is_none());
+        assert!(quarantine_recovery_warning(&[another_live]).is_none());
     }
 
     #[test]

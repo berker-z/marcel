@@ -4,6 +4,7 @@ use marcel::window;
 fn main() {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let explicit_launch = !arguments.is_empty();
     let start_path = marcel::launch::start_path(arguments, current_dir);
 
     let desktop_runtime = {
@@ -20,6 +21,17 @@ fn main() {
         }
     };
 
+    // A `DBusActivatable` cold start runs `marcel` with no arguments at the
+    // bus daemon's working directory, then delivers the real request — Open,
+    // Activate, ShowItems — over the bus. Opening a window first would put a
+    // stray window at that directory in front of every such launch, so wait
+    // for the request instead. Anything else — a terminal, a launcher running
+    // the desktop entry's Exec line directly — still gets its window here.
+    let wait_for_bus_request = !explicit_launch
+        && desktop_runtime.is_some()
+        && (std::env::var_os("DBUS_STARTER_BUS_TYPE").is_some()
+            || std::env::var_os("DBUS_STARTER_ADDRESS").is_some());
+
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         marcel::identity::init(cx);
@@ -28,14 +40,17 @@ fn main() {
         marcel::operations::init(cx);
         marcel::window::init(cx);
 
-        window::open(start_path.clone(), cx).expect("failed to open Marcel's initial window");
+        if !wait_for_bus_request {
+            window::open(start_path.clone(), cx).expect("failed to open Marcel's initial window");
+        }
 
         if let Some(runtime) = desktop_runtime {
             let requests = runtime.requests();
+            let fallback_path = start_path.clone();
             cx.spawn(async move |cx| {
                 let _runtime = runtime;
                 while let Ok(request) = requests.recv().await {
-                    cx.update(|cx| handle_desktop_request(request, cx));
+                    cx.update(|cx| handle_desktop_request(request, &fallback_path, cx));
                 }
                 Ok::<_, anyhow::Error>(())
             })
@@ -46,7 +61,11 @@ fn main() {
     });
 }
 
-fn handle_desktop_request(request: marcel::desktop_integration::DesktopRequest, cx: &mut App) {
+fn handle_desktop_request(
+    request: marcel::desktop_integration::DesktopRequest,
+    fallback_path: &std::path::Path,
+    cx: &mut App,
+) {
     use marcel::desktop_integration::{DesktopRequest, RevealedLocation};
 
     let registry = window::global(cx);
@@ -65,6 +84,11 @@ fn handle_desktop_request(request: marcel::desktop_integration::DesktopRequest, 
                 let _ = current
                     .handle
                     .update(cx, |_, window, _| window.activate_window());
+            } else {
+                // A cold bus activation deferred its initial window; with
+                // nothing to raise, "show me the Marcel I have" means opening
+                // one.
+                let _ = window::open(fallback_path.to_path_buf(), cx);
             }
         }
         DesktopRequest::Open(locations) | DesktopRequest::ShowItems(locations) => {
@@ -92,6 +116,7 @@ fn show_locations(
     cx: &mut App,
 ) {
     let registry = window::global(cx);
+    let mut refused = false;
     for (index, location) in locations.into_iter().enumerate() {
         let reused = may_reuse
             && index == 0
@@ -109,24 +134,35 @@ fn show_locations(
                     .is_ok()
             });
         if !reused {
-            open_new_window(location, cx);
+            refused |= !open_new_window(location, cx);
         }
+    }
+    if refused && let Some(handle) = marcel::surface::current(None, cx) {
+        let _ = handle.update(cx, |_, window, cx| {
+            marcel::surface::Report::Error(format!(
+                "Refusing to open more than {} windows",
+                window::MAX_LIVE_WINDOWS
+            ))
+            .show(window, cx);
+        });
     }
     cx.activate(true);
 }
 
-fn open_new_window(location: marcel::desktop_integration::RevealedLocation, cx: &mut App) {
+/// Open one window for `location`, saying whether one could be opened.
+fn open_new_window(location: marcel::desktop_integration::RevealedLocation, cx: &mut App) -> bool {
     let Ok(opened) = window::open(location.directory.clone(), cx) else {
-        return;
+        return false;
     };
     if location.items.is_empty() {
-        return;
+        return true;
     }
     let _ = opened.handle.update(cx, |_, window, cx| {
         opened.view.update(cx, |view, cx| {
             view.open_external_location(location.directory, location.items, window, cx);
         });
     });
+    true
 }
 
 #[cfg(test)]

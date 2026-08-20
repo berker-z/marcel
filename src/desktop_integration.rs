@@ -122,25 +122,45 @@ async fn acquire_or_forward_with_generic_name(
             .replace_existing_names(false),
         Err(error) => return InstanceStartup::Unavailable(error.to_string()),
     };
-    let builder = if claim_file_manager_name {
-        match builder.name(FILE_MANAGER_BUS_NAME) {
-            Ok(builder) => builder,
-            Err(error) => return InstanceStartup::Unavailable(error.to_string()),
-        }
-    } else {
-        builder
-    };
-
     match builder.build().await {
-        Ok(connection) => InstanceStartup::Primary(DesktopRuntime {
-            _connection: connection,
-            requests: receiver,
-        }),
+        Ok(connection) => {
+            // Only after the application name is owned: the generic name is an
+            // opt-in extra, never a startup condition. Requesting both through
+            // the builder conflated them — another file manager owning
+            // `org.freedesktop.FileManager1` made `build()` fail with
+            // `NameTaken`, which reads as "another Marcel is running" and
+            // forwards the launch to an application name nobody owns,
+            // re-activating another Marcel that fails the same way.
+            if claim_file_manager_name {
+                claim_generic_file_manager_name(&connection).await;
+            }
+            InstanceStartup::Primary(DesktopRuntime {
+                _connection: connection,
+                requests: receiver,
+            })
+        }
         Err(zbus::Error::NameTaken) => match forward_to_primary(initial_uris).await {
             Ok(()) => InstanceStartup::Forwarded,
             Err(error) => InstanceStartup::Unavailable(error.to_string()),
         },
         Err(error) => InstanceStartup::Unavailable(error.to_string()),
+    }
+}
+
+/// Try to own the generic file-manager name, continuing without it when
+/// another file manager already does.
+async fn claim_generic_file_manager_name(connection: &zbus::Connection) {
+    use zbus::fdo::{RequestNameFlags, RequestNameReply};
+
+    match connection
+        .request_name_with_flags(FILE_MANAGER_BUS_NAME, RequestNameFlags::DoNotQueue.into())
+        .await
+    {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {}
+        Ok(_) => eprintln!(
+            "another file manager owns {FILE_MANAGER_BUS_NAME}; Marcel keeps running without it"
+        ),
+        Err(error) => eprintln!("could not request {FILE_MANAGER_BUS_NAME}: {error}"),
     }
 }
 
@@ -649,6 +669,46 @@ mod tests {
                     .iter()
                     .any(|name| name.as_str() == FILE_MANAGER_BUS_NAME),
                 "the opt-in primary must own the generic file-manager name"
+            );
+
+            // Another file manager owning the generic name must not read as
+            // "another Marcel is running": that misreading forwarded the
+            // launch to an application name nobody owned, re-activating
+            // another Marcel that failed the same way.
+            drop(replacement);
+            let foreign = zbus::Connection::session()
+                .await
+                .expect("foreign file manager must connect");
+            foreign
+                .request_name(FILE_MANAGER_BUS_NAME)
+                .await
+                .expect("foreign file manager must own the generic name");
+            let mut standalone = None;
+            for _ in 0..80 {
+                match acquire_or_forward_with_generic_name(None, true).await {
+                    InstanceStartup::Primary(runtime) => {
+                        standalone = Some(runtime);
+                        break;
+                    }
+                    InstanceStartup::Forwarded | InstanceStartup::Unavailable(_) => {}
+                }
+                smol::Timer::after(Duration::from_millis(25)).await;
+            }
+            assert!(
+                standalone.is_some(),
+                "Marcel must start as primary while another file manager owns {FILE_MANAGER_BUS_NAME}"
+            );
+            let owner = bus
+                .get_name_owner(zbus::names::BusName::try_from(FILE_MANAGER_BUS_NAME).unwrap())
+                .await
+                .expect("the generic name must stay owned");
+            assert_eq!(
+                owner.as_str(),
+                foreign
+                    .unique_name()
+                    .expect("foreign connection has a unique name")
+                    .as_str(),
+                "Marcel must not have displaced the owner of the generic name"
             );
         });
     }

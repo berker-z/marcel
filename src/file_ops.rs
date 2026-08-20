@@ -864,6 +864,16 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 } => (replaced.as_slice(), merged.as_slice()),
                 _ => (&[][..], &[][..]),
             };
+            // The merged removals below commit one at a time, so when a merge
+            // contributed, validate the copy's own output first: a stale
+            // record must refuse while the disk is still intact, not after
+            // the merge's additions are already gone.
+            if !merged.is_empty()
+                && let Err(error) =
+                    validate_snapshot_tree(created).and_then(|()| reject_special_entries(created))
+            {
+                return MutationOutcome::unchanged(error);
+            }
             // Take back what was folded into an existing tree first, while the
             // copy's own output is still whole and nothing has been removed.
             if let Err(failure) = remove_merged_items(merged) {
@@ -879,6 +889,10 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                     )
                 };
             }
+            let merged_removed = merged
+                .iter()
+                .map(|snapshot| snapshot.path.clone())
+                .collect::<Vec<_>>();
             match remove_snapshotted_tree(created) {
                 Ok(()) => {
                     // The output is gone, so whatever it displaced can come
@@ -902,19 +916,26 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                         replaced.is_empty().then(|| operation.clone()),
                     ))
                 }
-                // Nothing was removed, so the output still matches the record.
-                Err(failure) if failure.removed.is_empty() => {
+                // Nothing at all was removed — the merge contributed nothing
+                // and the output still matches the record — so the failure
+                // provably left the disk unchanged.
+                Err(failure) if failure.removed.is_empty() && merged_removed.is_empty() => {
                     MutationOutcome::unchanged(failure.error)
                 }
-                // Part of the output is gone. The record claims a whole tree
-                // that no longer exists, so it cannot be retried.
-                Err(failure) => MutationOutcome::discarded(
-                    DirectoryChanges {
-                        removed: failure.removed,
-                        upserted: Vec::new(),
-                    },
-                    failure.error,
-                ),
+                // Something is gone: the merge's additions, part of the
+                // output, or both. The record describes a disk that no longer
+                // exists, so it cannot be retried.
+                Err(failure) => {
+                    let mut removed = merged_removed;
+                    removed.extend(failure.removed);
+                    MutationOutcome::discarded(
+                        DirectoryChanges {
+                            removed,
+                            upserted: Vec::new(),
+                        },
+                        failure.error,
+                    )
+                }
             }
         }
         OperationRecord::Move {
@@ -2881,12 +2902,12 @@ fn quarantine_owner(name: &OsStr) -> Option<u32> {
 /// exist when desktop integration is unavailable, and reclaiming another's
 /// would destroy data it can still restore. An unknown answer keeps the file.
 #[cfg(target_os = "linux")]
-fn process_is_running(process: u32) -> bool {
+pub(crate) fn process_is_running(process: u32) -> bool {
     Path::new(&format!("/proc/{process}")).exists()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_is_running(_process: u32) -> bool {
+pub(crate) fn process_is_running(_process: u32) -> bool {
     true
 }
 
@@ -4755,6 +4776,112 @@ mod tests {
 
         assert!(!destination.join("photos/arrived.txt").exists());
         assert_eq!(fs::read(&later).unwrap(), b"MINE");
+    }
+
+    /// The merge's removals commit one at a time, so an undo that will refuse
+    /// the copy's own output must refuse *before* removing them. It used to
+    /// remove the merge's additions, then report "nothing happened" and keep a
+    /// record that could never validate again.
+    #[test]
+    fn copy_undo_with_a_merge_refuses_a_modified_output_before_removing_anything() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(source_dir.join("new_item")).unwrap();
+        fs::create_dir_all(source_dir.join("photos")).unwrap();
+        fs::create_dir_all(destination.join("photos")).unwrap();
+        fs::write(source_dir.join("new_item/inside.txt"), b"NEW").unwrap();
+        fs::write(source_dir.join("photos/arrived.txt"), b"NEW").unwrap();
+
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+        let outcome = transfer_paths_with_conflicts(
+            &[source_dir.join("new_item"), source_dir.join("photos")],
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+        let operation = outcome.operation.expect("the transfer retains undo");
+        // Someone adds a file to the copied output afterwards, so its
+        // recorded tree no longer matches the disk.
+        fs::write(destination.join("new_item/added-later.txt"), b"MINE").unwrap();
+
+        let result = undo_operation(&operation);
+
+        assert!(
+            matches!(result, MutationOutcome::Unchanged(_)),
+            "a refusal raised before anything was removed must stay retryable: {result:?}"
+        );
+        assert_eq!(
+            fs::read(destination.join("photos/arrived.txt")).unwrap(),
+            b"NEW",
+            "the merge's additions must survive a refused undo"
+        );
+    }
+
+    /// When the copy's output cannot be removed *after* the merge's additions
+    /// already were, the disk has changed and the record must be discarded —
+    /// reporting it as unchanged would present a retryable undo that can never
+    /// validate again.
+    #[test]
+    fn copy_undo_that_removed_merge_additions_discards_rather_than_claiming_no_effect() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if rustix::process::geteuid().is_root() {
+            // Permission bits do not constrain root, so the removal failure
+            // this test depends on cannot be provoked.
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(destination.join("photos")).unwrap();
+        fs::write(source_dir.join("new_item.txt"), b"NEW").unwrap();
+        fs::create_dir(source_dir.join("photos")).unwrap();
+        fs::write(source_dir.join("photos/arrived.txt"), b"NEW").unwrap();
+
+        let mut policy = answering(crate::conflict::ConflictDecision::once(
+            ConflictResponse::Replace,
+        ));
+        let outcome = transfer_paths_with_conflicts(
+            &[source_dir.join("new_item.txt"), source_dir.join("photos")],
+            &destination,
+            TransferMode::Copy,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TransferProgress::default()),
+            &mut policy,
+        );
+        let operation = outcome.operation.expect("the transfer retains undo");
+
+        // The merge's additions can still be removed, but the copied output
+        // cannot leave its now read-only parent.
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = undo_operation(&operation);
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let MutationOutcome::Discarded { changes, .. } = result else {
+            panic!("an undo that removed the merge's additions must discard: {result:?}");
+        };
+        assert!(
+            changes
+                .removed
+                .contains(&destination.join("photos/arrived.txt")),
+            "the removals that committed must be reported: {changes:?}"
+        );
+        assert!(
+            !destination.join("photos/arrived.txt").exists(),
+            "this scenario depends on the merge's additions being removed"
+        );
+        assert_eq!(
+            fs::read(destination.join("new_item.txt")).unwrap(),
+            b"NEW",
+            "the copied output could not be removed and must survive"
+        );
     }
 
     /// A merge that stops part way has still added part of what it planned.

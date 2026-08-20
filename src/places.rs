@@ -53,6 +53,8 @@ impl Place {
 pub fn discover(home: &Path) -> Vec<Place> {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
+        // The XDG base-directory spec says a relative value must be ignored.
+        .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(".config"));
     let config = fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
 
