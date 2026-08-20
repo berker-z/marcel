@@ -8,8 +8,15 @@ durable product, engineering, and release records used to build it.
 Marcel has reached the personal daily-driver milestone. Feature and release work
 remain paused for hardening.
 
-[Sprint 21: a launch is a window](sprints/021-a-launch-is-a-window.md) is the
-current document. Running `marcel` while Marcel is open now opens a window
+[Sprint 22: read the whole tree](sprints/022-read-the-whole-tree.md) is the
+current document. A fifth review — the first to read past the operations core —
+found twenty confirmed defects, almost all in code no earlier review had read:
+the load/watcher seam, the preview surface, bookmarks persistence, the D-Bus
+surface, and the window layer. All are fixed with regression coverage; the
+evidence is [`review-2026-08-20.md`](review-2026-08-20.md).
+
+[Sprint 21: a launch is a window](sprints/021-a-launch-is-a-window.md) precedes
+it. Running `marcel` while Marcel is open now opens a window
 instead of navigating the one in front of you, which is both the conventional
 behaviour and what makes Sprint 20's two-window acceptance matrix something a
 person can actually run.
@@ -46,6 +53,11 @@ remains planned but deprioritized until that matrix is run.
   review, the first to read the tree Sprints 18 and 19 produced. Its four
   findings all reproduced; it records a fifth in the same function that the
   review missed, and the evidence for each. The plan is Sprint 20.
+- [`review-2026-08-20.md`](review-2026-08-20.md): the fifth review, and the
+  first to read the whole tree rather than the operations core. Twenty
+  confirmed findings with per-finding tiers and evidence, four deliberate
+  deferrals with reasons, and the confirmed-sound list. The record of what was
+  done is [Sprint 22](sprints/022-read-the-whole-tree.md).
 - [`review-2026-08-10.md`](review-2026-08-10.md): cross-check of a third review,
   with per-finding verdicts and re-tiering, one rejected finding, three findings
   it missed, and the Yazi and Nautilus evidence that decided the remediation
