@@ -1,105 +1,111 @@
 # Marcel session handoff
 
-**Prepared:** 2026-08-18, amended 2026-08-20
-**Branch:** `master`
+**Prepared:** 2026-08-21
+**Branch:** `master`, pushed through `2b4be3a`
 **Workspace:** `/home/berkerz/Projects/marcel`
 
 Read `AGENTS.md` first, and `CLAUDE.md` for how to run the checks without one
-approval prompt per command.
+approval prompt per command. One correction to `CLAUDE.md`: the D-Bus test no
+longer needs an unsandboxed run for its own sake, because the dev shell now
+supplies `dbus-run-session` and a private bus config. It still fails under a
+restrictive sandbox.
 
 ## Where things stand
 
-[Sprint 20](sprints/020-cleanup-interlude.md) closed the code queue. It was a
-deliberate interlude rather than a feature sprint: [Review D](review-2026-08-18.md)
-found two P0 defects in code Sprint 18 shipped, three sprints had unchecked
-boxes, and [`review-2026-08-10.md`](review-2026-08-10.md) had four unstarted
-stages. Working them separately would have meant touching `file_ops.rs` three
-times.
+Release readiness for `v0.1.0`. The code queue has been closed since Sprint 22;
+what remained was packaging, hosted checks, and the graphical acceptance matrix
+that `TODO.md` calls the last thing between the tree and a release decision.
 
-What that means in practice:
+The matrix has now been run once, and it earned its cost immediately. Two real
+defects, both fixed and re-verified graphically:
 
-- A merge that stops part way now returns what it added, so Undo can take it
-  back, and a cancelled merge is reported as cancellation instead of failure.
-- An original Marcel fails to put back is promoted out of undo storage into
-  `.marcel-recovered-*` recovery storage, which nothing sweeps and the browser
-  points the user at. The abandoned-quarantine sweep used to delete it.
-- Every quarantine deletion validates identity first.
-- One snapshot budget covers a whole transfer — copy, merge, and move.
-- Undo of copy and archive output is quarantine-first, via `delete_ops`.
-- The Trash-root guard compares physically; the Trash listing reports what it
-  could not read instead of dropping it.
+- **A1** — revealing a file in a folder that was still loading selected and
+  previewed it but left it off screen, at a different wrong offset each run.
+  Sprint 22 had recorded this exact check as *delivered*. The scroll is now
+  re-applied at `Done`.
+- **A3** — Escape did not close a context menu; it cleared the selection
+  underneath, leaving the menu greyed out on screen.
 
-Sprints 17 and 18's remaining items are code-complete, and Stages 1–5 and 7 of
-the 2026-08-10 plan are done.
+Full record with method notes: [`acceptance-2026-08-21.md`](acceptance-2026-08-21.md).
 
-**No graphical acceptance run has happened.** Sprint 20 carries Sprint 19's
-eight multi-window checks and Sprint 18's four interaction checks unchanged, and
-none of them can be reached by `cargo test`.
+The command is now `marcel-rs`, not `marcel`, because nixpkgs already has an
+unrelated `marcel` shipping `bin/marcel`. Only the command changed; the app ID,
+D-Bus name, icon, and `~/.config/marcel` are untouched. The overlay attribute
+moved too, which mattered more than the binary: it used to bind `marcel` and so
+*replaced* nixpkgs' package for anyone applying it.
 
-[Sprint 21](sprints/021-a-launch-is-a-window.md) then fixed the thing that made
-that matrix impractical. Running `marcel` while Marcel is open used to navigate
-the window you were reading — or, with no argument, raise it and ignore the
-folder you were standing in. A launch now opens a window, folders have an
-Open in New Window entry, and the application owns the window list rather than
-`main.rs` keeping a private one.
+## Two traps that cost real time today
 
-**2026-08-20:** a fifth review,
-[`review-2026-08-20.md`](review-2026-08-20.md), read the *whole* tree — the
-first to look past the operations core — and found its defects almost entirely
-in the code the earlier reviews never read: the load/watcher seam, the preview
-surface (a FIFO permanently wedged worker threads), bookmarks persistence (a
-failed load became an empty list the next edit saved), the D-Bus surface, and
-the Sprint 21 window layer. Everything confirmed is fixed with regression
-coverage in [Sprint 22](sprints/022-read-the-whole-tree.md), which also adds
-its own checks to the graphical matrix; four items are deliberately deferred
-into `TODO.md` with reasons.
+Both produced confidently wrong conclusions. Expect them again.
 
-## Next: the graphical acceptance matrix, then release readiness
+**A rebuild is not a new process.** Marcel routes a second launch to the
+existing session owner, so a "fresh" window can be drawn by the binary from
+before your change. This happened twice; the second time the packaged wrapper
+reports itself as `.marcel-rs-wrap`, so a pattern match on `marcel-rs` missed
+it. Check `readlink /proc/<pid>/exe` before believing any graphical result.
+Note also that the sandbox has its own PID namespace, so `pkill` from a
+sandboxed shell sees only itself.
 
-In order:
+**Screenshots cannot see notification cards.** A successful operation and a
+failed one look equally silent through `grim`. Extraction was wrongly recorded
+as failing silently on a taken destination; it reports fine, and the maintainer
+photographed the card. Anything involving a notification needs a person
+watching, or the code read.
 
-1. Run Sprint 20's manual list with two real windows — now reachable with two
-   terminal commands rather than a hand-written `gdbus call`. That is the last
-   thing between the current tree and a release-readiness conversation. Run
-   Sprint 21's own short list while you are there.
-2. Fix what it exposes, with focused regression coverage.
-3. Then, and only then, reopen [Sprint 16](sprints/016-public-release-presentation.md):
-   hosted CI, release metadata, and a tagged `0.1.0`.
+## CI
 
-Still open by decision, not by omission: the journal-wide snapshot budget
-(Stage 6's remainder), hosted CI (Stage 8), the drop device-identity affordance
-(reasoned in Sprint 20), and merging a folder while *moving* it.
+`.github/workflows/ci.yml`, four jobs. **Tags and manual dispatch only** —
+nothing fires on an ordinary push, deliberately, because every job compiles
+GPUI and the same gate is already mandatory locally. Run one with:
 
-## Four things that will save time
+```sh
+gh workflow run ci.yml --ref master
+```
 
-**Keep `TMPDIR` short.** The special-file tests bind Unix sockets, and
-`sun_path` is 108 bytes. A long scratchpad path fails six of them at once with
-errors that look like sandbox problems and are not.
+First hosted run found two environment bugs a developer machine hides: a
+`toString` path that was never a real store dependency, and ten Trash tests
+with no Trash to resolve. Both fixed in `2b4be3a`.
 
-**Upstream first, and record it when there is nothing to take.** Yazi is at
-`319f90e0`, Nautilus at `f67b2e1`; clone them into the scratchpad. Sprint 19's
-upstream section is what a verified one looks like — file and line for every
-claim.
+The consequence to keep in mind: a broken `master` will not be caught by
+anything hosted. The local gate is the only thing before the tag.
 
-**A rename or a removal moves an inode's ctime.** This is now behind three
-separate fixes: the move path, the merge snapshot ordering, and — new in Sprint
-20 — permanent deletion of a tree holding two hard links to one file, where the
-plan's own first removal invalidated its entry for the second. When an identity
-check refuses something that should obviously have worked, ask what moved the
-ctime before assuming interference.
+## What is left before tagging
 
-**After the first irreversible write, `Result` is the wrong type.** Review D
-found the merge bug by looking for exactly this, and it is the shape to look for
-next time: the comments understood the invariant, the types elsewhere encoded
-it, and one fresh code path used `?` after a commit anyway.
+Verified: AppStream metadata, changelog, `nix build` on **x86_64 and
+aarch64**, `nix flake check`, minimal-environment smoke
+(`scripts/clean_env_smoke.sh`), 264 tests green.
 
-## Running it
+Outstanding:
 
-See `CLAUDE.md`. In short: capture the `nix develop` environment once, then run
-fmt, clippy, and tests as one sandboxed command with a short `TMPDIR`. Confirm a
-green `desktop_integration::tests::private_session_bus_integration` outside the
-sandbox. The suite is 260 library tests plus 1 binary test.
+1. **Confirm CI run [32469902009](https://github.com/berker-z/marcel/actions/runs/32469902009) went green.** It was still running when this was written; aarch64 had already passed.
+2. **Destructive-operation acceptance checks, never run graphically.** Trash,
+   restore, permanent deletion behind its confirmation, Empty Trash, and
+   mounted-volume Trash. This is the one I would hold the tag for: Marcel
+   mutates user data, permanent deletion is unrecoverable, and today proved
+   twice that a green suite says nothing about the graphical layer.
+3. **Install and launch from the pushed revision** —
+   `nix profile install github:berker-z/marcel/<rev>`. Everything so far was a
+   local build.
+4. **Confirm installing does not become the default directory handler.** CI
+   proves no `FileManager1` service is installed; the MIME association is
+   unverified live.
+5. Run `scripts/check_version.sh v0.1.0`, then the signed tag and checksums.
 
-Automated checks did not catch a single one of Sprint 18's three interface
-defects, and did not catch either of Review D's P0s. Drive the real windows
-before calling interaction work done.
+Not blockers, logged and deliberate: **A2**, the "no preview available"
+placeholder clipping in a narrow pane; extraction *refusing* a taken
+destination where copy and move offer replace/rename/skip/merge; and the
+absence of external testing, which is a nixpkgs-submission concern rather than
+a tagging one.
+
+Still unrun from the standing matrix: two-window ownership checks, cold D-Bus
+activation, Show Hidden with a selection, and drag and drop, which needs
+ydotool that this machine does not have.
+
+## Testing the GUI
+
+hyprhands is wired in as an MCP server and is how the matrix above was driven.
+`busctl --user call io.github.berker_z.Marcel /org/freedesktop/FileManager1 …`
+drives reveal and navigation without synthetic input, which is more trustworthy
+than clicking; findings driven that way are immune to focus and tiling churn.
+Coordinates read off a screenshot go stale when the compositor retiles, so
+re-screenshot immediately before every click.
