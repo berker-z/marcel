@@ -1,0 +1,167 @@
+name: ci
+
+# Tags and deliberate runs only. Nothing here fires on an ordinary push.
+#
+# Every job in this file compiles GPUI, including the one called "quality":
+# entering the dev shell and running `cargo test --all-targets` is minutes of
+# build even with a warm cache, and far worse without one. Spending that per
+# commit buys very little, because the same gate is mandatory locally before a
+# change is considered done (see AGENTS.md). What CI is actually for is the
+# checks a laptop cannot do: a hosted machine with nothing preinstalled, and
+# aarch64.
+#
+# So it runs when the artifact matters — a `v*` tag — and whenever someone asks
+# for it. `workflow_dispatch` covers first-time setup, checking a packaging
+# change before tagging, and any other one-off.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Marcel cannot be built by a bare `cargo` on a hosted runner: the build
+  # needs fontconfig, freetype, and the Wayland and X11 client libraries, and
+  # the D-Bus integration test needs a session bus. The flake's dev shell is
+  # where all of that is declared, so CI enters it rather than re-deriving the
+  # dependency list in a second place that can drift.
+  quality:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The dev shell pins its own toolchain, so the job's cache key has to
+          # follow the flake rather than any runner-installed rustc.
+          key: devshell-${{ hashFiles('flake.lock', 'flake.nix') }}
+
+      - name: Quality gate
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            cargo fmt --check
+            cargo clippy --all-targets --all-features -- -D warnings
+            cargo test --all-targets
+          '
+
+  # Desktop metadata is easy to break and quick to check, and needs no
+  # compiler, so it gets its own job rather than waiting behind one.
+  metadata:
+    name: desktop metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Validate AppStream metadata
+        run: |
+          nix run nixpkgs#appstream -- validate --no-net --explain \
+            nix/io.github.berker_z.Marcel.metainfo.xml
+
+      - name: Check the version is the same everywhere
+        run: ./scripts/check_version.sh
+
+  # The packaged build is the artifact people actually install, and the most
+  # expensive thing here: GPUI plus a thin-LTO link, on two architectures.
+  # aarch64 is the reason this job cannot be replaced by running the gate
+  # locally, since a developer machine is unlikely to have a builder for it.
+  package:
+    name: nix build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      # This also runs the package's own install check, which validates the
+      # installed AppStream file and both desktop entries.
+      - name: Build the package
+        run: nix build --print-build-logs .#marcel-rs
+
+      - name: Inspect what was installed
+        run: |
+          set -euo pipefail
+          test -x result/bin/marcel-rs
+          test -f result/share/metainfo/io.github.berker_z.Marcel.metainfo.xml
+          test -f result/share/applications/io.github.berker_z.Marcel.desktop
+          test -f result/share/dbus-1/services/io.github.berker_z.Marcel.service
+          test -f result/share/icons/hicolor/scalable/apps/io.github.berker_z.Marcel.svg
+          test -x result/libexec/marcel/7zz
+          echo "Installed tree:"
+          find result/share -maxdepth 3 -type f -o -maxdepth 3 -type l | sort
+
+      # Installing Marcel must not make it the session's directory handler or
+      # give it the generic file-manager name. Both are opt-in, and the package
+      # is the place that promise can be broken by accident.
+      - name: Confirm no generic ownership is claimed
+        run: |
+          set -euo pipefail
+          if grep -rl "org.freedesktop.FileManager1" \
+            result/share/dbus-1/services/ 2>/dev/null; then
+            echo "The default package must not install a FileManager1 service." >&2
+            exit 1
+          fi
+          if grep -q "^MimeType" result/share/applications/*.desktop; then
+            echo "note: desktop entries advertise inode/directory, which is"
+            echo "an association offer and not a default. That is expected."
+          fi
+
+  # Same reasoning as `package`: this builds the package too.
+  flake:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - run: nix flake check --print-build-logs
