@@ -22,6 +22,38 @@ Sprint status uses four consistent meanings:
   [`Sprint 20`](sprints/020-cleanup-interlude.md) and whatever it reveals.
   Nothing on that list can be reached by `cargo test`, and automated checks have
   now twice been green over defects a reader found by hand.
+- The matrix has started running. The first pass is recorded in
+  [`acceptance-2026-08-21.md`](acceptance-2026-08-21.md), driven through
+  hyprhands. Seven checks pass and two fail:
+  - **A1, fixed the same day.** Revealing a file deep in a folder that was
+    still loading selected and previewed the right file but left it off
+    screen, at a different wrong offset each run. Sprint 22's E7 fixed the
+    loaded case and left the streaming one. The reveal now records its target
+    while the stream owns the listing and re-applies the *scroll* at `Done`,
+    after the deferred refresh batch. Four regression tests, and re-verified
+    graphically. Sprint 22 had recorded this exact check as delivered, so the
+    matrix caught something a sprint believed it had closed.
+  - **A2, cosmetic and still open.** The "no preview available" placeholder
+    neither wraps nor elides in a narrow preview pane, so it is clipped at
+    both edges.
+  - **A3, fixed the same day.** Escape did not close a context menu. It
+    cleared the selection underneath instead, leaving the menu on screen with
+    every action greyed out. Escape now consumes the frontmost surface first,
+    in both `on_clear_selection` and `on_window_key_down`. Reproduced by hand
+    before it was fixed, and re-verified after.
+  - Extraction refuses a taken destination and says so, where copy and move
+    offer replace, rename, skip, or merge. Refusing safely is defensible for
+    a first release; making the two consistent is post-0.1 work.
+  - Screenshot-driven runs cannot see notification cards at all. Successful
+    and failed operations both look silent through that lens, so anything
+    involving a notification needs a person watching the screen.
+  - Drag and drop could not be driven at all: hyprhands needs ydotool for
+    press-move-release and this machine does not have it. That part of the
+    matrix still needs a person.
+- Release paperwork is no longer the gap it was. AppStream metadata,
+  a changelog, a version-consistency check, and a hosted CI gate all exist now;
+  see the [release plan](release.md). What is left before a tag is mostly
+  verification rather than authorship.
 - A fourth review is cross-checked in
   [`review-2026-08-18.md`](review-2026-08-18.md), the first to read the tree
   Sprints 18 and 19 produced. All four of its findings reproduced, one of them a
@@ -198,7 +230,7 @@ The packaging contract, current dependency caveats, target formats, and
   URIs, validate requested filesystem types before acting, and never interpret
   `ShowFolders` input as a request to open a regular file.
 - [x] Keep ownership of the generic `org.freedesktop.FileManager1` activation name
-  opt-in. Installing `pkgs.marcel` alone must not displace the user's current
+  opt-in. Installing `pkgs.marcel-rs` alone must not displace the user's current
   generic file manager.
 - [x] Make the default package fully free and cacheable by switching its
   private backend from `_7zz-rar` to `_7zz`; keep RAR/CBR actions disabled
@@ -209,7 +241,7 @@ The packaging contract, current dependency caveats, target formats, and
 - [x] Add a distinct Marcel application icon in the freedesktop-required
   scalable and raster sizes. Use it in desktop entries and X11 window metadata;
   reuse the same icon name when AppStream metadata lands.
-- [ ] Install and validate `io.github.berker_z.Marcel.metainfo.xml`, including
+- [x] Install and validate `io.github.berker_z.Marcel.metainfo.xml`, including
   release data, content rating, URLs, launchable desktop ID, and representative
   screenshots.
 - [x] Bundle a private curated Nordzy fallback containing only Marcel's
@@ -233,11 +265,13 @@ The packaging contract, current dependency caveats, target formats, and
   release automation that publishes exact derivations to a signed Nix binary
   cache alongside the GitHub Release.
 - [ ] Submit `marcel-rs` to nixpkgs as a tagged-source package with a free
-  closure, a maintainer, complete `meta`, and a package test. Resolve both the
-  existing `pkgs.marcel` attribute and `bin/marcel` executable collisions
-  consistently across distribution routes. Run `nixfmt`, `nixpkgs-review`, the
-  package build/tests, and use the conventional
-  `marcel-rs: init at 0.1.0` commit.
+  closure, a maintainer, complete `meta`, and a package test. Run `nixfmt`,
+  `nixpkgs-review`, the package build/tests, and use the conventional
+  `marcel-rs: init at 0.1.0` commit. Both collisions with the existing
+  `pkgs.marcel` are already resolved upstream of this: the command, `pname`,
+  `mainProgram`, flake attribute, and overlay attribute are all `marcel-rs` as
+  of 2026-08-21. Still needs a nixpkgs maintainer entry and
+  `passthru.updateScript`.
 - [ ] Treat Flatpak as a separate compatibility project, not a repackaging
   checkbox: prototype host-filesystem access, portals, D-Bus activation,
   external file DnD, Trash, subprocesses, and icon discovery inside the

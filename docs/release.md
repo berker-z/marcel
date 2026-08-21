@@ -156,7 +156,7 @@ part of the release gate.
 The flake exports `homeManagerModules.default` and `nixosModules.default`.
 Both install a configured Marcel wrapper through `programs.marcel.settings`;
 the supported settings are initial palette, explicit icon theme, and UI font
-family. The overlay's `pkgs.marcel.withSettings` constructor exposes the same
+family. The overlay's `pkgs.marcel-rs.withSettings` constructor exposes the same
 mechanism without a module. The configured application-specific D-Bus service
 points at the wrapper so desktop activation receives the same settings as a
 shell launch. Neither module changes MIME associations nor claims generic
@@ -185,9 +185,21 @@ The icon name should remain `io.github.berker_z.Marcel`.
 
 ### AppStream metadata
 
-Marcel does not yet install
-`io.github.berker_z.Marcel.metainfo.xml`. The first release needs valid
-AppStream metadata containing:
+The package installs `nix/io.github.berker_z.Marcel.metainfo.xml` to
+`share/metainfo/`. It validates clean under `appstreamcli` 1.1.3, and the
+package's own install check re-validates the installed copy along with both
+desktop entries, so a broken edit fails the build rather than shipping. CI
+validates the source file on every push as well.
+
+`appstreamcli` emits one pedantic note, `cid-contains-uppercase-letter`. The
+component ID has to match the desktop entry and icon name, which are
+`io.github.berker_z.Marcel` everywhere, and the same note applies to
+`org.gnome.Nautilus`. It stays.
+
+The screenshot is referenced from `master` rather than from the tag, so it
+resolves before the tag exists and keeps resolving afterwards.
+
+The metadata contains:
 
 - the application ID and launchable desktop ID;
 - name, summary, and full description;
@@ -198,8 +210,8 @@ AppStream metadata containing:
 - representative screenshots;
 - appropriate developer identity.
 
-The file should be validated with `appstreamcli` and the relevant package-format
-linters.
+Package formats other than Nix must run their own format linter over it as
+well.
 
 ### 7-Zip and RAR
 
@@ -310,7 +322,7 @@ discover automatically.
 
 ### Arch Linux, CachyOS, and related distributions
 
-Publish a stable source package named `marcel` in the Arch User Repository.
+Publish a stable source package named `marcel-rs` in the Arch User Repository.
 The AUR stores the `PKGBUILD` and related packaging files, not the built
 application. It should download the signed release tag, verify its checksum,
 build with Cargo, and install the complete desktop integration contract.
@@ -403,7 +415,7 @@ artifacts:
 
 ```text
 usr/
-├── bin/marcel
+├── bin/marcel-rs
 ├── libexec/marcel/7zz
 └── share/
     ├── applications/io.github.berker_z.Marcel.desktop
@@ -422,6 +434,50 @@ automatically.
 
 The AppImage, Debian, and RPM jobs should begin from this same staged contract.
 Nix and AUR build from source independently but install equivalent files.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` is the hosted gate Sprint 16 asks for. It has four
+jobs:
+
+- `quality` runs `cargo fmt --check`, Clippy with `-D warnings`, and
+  `cargo test --all-targets`, all inside `nix develop`. CI enters the dev shell
+  rather than installing a toolchain and a list of system libraries, because
+  the dev shell already declares that list and a second copy of it would drift.
+- `metadata` validates the AppStream file and runs `scripts/check_version.sh`.
+  Both are quick, so they do not queue behind a compile.
+- `package` runs `nix build .#marcel` on `x86_64-linux` and `aarch64-linux`,
+  then checks the installed tree for the binary, metainfo, desktop entry, D-Bus
+  service, icons, and the private `7zz`, and asserts that the default package
+  installs no `org.freedesktop.FileManager1` service.
+- `flake` runs `nix flake check`.
+
+**What runs when.** Nothing runs on an ordinary push, or on a pull request.
+The whole workflow fires on `v*` tags and on manual `workflow_dispatch`, and
+nowhere else. This is deliberate and should stay.
+
+Every job here compiles GPUI, including `quality`: entering the dev shell and
+running the gate costs minutes with a warm cache and far more without one.
+Spending that per commit buys little, because
+[`AGENTS.md`](../AGENTS.md) already makes the same gate mandatory locally
+before a change counts as done. Hosted CI is for what a developer machine
+cannot do: an environment with nothing preinstalled, and `aarch64-linux`,
+which needs a builder or binfmt registration that a normal workstation will
+not have.
+
+So the triggers follow the value. A tag is when the artifact matters, and
+`workflow_dispatch` covers everything else: first-time setup, checking a
+packaging change before tagging, and any one-off. `package` and `flake`
+reclaim runner disk before starting, because the default hosted image does not
+leave enough for a GPUI build.
+
+The consequence worth stating plainly: a broken `master` is possible and will
+not be caught by anything hosted. The local gate is the only thing standing
+between a mistake and the tag, which is why it is not optional.
+
+The `quality` job needs `dbus-run-session` and a session bus configuration with
+no system includes; see `nix/test-session.conf` for why. The dev shell provides
+both.
 
 ## Release automation
 
@@ -460,19 +516,26 @@ published source tag.
 
 ## `v0.1.0` release gate
 
+The graphical half of this gate is evidence rather than a checkbox, and it
+lives in dated acceptance records. The first is
+[`acceptance-2026-08-21.md`](acceptance-2026-08-21.md).
+
 Before creating the first tag:
 
 - [x] Make free `7zz` the default and define the optional RAR policy.
 - [x] Add Marcel's application icon in required sizes.
-- [ ] Add and validate AppStream metadata.
+- [x] Add and validate AppStream metadata.
 - [x] Bundle and verify the private curated Nordzy semantic fallback.
 - [x] Bundle and verify Marcel's private regular/semibold Iosevka subsets and
       explicit installed-font override.
 - [ ] Complete Sprint 16's public README, visual media, and platform support
       matrix.
 - [ ] Audit runtime programs, libraries, metadata, and XDG/D-Bus paths.
-- [ ] Add a changelog and write `0.1.0` release notes.
-- [ ] Verify the version is consistent everywhere.
+- [x] Add a changelog and write `0.1.0` release notes.
+- [ ] Verify the version is consistent everywhere. `scripts/check_version.sh`
+      does this, and takes the intended tag as an argument:
+      `scripts/check_version.sh v0.1.0`. CI runs it without the tag argument on
+      every push.
 - [ ] Run all Rust quality checks.
 - [ ] Run the release-only Nix build and flake check.
 - [ ] Install and launch from a clean committed revision.
