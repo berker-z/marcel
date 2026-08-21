@@ -6,6 +6,21 @@ description = "A fast, preview-first graphical file explorer"
 license = "MIT"
 publish = false
 
+# The installed command is `marcel-rs`, not `marcel`.
+#
+# nixpkgs already has a `marcel`: an unrelated Python shell that installs
+# `bin/marcel`. Two packages shipping the same path collide in a profile, and
+# resolving that with `meta.priority` means silently picking one of two
+# unrelated programs. So the command carries the suffix and everything a person
+# actually sees stays Marcel: the application name, the icon, the
+# `io.github.berker_z.Marcel` application ID and D-Bus name, and the
+# `marcel` configuration directory.
+#
+# The crate keeps its own name, so the library is still `marcel::` internally.
+[[bin]]
+name = "marcel-rs"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 async-channel = "2.5"

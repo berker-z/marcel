@@ -1,10 +1,10 @@
 # Marcel
 
-A graphical file manager for Linux, written in Rust. Fast, built around a preview pane that is genuinely useful, and careful about touching your files. It does not depend on GTK or Qt.
+A fast graphical file manager for Linux, written in Rust. The preview pane stays open and useful as you browse, and file operations are careful about touching your files. Marcel does not depend on GTK or Qt.
 
-Marcel renders its own interface through [GPUI](https://github.com/zed-industries/zed), the UI framework behind Zed, so it doesn't pull in a desktop toolkit or inherit its theming and startup cost. Select a file and you see it straight away: text, images, PDFs, or the contents of a folder.
+Marcel renders its interface with [GPUI](https://github.com/zed-industries/zed), the UI framework behind Zed. It does not pull in a desktop toolkit or inherit its theme and startup cost. Select a file and you see it straight away: text, images, PDFs, or the contents of a folder.
 
-It borrows heavily from [Yazi](https://github.com/sxyazi/yazi). The filesystem layer, the incremental directory updates, the preview scheduling, and the copy semantics are all built on ideas taken from reading Yazi's source. Marcel is a graphical application rather than a terminal one, so the interface is its own, but the parts underneath owe Yazi a lot. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) records what was adapted, file by file, down to the upstream commit.
+Marcel borrows heavily from [Yazi](https://github.com/sxyazi/yazi). The filesystem layer, incremental directory updates, preview scheduling, and copy semantics all grew from reading Yazi's source. Marcel is a graphical application rather than a terminal one, so the interface is its own, but much of the machinery underneath owes Yazi a lot. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) records what was adapted, file by file, down to the upstream commit.
 
 ## Status
 
@@ -22,23 +22,23 @@ Linux only. Wayland is the tested target. X11 mostly works, but dragging files o
 
 ### Browsing
 
-List and grid views. Breadcrumbs, plus `Ctrl+L` to type a path. Start typing to filter the current folder with fuzzy matching. Marquee and keyboard selection. Bookmarks and the usual XDG places in a sidebar. Folders update as they change on disk instead of reloading. Comfortable at 50,000 entries.
+Marcel has list and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. Press `Ctrl+L` to type a path, or just start typing to filter the current folder with fuzzy matching. Selection works with a marquee or the keyboard. Folders update as they change on disk instead of reloading, and directories with 50,000 entries remain comfortable to browse.
 
 ### Preview
 
-Text and code files, images, PDFs with continuous scrolling, and a listing of what a folder holds. Thumbnails use the freedesktop cache, so they are shared with other applications rather than duplicated.
+The preview pane handles text and code files, images, continuously scrolling PDFs, and folder listings. Thumbnails use the freedesktop cache, so Marcel shares them with other applications instead of generating another private copy.
 
 ### File operations
 
-Copy and move with progress and cancellation. When a destination is taken, Marcel asks: replace, rename, skip, or merge the two folders, and you can answer once for the rest of the operation. Undo and redo. Move to Trash and restore. Permanent deletion behind a confirmation, kept out of undo history. Inline rename. Create folders. Create zip archives, extract most common formats.
+Copy and move operations show progress and can be cancelled. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge the two folders. One answer can apply to the rest of the operation. Undo and redo cover copy, move, rename, Trash, restore, archive creation, and extraction. Permanent deletion requires confirmation and stays out of undo history. Marcel also creates folders and zip archives, and extracts most common archive formats.
 
 ### Desktop integration
 
-Drag files to and from other applications on Wayland. Registers as a file manager over D-Bus, so "show in folder" from other applications works. One Marcel process per session, and running `marcel` again opens a new window rather than taking over the one you were using.
+On Wayland, files can be dragged to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. It runs one process per session, but each `marcel-rs` invocation opens a new window instead of taking over one you were already using.
 
 ### Appearance
 
-Several built-in themes. Marcel ships its own icons and font and uses them first, so it looks the same on a bare system. It falls back to your system icon theme only for icons it doesn't ship, and an explicit theme setting overrides both.
+Marcel includes several themes and ships its own icons and font, so it still looks right on a bare system. Missing icons fall back to the system icon theme. An explicit icon theme setting overrides both.
 
 ## Keyboard shortcuts
 
@@ -53,7 +53,7 @@ Several built-in themes. Marcel ships its own icons and font and uses them first
 | Ctrl+Left / Ctrl+Right                           | Back / forward       |
 | Ctrl+L                                           | Edit the location    |
 | Ctrl+F                                           | Focus the filter     |
-| any character                                    | Start filtering      |
+| Any character                                    | Start filtering      |
 | Shift with arrows, Home, End, Page Up, Page Down | Extend the selection |
 | Ctrl+A                                           | Select all           |
 | Ctrl+C / Ctrl+X / Ctrl+V                         | Copy / cut / paste   |
@@ -90,7 +90,7 @@ Run it without installing anything:
 nix run github:berker-z/marcel -- ~/Downloads
 ```
 
-To install it properly, add Marcel to your system flake:
+For a persistent installation, add Marcel to your system flake:
 
 ```nix
 {
@@ -106,9 +106,11 @@ Then apply its overlay and install the package:
 ```nix
 {
   nixpkgs.overlays = [inputs.marcel.overlays.default];
-  environment.systemPackages = [pkgs.marcel];
+  environment.systemPackages = [pkgs.marcel-rs];
 }
 ```
+
+The command is `marcel-rs`, not `marcel`. nixpkgs already has a `marcel`, an unrelated Python shell, and two packages installing the same `bin/marcel` collide in a profile. Only the command carries the suffix: the application is still Marcel everywhere you see it, including its icon, its desktop entry, its D-Bus name, and its config directory at `~/.config/marcel`.
 
 Installing Marcel does not change your MIME associations and does not take over the generic file manager registration on D-Bus. Both are opt-in, and are covered in [`docs/release.md`](docs/release.md).
 

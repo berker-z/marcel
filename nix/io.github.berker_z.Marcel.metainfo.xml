@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 berker-z -->
+<component type="desktop-application">
+  <id>io.github.berker_z.Marcel</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Marcel</name>
+  <summary>Browse files with a fast, persistent preview pane</summary>
+
+  <developer id="io.github.berker_z">
+    <name>berker-z</name>
+  </developer>
+
+  <description>
+    <p>
+      Marcel is a graphical file manager for Linux built around a preview pane
+      that stays open and useful while you browse. It renders its own interface
+      with GPUI, the framework behind the Zed editor, so it depends on neither
+      GTK nor Qt and does not inherit a desktop toolkit's theming or startup
+      cost.
+    </p>
+    <p>Browsing:</p>
+    <ul>
+      <li>List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar</li>
+      <li>Type a path directly, or start typing to filter the current folder with fuzzy matching</li>
+      <li>Marquee and keyboard selection</li>
+      <li>Folders update as they change on disk rather than reloading</li>
+    </ul>
+    <p>Preview:</p>
+    <ul>
+      <li>Text and code files, images, continuously scrolling PDFs, and folder listings</li>
+      <li>Thumbnails come from the freedesktop cache, shared with other applications</li>
+    </ul>
+    <p>File operations:</p>
+    <ul>
+      <li>Copy and move with progress and cancellation</li>
+      <li>Replace, rename, skip, or merge when a destination is taken, answered once for the rest of the operation</li>
+      <li>Undo and redo across copy, move, rename, Trash, restore, archive creation, and extraction</li>
+      <li>Permanent deletion behind a confirmation, deliberately outside undo history</li>
+      <li>Zip archive creation and extraction of most common formats</li>
+    </ul>
+    <p>
+      Marcel checks that files are still what and where it thinks they are
+      before touching them, and refuses rather than guessing.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.berker_z.Marcel.desktop</launchable>
+
+  <provides>
+    <binary>marcel-rs</binary>
+    <dbus type="session">io.github.berker_z.Marcel</dbus>
+  </provides>
+
+  <categories>
+    <category>System</category>
+    <category>FileTools</category>
+    <category>FileManager</category>
+  </categories>
+
+  <keywords>
+    <keyword>files</keyword>
+    <keyword>folders</keyword>
+    <keyword>explorer</keyword>
+    <keyword>manager</keyword>
+    <keyword>preview</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/berker-z/marcel</url>
+  <url type="bugtracker">https://github.com/berker-z/marcel/issues</url>
+  <url type="vcs-browser">https://github.com/berker-z/marcel</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Grid view with a PDF open in the preview pane</caption>
+      <image type="source">https://raw.githubusercontent.com/berker-z/marcel/master/docs/screenshots/marcel.png</image>
+    </screenshot>
+  </screenshots>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-08-21">
+      <description>
+        <p>
+          First release. Browsing, previews, selection and filtering,
+          bookmarks, incremental directory watching, undoable copy, move,
+          rename, Trash and restore, archive creation and extraction, D-Bus
+          file-manager registration, and bilateral Wayland file drag and drop.
+        </p>
+      </description>
+      <url type="details">https://github.com/berker-z/marcel/releases/tag/v0.1.0</url>
+    </release>
+  </releases>
+</component>

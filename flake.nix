@@ -42,19 +42,22 @@
           };
         in
         {
-          inherit marcel;
+          # `marcel-rs`, not `marcel`: nixpkgs already has an unrelated
+          # `marcel`, and an overlay that binds that name would replace it for
+          # every user of this flake rather than adding to it.
+          marcel-rs = marcel;
           file-manager1-service = marcelFileManager1Service;
           default = marcel;
         }
       );
 
       apps = forAllSystems (system: {
-        marcel = {
+        marcel-rs = {
           type = "app";
-          program = "${self.packages.${system}.marcel}/bin/marcel";
+          program = "${self.packages.${system}.marcel-rs}/bin/marcel-rs";
           meta.description = "Fast, preview-first graphical file explorer";
         };
-        default = self.apps.${system}.marcel;
+        default = self.apps.${system}.marcel-rs;
       });
 
       overlays.default =
@@ -63,7 +66,10 @@
           marcel = final.callPackage ./nix/package.nix { };
         in
         {
-          inherit marcel;
+          # Binding `marcel` here would shadow nixpkgs' own `marcel`, an
+          # unrelated Python shell, for anyone who applies this overlay. An
+          # overlay should add a package, not quietly replace someone else's.
+          marcel-rs = marcel;
           marcelFileManager1Service = final.callPackage ./nix/file-manager1-service.nix {
             inherit marcel;
           };
@@ -86,7 +92,7 @@
       };
 
       checks = forAllSystems (system: {
-        package = self.packages.${system}.marcel;
+        package = self.packages.${system}.marcel-rs;
       });
 
       devShells = forAllSystems (
@@ -124,8 +130,11 @@
               rustToolchain
             ]
             ++ (with pkgs; [
+              appstream
               clang
               cmake
+              dbus
+              desktop-file-utils
               ffmpeg
               file
               git
@@ -137,6 +146,11 @@
 
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+
+            # `desktop_integration`'s integration test starts a private session
+            # bus, and it has to be a bus with no system configuration behind
+            # it. See the comment in `nix/test-session.conf`.
+            MARCEL_TEST_DBUS_SESSION_CONFIG = toString ./nix/test-session.conf;
           };
         }
       );

@@ -1030,7 +1030,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let override_program = root.path().join("override");
         let prefix = root.path().join("prefix");
-        let current_exe = prefix.join("bin/marcel");
+        let current_exe = prefix.join("bin/marcel-rs");
         let private = prefix.join("libexec/marcel/7zz");
         let path_dir = root.path().join("path");
         fs::create_dir_all(private.parent().unwrap()).unwrap();
@@ -1138,7 +1138,7 @@ Folder = -
     fn explicit_missing_override_is_not_silently_ignored() {
         let error = discover_with(
             Some(OsString::from("/definitely/missing/7zz")),
-            Path::new("/prefix/bin/marcel"),
+            Path::new("/prefix/bin/marcel-rs"),
             None,
         )
         .unwrap_err();

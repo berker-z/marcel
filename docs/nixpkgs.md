@@ -55,7 +55,26 @@ one of two unrelated programs is a poor default interface:
 - <https://nixos.org/manual/nixpkgs/stable/#var-meta-priority>
 - <https://github.com/NixOS/nix/blob/master/src/nix/profile.cc>
 
-The recommended collision-free release contract is therefore:
+**Decided and implemented on 2026-08-21.** The collision-free contract below is
+what the repository now does, before any release history exists to break. The
+installed command is `marcel-rs`, `pname` and `meta.mainProgram` are
+`marcel-rs`, the desktop entries use `Exec=marcel-rs %U`, and both D-Bus
+service files point at `bin/marcel-rs`.
+
+The flake attribute and the overlay attribute moved with it, which turned out
+to matter more than expected: `overlays.default` previously bound `marcel`,
+so applying Marcel's overlay silently *replaced* nixpkgs' Python `marcel` for
+the whole system rather than adding a package beside it. Anyone following the
+README's overlay instructions would have lost the shell without being told.
+Both the overlay and `packages.<system>` now expose `marcel-rs`, and
+`packages.default` still resolves to the same derivation so
+`nix run github:berker-z/marcel` is unchanged.
+
+The visible application name, the `io.github.berker_z.Marcel` application ID,
+the icon name, the D-Bus identity, and the `marcel` configuration directory
+are all unchanged. Only the command carries the suffix.
+
+The collision-free release contract is therefore:
 
 - use `marcel-rs` as the nixpkgs attribute and package name;
 - make `bin/marcel-rs` the installed command across supported distribution

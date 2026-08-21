@@ -22,8 +22,8 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = flake.packages.${system}.marcel;
-      defaultText = lib.literalExpression "inputs.marcel.packages.${pkgs.system}.marcel";
+      default = flake.packages.${system}.marcel-rs;
+      defaultText = lib.literalExpression "inputs.marcel.packages.${pkgs.system}.marcel-rs";
       description = "The Marcel package to configure and install.";
     };
 

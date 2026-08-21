@@ -34,7 +34,7 @@ symlinkJoin {
   nativeBuildInputs = [ makeWrapper ];
 
   postBuild = ''
-    wrapProgram "$out/bin/marcel" ${lib.escapeShellArgs wrapperArgs}
+    wrapProgram "$out/bin/marcel-rs" ${lib.escapeShellArgs wrapperArgs}
 
     service="$out/share/dbus-1/services/io.github.berker_z.Marcel.service"
     if [[ -e "$service" ]]; then
@@ -42,7 +42,7 @@ symlinkJoin {
         "${marcel}/share/dbus-1/services/io.github.berker_z.Marcel.service" \
         "$service"
       substituteInPlace "$service" \
-        --replace-fail "${marcel}/bin/marcel" "$out/bin/marcel"
+        --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
     fi
   '';
 

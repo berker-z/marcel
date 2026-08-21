@@ -8,6 +8,8 @@
   pkg-config,
   cmake,
   lld,
+  appstream,
+  desktop-file-utils,
   dbus,
   alsa-lib,
   expat,
@@ -44,7 +46,7 @@ let
   ];
 in
 rustPlatform.buildRustPackage (finalAttrs: {
-  pname = "marcel";
+  pname = "marcel-rs";
   version = "0.1.0";
 
   # rustc recommends increasing its worker-thread stack when LLVM exhausts the
@@ -110,7 +112,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   preCheck = ''
     export HOME="$TMPDIR"
     export XDG_DATA_HOME="$TMPDIR/.local/share"
-    export MARCEL_TEST_DBUS_SESSION_CONFIG=${dbus}/share/dbus-1/session.conf
+    export MARCEL_TEST_DBUS_SESSION_CONFIG=${./test-session.conf}
     mkdir -p "$XDG_DATA_HOME/Trash/files" "$XDG_DATA_HOME/Trash/info"
   '';
 
@@ -120,7 +122,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       desktopName = "Marcel";
       genericName = "File Manager";
       comment = "Browse files with a fast, persistent preview pane";
-      exec = "marcel %U";
+      exec = "marcel-rs %U";
       dbusActivatable = true;
       icon = "io.github.berker_z.Marcel";
       categories = [
@@ -141,7 +143,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       desktopName = "Marcel";
       genericName = "File Manager";
       comment = "Compatibility desktop identifier for Marcel";
-      exec = "marcel %U";
+      exec = "marcel-rs %U";
       icon = "io.github.berker_z.Marcel";
       noDisplay = true;
       mimeTypes = [ "inode/directory" ];
@@ -161,6 +163,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
     install -Dm644 ${../assets/icons/nordzy/COPYING} \
       "$out/share/licenses/marcel/COPYING-Nordzy"
 
+    install -Dm644 ${./io.github.berker_z.Marcel.metainfo.xml} \
+      "$out/share/metainfo/io.github.berker_z.Marcel.metainfo.xml"
+
     mkdir -p "$out/share/dbus-1/services" "$out/share/dbus-1/interfaces"
     substitute ${./io.github.berker_z.Marcel.service} \
       "$out/share/dbus-1/services/io.github.berker_z.Marcel.service" \
@@ -168,7 +173,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     install -Dm644 ${./org.freedesktop.FileManager1.xml} \
       "$out/share/dbus-1/interfaces/org.freedesktop.FileManager1.xml"
 
-    wrapProgram "$out/bin/marcel" \
+    wrapProgram "$out/bin/marcel-rs" \
       --prefix PATH : ${
         lib.makeBinPath [
           glib
@@ -176,6 +181,30 @@ rustPlatform.buildRustPackage (finalAttrs: {
         ]
       } \
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries}
+  '';
+
+  # Desktop metadata is only useful if it parses on the user's machine, and a
+  # typo in it is invisible until a software centre silently ignores the
+  # application. Validate what was installed, not what was written.
+  #
+  # `--no-net` keeps the screenshot URL from being fetched: the build sandbox
+  # has no network, and an unreachable image would fail the build for a reason
+  # that has nothing to do with the package.
+  nativeInstallCheckInputs = [
+    appstream
+    desktop-file-utils
+  ];
+
+  doInstallCheck = true;
+
+  installCheckPhase = ''
+    runHook preInstallCheck
+
+    appstreamcli validate --no-net --explain \
+      "$out/share/metainfo/io.github.berker_z.Marcel.metainfo.xml"
+    desktop-file-validate "$out/share/applications/"*.desktop
+
+    runHook postInstallCheck
   '';
 
   passthru.withSettings =
@@ -188,8 +217,18 @@ rustPlatform.buildRustPackage (finalAttrs: {
   meta = {
     description = "Fast, preview-first graphical file explorer";
     homepage = "https://github.com/berker-z/marcel";
-    license = lib.licenses.mit;
-    mainProgram = "marcel";
+    changelog = "https://github.com/berker-z/marcel/blob/v${finalAttrs.version}/CHANGELOG.md";
+
+    # Marcel's own code is MIT, but the package also installs the curated
+    # Nordzy icon subset and the Iosevka subsets, which are not. nixpkgs uses a
+    # list when parts of one package carry different licenses.
+    license = with lib.licenses; [
+      mit
+      gpl3Only
+      ofl
+    ];
+
+    mainProgram = "marcel-rs";
     platforms = lib.platforms.linux;
   };
 })

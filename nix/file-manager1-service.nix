@@ -9,14 +9,14 @@ symlinkJoin {
   nativeBuildInputs = [ makeWrapper ];
 
   postBuild = ''
-    wrapProgram "$out/bin/marcel" --set MARCEL_CLAIM_FILE_MANAGER1 1
+    wrapProgram "$out/bin/marcel-rs" --set MARCEL_CLAIM_FILE_MANAGER1 1
 
     branded_service="$out/share/dbus-1/services/io.github.berker_z.Marcel.service"
     cp --remove-destination \
       "${marcel}/share/dbus-1/services/io.github.berker_z.Marcel.service" \
       "$branded_service"
     substituteInPlace "$branded_service" \
-      --replace-fail "${marcel}/bin/marcel" "$out/bin/marcel"
+      --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
 
     install -Dm644 ${./org.freedesktop.FileManager1.service} \
       "$out/share/dbus-1/services/org.freedesktop.FileManager1.service"
