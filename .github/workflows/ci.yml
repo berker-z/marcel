@@ -48,8 +48,16 @@ jobs:
           # follow the flake rather than any runner-installed rustc.
           key: devshell-${{ hashFiles('flake.lock', 'flake.nix') }}
 
+      # The Trash tests need a Trash to resolve, and a hosted runner has no
+      # desktop session to inherit one from. `nix/package.nix` does the same
+      # thing in `preCheck`; a developer machine happens to have it already,
+      # which is exactly why this only showed up here.
       - name: Quality gate
         run: |
+          export HOME="$RUNNER_TEMP/marcel-home"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          mkdir -p "$XDG_DATA_HOME/Trash/files" "$XDG_DATA_HOME/Trash/info"
+
           nix develop --command bash -c '
             set -euo pipefail
             cargo fmt --check

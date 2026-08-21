@@ -150,7 +150,13 @@
             # `desktop_integration`'s integration test starts a private session
             # bus, and it has to be a bus with no system configuration behind
             # it. See the comment in `nix/test-session.conf`.
-            MARCEL_TEST_DBUS_SESSION_CONFIG = toString ./nix/test-session.conf;
+            # Interpolated, not `toString`. `toString` yields the path as a
+            # string without making the file a dependency of the shell, so the
+            # name it produces is one nothing guarantees exists: on a hosted
+            # runner it pointed into a flake source path that was never there,
+            # and dbus-daemon failed to open it. Interpolating copies the file
+            # into the store and depends on it.
+            MARCEL_TEST_DBUS_SESSION_CONFIG = "${./nix/test-session.conf}";
           };
         }
       );
