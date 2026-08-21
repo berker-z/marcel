@@ -858,6 +858,10 @@ impl Marcel {
                                         cx,
                                     );
                                 }
+                                // The listing is final now, so a reveal that
+                                // scrolled against a partial one gets its real
+                                // row.
+                                this.settle_revealed_scroll();
                             }
                             DirectoryUpdate::Error(error) => {
                                 this.directory.fail_load(error);
@@ -1029,8 +1033,22 @@ impl Marcel {
         // Revealing means *showing*: selecting an item somewhere past the
         // viewport and leaving the scroll where it was fails the feature's
         // whole purpose.
+        self.scroll_to_revealed(&primary);
+        // Mid-stream the row is provisional. Later batches merge into the
+        // sorted listing on either side of this entry, so the row it occupies
+        // now is not the row it will occupy at `Done`; scrolling once here
+        // leaves the revealed file off screen by however much the rest of the
+        // enumeration shifted it.
+        if self.directory.loading {
+            self.directory.defer_reveal_scroll(primary);
+        }
+        self.start_preview(entry, cx);
+    }
+
+    /// Put the revealed row on screen, centred, at its current index.
+    fn scroll_to_revealed(&mut self, path: &PathBuf) {
         if let Some(scroll_row) = selected_scroll_row(
-            Some(&primary),
+            Some(path),
             &self.directory.entries,
             &self.directory.visible_entries,
             self.ui.view_mode,
@@ -1040,7 +1058,22 @@ impl Marcel {
                 .directory_scroll
                 .scroll_to_item(scroll_row, ScrollStrategy::Center);
         }
-        self.start_preview(entry, cx);
+    }
+
+    /// Re-apply a mid-stream reveal's scroll once the listing has settled.
+    ///
+    /// Runs after the deferred refresh batch, because that batch can move the
+    /// row one last time.
+    fn settle_revealed_scroll(&mut self) {
+        let Some(target) = self.directory.take_reveal_scroll_target() else {
+            return;
+        };
+        // The file may be gone by the time the scan finished, in which case
+        // there is nothing to show and the selection reconcile has already
+        // dealt with it.
+        if self.directory.selection.primary() == Some(&target) {
+            self.scroll_to_revealed(&target);
+        }
     }
 
     fn navigate_to(&mut self, path: PathBuf, add_to_history: bool, cx: &mut Context<Self>) {

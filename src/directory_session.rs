@@ -42,6 +42,16 @@ pub struct DirectorySession {
     pub(crate) watch_task: Option<Task<()>>,
     watch_cancel: Option<Arc<AtomicBool>>,
     pub(crate) pending_reveal: Vec<PathBuf>,
+    /// A revealed path whose scroll position is not final yet, because it was
+    /// revealed out of a batch while the enumeration was still streaming.
+    ///
+    /// Selecting and previewing the moment the entry appears is what a reveal
+    /// should do, and that part is correct as soon as the batch lands. Its
+    /// *row* is not: later batches merge into the sorted listing on both sides
+    /// of the entry, so the index the scroll was computed from stops being the
+    /// index the entry ends up at. The scroll is therefore re-applied once the
+    /// listing settles.
+    pub(crate) reveal_scroll_target: Option<PathBuf>,
     /// Paths that changed while a load was streaming, held to be re-validated
     /// once the enumeration settles. Applying them mid-stream raced the
     /// stream: an entry inserted by an event was inserted again when the
@@ -71,6 +81,7 @@ impl DirectorySession {
             watch_task: None,
             watch_cancel: None,
             pending_reveal: Vec::new(),
+            reveal_scroll_target: None,
             pending_refresh: HashSet::new(),
             pending_rescan: false,
             entries_revision: 1,
@@ -194,6 +205,9 @@ impl DirectorySession {
         self.load_task.take();
         self.pending_refresh.clear();
         self.pending_rescan = false;
+        // A target from the load being replaced describes rows that no longer
+        // exist. `navigate_to_revealing` sets the new one after this runs.
+        self.reveal_scroll_target = None;
         self.entries.clear();
         self.mark_entries_changed();
         self.visible_entries.clear();
@@ -284,6 +298,17 @@ impl DirectorySession {
     pub fn replace_pending_reveal(&mut self, paths: Vec<PathBuf>) {
         self.selection.clear();
         self.pending_reveal = paths;
+        self.reveal_scroll_target = None;
+    }
+
+    /// Remember that `path` was revealed mid-stream and still needs its final
+    /// scroll position once the listing settles.
+    pub fn defer_reveal_scroll(&mut self, path: PathBuf) {
+        self.reveal_scroll_target = Some(path);
+    }
+
+    pub fn take_reveal_scroll_target(&mut self) -> Option<PathBuf> {
+        self.reveal_scroll_target.take()
     }
 
     pub fn visible_entry(&self, index: usize) -> Option<&FileEntry> {
@@ -628,6 +653,76 @@ mod tests {
             session.selection.primary().map(PathBuf::as_path),
             Some(Path::new("/folder/beta.txt")),
         );
+    }
+
+    #[test]
+    fn a_batch_merged_after_a_reveal_moves_the_revealed_row() {
+        // Why the scroll has to be re-applied at `Done` rather than once, when
+        // the entry first appears: the row it is on while the enumeration is
+        // still streaming is not the row it ends up on. `stream_directory`
+        // yields in readdir order, so a later batch merges names that sort
+        // *before* the revealed one and push it down.
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.merge_batch(vec![
+            entry("m.txt", false, Some(1)),
+            entry("target.txt", false, Some(1)),
+        ]);
+
+        let row_mid_stream = session
+            .visible_entries
+            .iter()
+            .position(|index| session.entries[*index].name == "target.txt")
+            .unwrap();
+        assert_eq!(row_mid_stream, 1);
+
+        session.merge_batch(vec![
+            entry("a.txt", false, Some(1)),
+            entry("b.txt", false, Some(1)),
+        ]);
+
+        let row_settled = session
+            .visible_entries
+            .iter()
+            .position(|index| session.entries[*index].name == "target.txt")
+            .unwrap();
+        assert_eq!(row_settled, 3);
+        assert_ne!(row_mid_stream, row_settled);
+    }
+
+    #[test]
+    fn a_mid_stream_reveal_holds_its_scroll_target_until_taken() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.defer_reveal_scroll(PathBuf::from("/folder/target.txt"));
+
+        // Finishing the load must not drop it: the whole point is that it
+        // outlives the stream so the row can be corrected afterwards.
+        session.finish_load();
+
+        assert_eq!(
+            session.take_reveal_scroll_target(),
+            Some(PathBuf::from("/folder/target.txt")),
+        );
+        assert_eq!(session.take_reveal_scroll_target(), None);
+    }
+
+    #[test]
+    fn a_new_load_drops_a_stale_reveal_scroll_target() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.defer_reveal_scroll(PathBuf::from("/folder/target.txt"));
+
+        session.begin_load(true);
+
+        assert_eq!(session.take_reveal_scroll_target(), None);
+    }
+
+    #[test]
+    fn replacing_the_pending_reveal_drops_the_previous_scroll_target() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.defer_reveal_scroll(PathBuf::from("/folder/old.txt"));
+
+        session.replace_pending_reveal(vec![PathBuf::from("/folder/new.txt")]);
+
+        assert_eq!(session.take_reveal_scroll_target(), None);
     }
 
     #[test]
