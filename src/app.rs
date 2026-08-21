@@ -2331,6 +2331,16 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Escape consumes the frontmost surface before anything underneath
+        // sees it. A context menu is the only thing above the listing, and
+        // clearing the selection out from under one left the menu on screen
+        // describing a file it no longer had, with every action greyed out.
+        // Same shape as E10: a menu outliving the thing it acts on.
+        if self.ui.entry_menu.is_some() {
+            self.dismiss_entry_menu(cx);
+            return;
+        }
+
         let operations = self.operations.read(cx);
         // Escape is easy to press for some other reason, so it only cancels an
         // operation from the window that started it (or from anywhere once
@@ -3118,6 +3128,16 @@ impl Marcel {
         let location_focused = self.ui.location_input.focus_handle(cx).is_focused(window);
         let browser_focused = self.browser_focus.is_focused(window);
         let input_focused = window.has_focused_input(cx);
+
+        // A context menu is in front of every surface this function routes
+        // between, so Escape has to reach it before any of them. Without this,
+        // Escape with an active filter cleared the filter and left the menu
+        // standing; `on_clear_selection` handles the case with no filter.
+        if stroke.key == "escape" && self.ui.entry_menu.is_some() {
+            self.dismiss_entry_menu(cx);
+            cx.stop_propagation();
+            return;
+        }
 
         if location_focused {
             if stroke.modifiers.control
