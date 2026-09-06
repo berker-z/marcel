@@ -1,0 +1,64 @@
+name: cache
+
+# Keep the package Marcel's direct-flake users install in the public Cachix
+# cache. The release CI remains tag/manual-only; this deliberately builds just
+# the x86_64 package when packaging-relevant files change on master.
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/cache.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "assets/**"
+      - "flake.lock"
+      - "flake.nix"
+      - "nix/**"
+      - "src/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: build and publish x86_64-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Record the exact store path so Cachix receives only the package's
+      # runtime closure. Compiler outputs and Cargo build intermediates are not
+      # retained in the project's small public cache.
+      - name: Build the package
+        id: build
+        run: |
+          package_path="$(
+            nix build --accept-flake-config --no-link --print-out-paths \
+              --print-build-logs .#marcel-rs
+          )"
+          echo "path=$package_path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the runtime closure
+        uses: cachix/cachix-action@v17
+        with:
+          name: marcel-rs
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          pathsToPush: "${{ steps.build.outputs.path }}"
+          useDaemon: false

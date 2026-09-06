@@ -96,13 +96,14 @@ the next fallback.
 
 A Git tag or GitHub Release pins and presents a source version, but does not by
 itself stop Nix from compiling that source. Fast Nix installation requires a
-binary cache containing Marcel's exact Nix store output. The intended release
-pipeline is:
+binary cache containing Marcel's exact Nix store output. Marcel's public Cachix
+cache receives the x86_64 package runtime closure from `master`; release builds
+extend that coverage to the tagged architectures. The intended pipeline is:
 
 ```text
 immutable v* tag
     -> hosted x86_64-linux and aarch64-linux builds
-    -> signed Nix binary-cache outputs
+    -> signed Nix binary-cache outputs at marcel-rs.cachix.org
     -> GitHub Release notes and any portable non-Nix artifacts
 ```
 
@@ -110,8 +111,10 @@ When the user's requested derivation exactly matches a cached output, Nix
 downloads the substitute and its closure instead of compiling Marcel. A local
 build remains the correct fallback when the cache lacks that derivation—for
 example after an input override or a lock-file update that the release builders
-have not built. The first implementation may use Cachix or Attic; selecting and
-documenting the cache endpoint belongs to Sprint 16 release automation.
+have not built. The flake advertises the public Cachix substituter and its
+signing key. Cache publication deliberately pushes only the package runtime
+closure: development shells, compilers, and Cargo build intermediates are not
+retained in the project's bounded cache storage.
 
 ## Current packaging audit
 

@@ -1,6 +1,13 @@
 {
   description = "Marcel, a fast preview-first graphical file explorer";
 
+  nixConfig = {
+    extra-substituters = [ "https://marcel-rs.cachix.org" ];
+    extra-trusted-public-keys = [
+      "marcel-rs.cachix.org-1:ae3s4u7pctzohvoTn8DWdMnRCrLEg1u32OIjfQ7p0VY="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
