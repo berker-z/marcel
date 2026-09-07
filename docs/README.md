@@ -16,7 +16,7 @@ surface, and the window layer. All are fixed with regression coverage; the
 evidence is [`review-2026-08-20.md`](review-2026-08-20.md).
 
 [Sprint 21: a launch is a window](sprints/021-a-launch-is-a-window.md) precedes
-it. Running `marcel` while Marcel is open now opens a window
+it. Running `marcel-rs` while Marcel is open now opens a window
 instead of navigating the one in front of you, which is both the conventional
 behaviour and what makes Sprint 20's two-window acceptance matrix something a
 person can actually run.

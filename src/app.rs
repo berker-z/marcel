@@ -7101,13 +7101,20 @@ fn edge_scroll_delta(pointer_y: Pixels, viewport: Bounds<Pixels>) -> Pixels {
 }
 
 fn centered_preview_message(message: impl Into<String>, color: Hsla) -> AnyElement {
+    // A flex item's automatic minimum size is its content, so the text used to
+    // be laid out at its natural width no matter how narrow the preview pane
+    // was, centred on a box wider than the pane and clipped at *both* edges.
+    // `min_w_0` lets it shrink, which is what lets it wrap. Every message here
+    // is user-facing text of unbounded length — a long `Preview failed` error
+    // reads worse than the placeholder that exposed this.
     div()
         .flex()
         .size_full()
         .items_center()
         .justify_center()
+        .px_6()
         .text_color(color)
-        .child(message.into())
+        .child(div().min_w_0().text_center().child(message.into()))
         .into_any_element()
 }
 

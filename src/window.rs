@@ -23,6 +23,20 @@ use crate::Marcel;
 /// The size a Marcel window opens at when nothing else decides for it.
 const DEFAULT_WINDOW_SIZE: (f32, f32) = (1200.0, 760.0);
 
+/// The narrowest window whose layout still fits inside itself.
+///
+/// The browser and preview panes each refuse to go below a minimum, and the
+/// places sidebar is as wide as its widest label in the current font, so below
+/// roughly 844 px the three of them together are wider than the window and the
+/// preview pane hangs off the right edge. 900 leaves room for a sidebar wider
+/// than this machine's.
+///
+/// This is a floor, not a fix: the panes should shrink instead of overflowing,
+/// which is `0.2` work. A floating desktop honours this and stops the user
+/// resizing into the broken layout; a tiling compositor is free to ignore it,
+/// so the layout still has to be made to shrink eventually.
+const MIN_WINDOW_SIZE: (f32, f32) = (900.0, 480.0);
+
 /// How far each additional window steps down and to the right.
 ///
 /// A window opened exactly on top of the last one looks like nothing happened.
@@ -101,6 +115,7 @@ pub fn open(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
             app_id: Some(crate::desktop_integration::APPLICATION_ID.to_string()),
             icon: window_icon(),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Marcel".into()),
                 ..Default::default()

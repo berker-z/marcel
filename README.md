@@ -74,6 +74,7 @@ Known gaps, roughly in the order they are likely to be addressed:
 * No removable volumes, network shares, or remote locations. Local paths only.
 * No media playback, and no thumbnails for video.
 * Sorting is fixed, and preferences other than view mode and hidden files are not persisted.
+* The window needs to be at least 900 pixels wide. Below that the panes are collectively wider than the window and the preview pane runs off the right edge, so Marcel asks the desktop not to shrink it that far. A tiling compositor can insist anyway.
 * Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer.
 * RAR extraction needs a separate build. The default package ships only free components.
 * No Flatpak. Nix is the only packaging route today.

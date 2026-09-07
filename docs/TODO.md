@@ -136,29 +136,30 @@ Sprint status uses four consistent meanings:
 
 ## Deferred `v0.1.0` closure
 
-The personal daily-driver milestone is complete. Public release work is parked
-during hardening; when resumed, its remaining scope is intentionally bounded:
+The personal daily-driver milestone is complete and the hardening queue is
+closed, so this is no longer parked — it is what is left:
 
 1. Harden the distribution closure: free archive baseline, packaged icon
    fallback, AppStream metadata, clean-environment launch checks,
    and documented runtime dependencies.
-2. Tag `0.1.0`, build it from the tag on both declared architectures, and
+2. Run the outstanding destructive-operation smoke checks, especially
+   mounted-volume Trash behavior.
+3. Tag `0.1.0`, build it from the tag on both declared architectures, and
    verify that installing it takes neither MIME nor generic FileManager1
    ownership.
-3. Implement one shared read-only Properties presentation and route both the
-   in-app action and D-Bus `ShowItemProperties` through it.
-4. Implement New File with the same bounded name validation and no-overwrite
-   behavior as New Folder.
-5. Run the outstanding destructive-operation smoke checks, especially
-   mounted-volume Trash behavior.
-6. Submit the tagged package to nixpkgs after its package recipe passes
+4. Submit the tagged package to nixpkgs after its package recipe passes
    `nixpkgs-review`.
 
-Everything else—X11 outbound drag, desktop clipboard integration, Duplicate,
-Move To, cross-filesystem conflict UI, remote locations, broader preference
-persistence, custom sorting, media playback, and deeper coordinator
-extraction—is valuable post-MVP work rather than a reason to hold the first
-personal release.
+Properties and New File used to be items on this list. They are not, any more.
+`README.md` and the `0.1.0` changelog both ship them as documented gaps, and a
+release gate that contradicts the release notes is a bookkeeping bug rather than
+a missing feature. Adding conventional checkbox actions does not make a first
+release better than finishing its acceptance evidence does.
+
+So they join everything else—X11 outbound drag, desktop clipboard integration,
+Duplicate, Move To, cross-filesystem conflict UI, remote locations, broader
+preference persistence, custom sorting, media playback, and deeper coordinator
+extraction—as post-MVP work rather than a reason to hold the first release.
 
 ## Recommended delivery order
 
@@ -260,10 +261,29 @@ The packaging contract, current dependency caveats, target formats, and
 - [ ] Add clean-environment package smoke tests that launch Marcel, enumerate a
   fixture directory, resolve baseline icons/fonts, render one PDF, extract one
   free archive, and verify installed desktop/AppStream/D-Bus metadata.
+- [ ] Make the reproducibility contract explicit before release:
+  - pin `gpui` and `gpui_platform` in `Cargo.toml` to the Zed revision already
+    selected by `Cargo.lock`;
+  - pin the dev-shell Rust toolchain to an exact, deliberately updated version
+    instead of `stable.latest`;
+  - require Cargo's locked mode for hosted Clippy and test builds; and
+  - document the separate update paths for ordinary crates, the GPUI revision,
+    and the Rust toolchain. Keep normal crates on compatible manifest ranges;
+    `Cargo.lock`, not exact `=` requirements throughout `Cargo.toml`, owns the
+    application's complete resolved graph.
+- [ ] Split the upstream Nix build with Crane so compiled Cargo dependencies
+  are a separate derivation from Marcel's source. Preserve the current package
+  checks, runtime wrapping, Git dependency hashes, and both supported
+  architectures. Verify with a cold package build followed by a source-only
+  change: the second build may compile and link Marcel, but must reuse the
+  dependency artifact rather than compile GPUI again. Dependency, feature,
+  toolchain, or relevant build-flag changes are expected to invalidate it.
 - [ ] Establish tagged release sources, changelog/release notes, deterministic
   versioning, release checks on `x86_64-linux` and `aarch64-linux`, and hosted
-  release automation that publishes exact derivations to a signed Nix binary
-  cache alongside the GitHub Release.
+  release automation alongside the GitHub Release. Do not make a separate
+  upstream binary-cache service a `0.1.0` prerequisite: use
+  `cache.nixos.org` once the package reaches nixpkgs, and revisit an upstream
+  cache only if direct-flake users demonstrably need fresher binaries.
 - [ ] Submit `marcel-rs` to nixpkgs as a tagged-source package with a free
   closure, a maintainer, complete `meta`, and a package test. Run `nixfmt`,
   `nixpkgs-review`, the package build/tests, and use the conventional
@@ -471,6 +491,18 @@ The packaging contract, current dependency caveats, target formats, and
   folder's context menu offers Open in New Window. See
   [`Sprint 21`](sprints/021-a-launch-is-a-window.md). `Ctrl+N` and tabs are
   deliberately not part of it.
+- Make the layout shrink instead of overflowing below ~844 px. `0.2`, and the
+  most concrete piece of UI work on this list. Today the workspace width is
+  clamped up to `MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH` (360 + 280), so a window
+  that cannot supply 640 px beside the sidebar gets a layout wider than itself
+  and the preview pane hangs off the right edge — evidence in
+  [`acceptance-2026-08-21.md`](acceptance-2026-08-21.md), A4. `0.1.0` answers
+  this by declaring a 900 px minimum and setting `window_min_size` to match,
+  which is an honest claim rather than a fix, and a tiling compositor can ignore
+  it anyway. Doing it properly means the two pane minimums and the resizable
+  split's `280..900` clamp reconsidered together, and probably a narrow mode for
+  the places sidebar, which is currently as wide as its longest label in the
+  current font — so the floor is not even a constant across fonts and locales.
 - Per-window view state is still last-writer-wins, which was invisible with one
   window and will be noticeable with two: set grid view in one window, close the
   other, and it can snap back. Left alone until it actually irritates someone.

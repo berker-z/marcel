@@ -43,7 +43,7 @@ touching them, and refuses rather than guessing.
 
 Bilateral file drag and drop with other applications on Wayland. Registration
 as a file manager over D-Bus, so "show in folder" works from elsewhere. One
-process per graphical session, with each `marcel` invocation opening its own
+process per graphical session, with each `marcel-rs` invocation opening its own
 window rather than taking over one you were already using.
 
 Installing Marcel does not change your MIME associations and does not claim the
@@ -64,6 +64,10 @@ private free `7zz` for archives. RAR and CBR extraction are off by default
 because the decoder is not free.
 
 ### Known gaps
+
+Marcel needs a window at least 900 pixels wide. Narrower than that its panes are
+wider than the window and the preview pane runs off the edge, so the window
+refuses to shrink below it on desktops that honour a minimum size.
 
 No search, no Properties dialog, no New File. Moves between filesystems are
 refused rather than silently turned into a copy and a delete. No removable

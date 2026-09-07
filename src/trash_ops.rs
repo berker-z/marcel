@@ -73,6 +73,7 @@ pub struct TrashOutcome {
 }
 
 pub fn path_overlaps_system_trash(path: &Path) -> Result<bool> {
+    ensure_home_trash();
     let roots = trash::os_limited::trash_folders().context("Could not resolve the system Trash")?;
     Ok(roots
         .iter()
@@ -104,6 +105,7 @@ pub fn unreadable_trash_warning(unreadable: &[String]) -> Option<String> {
 }
 
 pub fn list_trash_records() -> Result<TrashListing> {
+    ensure_home_trash();
     let mut listing = TrashListing::default();
     for item in trash::os_limited::list().context("Could not inspect the system Trash")? {
         match record_from_item(item) {
@@ -193,7 +195,47 @@ pub fn purge_trash_records(
     }
 }
 
+/// The home Trash directory, from the same rules the `trash` crate resolves by.
+fn home_trash_dir() -> Option<PathBuf> {
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME")
+        && !data_home.is_empty()
+    {
+        return Some(PathBuf::from(data_home).join("Trash"));
+    }
+    let home = std::env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home).join(".local/share/Trash"))
+}
+
+/// Create the home Trash if nothing has yet.
+///
+/// The `trash` crate creates `files/` and `info/` on demand but not the
+/// directory holding them, and every Trash operation here begins by resolving
+/// the Trash folders — which fails outright when the home Trash is missing. On
+/// an account where nothing has trashed anything before, that turned Marcel's
+/// first Trash into a failure reported in the crate's own `Debug` output.
+///
+/// Best effort by design: if this cannot create the directory, the resolution
+/// below fails as it did before and reports why, which is a better error than
+/// one raised here about a directory the user never asked for.
+fn ensure_home_trash() {
+    let Some(home_trash) = home_trash_dir() else {
+        return;
+    };
+    ensure_trash_dir(&home_trash);
+}
+
+fn ensure_trash_dir(trash_dir: &Path) {
+    if trash_dir.is_dir() {
+        return;
+    }
+    let _ = fs::create_dir_all(trash_dir);
+}
+
 pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
+    ensure_home_trash();
     let trash_roots = match trash::os_limited::trash_folders() {
         Ok(roots) => roots,
         Err(error) => {
@@ -730,6 +772,39 @@ fn map_backing_to_original(records: &[TrashRecord], path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs::File;
+
+    #[test]
+    fn missing_home_trash_is_created_rather_than_failing_the_operation() {
+        // The `trash` crate creates `files/` and `info/` on demand but not the
+        // directory holding them, and resolving the Trash folders fails when it
+        // is absent — so on an account that has never trashed anything, every
+        // Trash operation failed until this directory existed.
+        let temp = tempfile::tempdir().unwrap();
+        let trash_dir = temp.path().join("Trash");
+        assert!(!trash_dir.exists());
+
+        ensure_trash_dir(&trash_dir);
+        assert!(trash_dir.is_dir());
+
+        // Idempotent, and it must not disturb what an existing Trash holds.
+        fs::create_dir_all(trash_dir.join("files")).unwrap();
+        File::create(trash_dir.join("files/kept.txt")).unwrap();
+        ensure_trash_dir(&trash_dir);
+        assert!(trash_dir.join("files/kept.txt").is_file());
+    }
+
+    #[test]
+    fn an_unwritable_parent_leaves_the_trash_directory_to_the_caller() {
+        // Best effort by design: the resolution that follows reports why it
+        // could not proceed, which beats an error raised here about a directory
+        // the user never asked for.
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("file-not-a-dir");
+        File::create(&blocked).unwrap();
+
+        ensure_trash_dir(&blocked.join("Trash"));
+        assert!(blocked.is_file());
+    }
 
     fn seeded_record(root: &Path, original_parent: &Path, name: &str) -> TrashRecord {
         let info_dir = root.join("info");

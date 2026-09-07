@@ -27,12 +27,13 @@ screen.
 | 6 | Bundled icons and font on their own | release gate smoke | Pass |
 | 7 | D-Bus surface, branded name only | release gate | Pass |
 | 8 | `ShowItems` routes to an existing window | Sprint 21 | Pass |
-| 9 | Preview placeholder text in a narrow pane | incidental | **Fail** |
+| 9 | Preview placeholder text in a narrow pane | incidental | **Fail**, fixed same day |
 | 10 | Packaged build, x86_64-linux, with its install checks | release gate | Pass |
 | 11 | Minimal-environment smoke test of the installed package | release gate | Pass |
 | 12 | Escape with a context menu open | incidental | **Fail**, fixed same day |
+| 13 | The whole layout below ~844 px | incidental, from A2 | **Fail**, claim corrected, layout deferred |
 
-Two failures, one of them a check Sprint 22 wrote for itself and recorded as
+Three failures, one of them a check Sprint 22 wrote for itself and recorded as
 delivered.
 
 ## A1 — Reveal into a still-loading folder scrolls to the wrong place
@@ -112,6 +113,58 @@ pane and neither wraps nor elides. Widen the window and it renders correctly.
 Cosmetic, and only in the placeholder, but it is the first thing a user sees
 when Marcel declines to preview something, and Marcel declining to preview
 something is exactly what A3 below is about.
+
+**Fixed and re-verified the same day**, at the same 1027 px, in a confirmed-new
+process with the FIFO selected over `ShowItems` rather than by clicking. A flex
+item's automatic minimum size is its content, so the text was laid out at its
+natural width no matter how narrow the pane was; `min_w_0` on an inner box lets
+it shrink, which is what lets it wrap. `centered_preview_message` also renders
+`Preview failed\n{error}`, so this was never only about the placeholder.
+
+Re-verifying it surfaced a second thing in the same message: `format_size`
+returns an empty string for an entry with no size, and the summary joined it
+unconditionally, so a special file rendered "Special file", a blank row, then
+the message. Centred, an empty row reads as a rendering fault. Now the empty
+parts are dropped, with a unit test.
+
+And then squeezing the window further surfaced A4, which is the real one.
+
+## A4 — Below ~844 px the layout is wider than the window
+
+Narrowing the window past roughly 844 px pushes the preview pane off the right
+edge — the pane, not its text. At 768 px, "No preview is availabl" is cut mid
+word and the pane's footer file name runs out of the window.
+
+`src/app.rs` clamps the workspace it lays out into:
+
+```rust
+let workspace_width =
+    (window_width - f32::from(sidebar_width)).max(MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH);
+```
+
+`MIN_BROWSER_WIDTH` is 360 and `MIN_PREVIEW_WIDTH` is 280, so when the window
+cannot supply 640 px beside the sidebar, the layout claims the 640 anyway and
+overflows by the difference. The sidebar was 204 px here, which puts the floor
+at ~844 — and `places_sidebar_width` measures the widest place label in the
+current font, so the floor moves with font size and locale rather than being a
+constant.
+
+This is why A2 looked like a text bug: at 1027 px there was room for the pane
+and only the string overflowed.
+
+The AppStream metadata declared `<display_length compare="ge">768</display_length>`,
+which is a width at which Marcel does not lay out correctly. **The claim is now
+900**, and `window_min_size` is set to match so a floating desktop refuses to
+resize below it. A tiling compositor is free to ignore that, so this is a floor
+and an honest claim, not a fix.
+
+The fix is `0.2` work and is deliberately not being attempted before the tag:
+the panes need to shrink rather than overflow, which means revisiting the two
+minimums and the resizable split's `280..900` clamp together, and probably a
+narrow mode for the places sidebar rather than a sidebar sized by its longest
+label. Reopening the layout that is correct everywhere above 844 px, on the day
+of the tag, to fix a width the release now says it does not support, is the
+trade this record is declining.
 
 ## A3 — Escape does not close a context menu, and empties it instead
 

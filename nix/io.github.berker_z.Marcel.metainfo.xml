@@ -84,7 +84,7 @@
   </supports>
 
   <requires>
-    <display_length compare="ge">768</display_length>
+    <display_length compare="ge">900</display_length>
   </requires>
 
   <content_rating type="oars-1.1" />

@@ -68,10 +68,9 @@ pub fn load_preview(
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
             return Ok(Preview::Metadata {
-                summary: format!(
-                    "{}\n{}\nNo preview is available for this kind of file",
-                    entry.display_kind(),
-                    format_size(entry.size)
+                summary: metadata_summary(
+                    entry,
+                    "No preview is available for this kind of file".to_string(),
                 ),
             });
         }
@@ -126,13 +125,28 @@ pub fn load_preview(
     }
 
     Ok(Preview::Metadata {
-        summary: format!(
-            "{}\n{}\n{}",
-            entry.display_kind(),
-            format_size(entry.size),
-            inferred.unwrap_or_else(|| "Unknown format".to_string())
+        summary: metadata_summary(
+            entry,
+            inferred.unwrap_or_else(|| "Unknown format".to_string()),
         ),
     })
+}
+
+/// Kind, size, and a closing line, one per row.
+///
+/// `format_size` returns an empty string for an entry with no size — a special
+/// file, most often — and this text is centred in the preview pane, where an
+/// empty middle row reads as a rendering fault rather than as an absent size.
+fn metadata_summary(entry: &FileEntry, detail: String) -> String {
+    [
+        entry.display_kind().to_string(),
+        format_size(entry.size),
+        detail,
+    ]
+    .into_iter()
+    .filter(|line| !line.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// Read as much of `buffer` as the file can fill, tolerating short reads.
@@ -233,6 +247,39 @@ fn language_for_path(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::EntryKind;
+
+    fn metadata_entry(kind: EntryKind, size: Option<u64>) -> FileEntry {
+        let name = "special-pipe";
+        FileEntry {
+            path: PathBuf::from(name),
+            name: name.to_string(),
+            name_os: name.into(),
+            folded_name: name.chars().collect(),
+            kind,
+            navigable: false,
+            size,
+            icon_path: None,
+        }
+    }
+
+    #[test]
+    fn metadata_summary_drops_an_absent_size_rather_than_leaving_a_blank_row() {
+        let summary = metadata_summary(
+            &metadata_entry(EntryKind::Other, None),
+            "No preview is available for this kind of file".to_string(),
+        );
+        assert_eq!(
+            summary,
+            "Special file\nNo preview is available for this kind of file"
+        );
+
+        let sized = metadata_summary(
+            &metadata_entry(EntryKind::File, Some(2048)),
+            "Unknown format".to_string(),
+        );
+        assert_eq!(sized, "File\n2.0 KiB\nUnknown format");
+    }
 
     #[test]
     fn detects_binary_content() {
