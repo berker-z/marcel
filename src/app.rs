@@ -2993,13 +2993,18 @@ impl Marcel {
             .update(cx, |input, cx| input.focus(window, cx));
     }
 
-    fn replace_search_text(&self, value: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_search_text(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
+        // InputState emits Change asynchronously. Keep the directory session,
+        // which is the authoritative value used by render(), in sync first so
+        // a render triggered by moving focus cannot restore the old query and
+        // discard the first type-to-filter character.
+        self.set_filter_query(value.clone(), cx);
         self.ui
             .search_input
             .update(cx, |input, cx| input.set_value(value, window, cx));
     }
 
-    fn clear_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_search_text(String::new(), window, cx);
         self.browser_focus.focus(window, cx);
     }
