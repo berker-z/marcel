@@ -97,13 +97,14 @@ the next fallback.
 A Git tag or GitHub Release pins and presents a source version, but does not by
 itself stop Nix from compiling that source. Fast Nix installation requires a
 binary cache containing Marcel's exact Nix store output. Marcel's public Cachix
-cache receives the x86_64 package runtime closure from `master`; release builds
-extend that coverage to the tagged architectures. The intended pipeline is:
+cache receives the x86_64 package runtime closure from immutable `v*` tags;
+release CI separately validates the tagged package on both declared
+architectures. The intended pipeline is:
 
 ```text
 immutable v* tag
-    -> hosted x86_64-linux and aarch64-linux builds
-    -> signed Nix binary-cache outputs at marcel-rs.cachix.org
+    -> hosted x86_64-linux and aarch64-linux validation
+    -> signed x86_64-linux runtime closure at marcel-rs.cachix.org
     -> GitHub Release notes and any portable non-Nix artifacts
 ```
 

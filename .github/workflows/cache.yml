@@ -1,20 +1,11 @@
 name: cache
 
 # Keep the package Marcel's direct-flake users install in the public Cachix
-# cache. The release CI remains tag/manual-only; this deliberately builds just
-# the x86_64 package when packaging-relevant files change on master.
+# cache. Like the release CI, this remains tag/manual-only and deliberately
+# publishes just the x86_64 package for an immutable release tag.
 on:
   push:
-    branches: [master]
-    paths:
-      - ".github/workflows/cache.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "assets/**"
-      - "flake.lock"
-      - "flake.nix"
-      - "nix/**"
-      - "src/**"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
