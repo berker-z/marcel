@@ -25,6 +25,6 @@ symlinkJoin {
       --replace-fail @marcel@ "$out"
   '';
 
-  inherit (marcel) meta;
+  inherit (marcel) meta version;
   passthru.unconfigured = marcel;
 }

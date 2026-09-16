@@ -91,50 +91,73 @@ Run it without installing anything:
 nix run github:berker-z/marcel -- ~/Downloads
 ```
 
-For a persistent installation, add Marcel to your system flake:
+For a persistent installation, add Marcel as a flake input and import its
+Home Manager module:
 
 ```nix
 {
-  inputs.marcel = {
-    url = "github:berker-z/marcel";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
+  inputs.marcel.url = "github:berker-z/marcel";
 }
 ```
 
-Then apply its overlay and install the package:
-
 ```nix
 {
-  nixpkgs.overlays = [inputs.marcel.overlays.default];
-  environment.systemPackages = [pkgs.marcel-rs];
-}
-```
-
-The command is `marcel-rs`, not `marcel`. nixpkgs already has a `marcel`, an unrelated Python shell, and two packages installing the same `bin/marcel` collide in a profile. Only the command carries the suffix: the application is still Marcel everywhere you see it, including its icon, its desktop entry, its D-Bus name, and its config directory at `~/.config/marcel`.
-
-Installing Marcel does not change your MIME associations and does not take over the generic file manager registration on D-Bus. Both are opt-in, and are covered in [`docs/release.md`](docs/release.md).
-
-## Declarative settings
-
-The flake exports NixOS and Home Manager modules for theme, icon theme, and font:
-
-```nix
-{
-  imports = [inputs.marcel.nixosModules.default];
+  imports = [inputs.marcel.homeManagerModules.default];
 
   programs.marcel = {
     enable = true;
-    settings = {
-      theme = "tokyo-night";
-      icon_theme = null;
-      ui_font = null;
-    };
+    defaultDirectoryHandler = true;
+    fileManager1 = true;
+    settings.theme = "nord";
   };
 }
 ```
 
-`imports = [inputs.marcel.homeManagerModules.default]` gives the same options per user. Leaving `icon_theme` and `ui_font` as `null` keeps Marcel's bundled icons and font, which is the default.
+Do not add `inputs.nixpkgs.follows` to the input. Marcel pins its own
+nixpkgs, and the binary cache holds builds against that pin; following your
+nixpkgs produces a different derivation that has to be compiled locally.
+
+`enable` alone installs Marcel and changes nothing else about the desktop.
+The two flags are the integration you actually want from a file manager, and
+each is off by default because it takes something over:
+
+- `defaultDirectoryHandler` makes Marcel the `inode/directory` handler, so
+  `xdg-open` on a folder opens Marcel.
+- `fileManager1` makes Marcel answer `org.freedesktop.FileManager1` on the
+  session bus, which is the D-Bus call behind "show in folder" in browsers
+  and most other applications. Every launch of the installed binary then
+  claims the name, and the module writes an activation file to
+  `~/.local/share/dbus-1/services`. D-Bus reads that directory before any
+  installed package's, so Marcel wins even with Nautilus or Dolphin
+  installed; both ship a file claiming the same name.
+
+There is a NixOS module with the same options
+(`inputs.marcel.nixosModules.default`; packages land in
+`environment.systemPackages`). It has nowhere per-user to put the D-Bus
+override, so with a second file manager on the system, which one D-Bus starts
+for `FileManager1` falls back to profile order. Use the Home Manager module
+when that matters.
+
+The command is `marcel-rs`, not `marcel`. nixpkgs already has a `marcel`, an unrelated Python shell, and two packages installing the same `bin/marcel` collide in a profile. Only the command carries the suffix: the application is still Marcel everywhere you see it, including its icon, its desktop entry, its D-Bus name, and its config directory at `~/.config/marcel`.
+
+Without the module, `overlays.default` provides `pkgs.marcel-rs`, and
+`packages.<system>.file-manager1-service` is the variant that claims the
+D-Bus name. Installing either changes no MIME associations; the details are in
+[`docs/release.md`](docs/release.md).
+
+## Declarative settings
+
+`settings` covers theme, icon theme, and font:
+
+```nix
+programs.marcel.settings = {
+  theme = "tokyo-night";
+  icon_theme = null;
+  ui_font = null;
+};
+```
+
+Leaving `icon_theme` and `ui_font` as `null` keeps Marcel's bundled icons and font, which is the default.
 
 View mode and hidden file visibility are deliberately not Nix options. Marcel treats them as interaction state and remembers what you last chose in `$XDG_CONFIG_HOME/marcel/state.conf`.
 

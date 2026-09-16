@@ -183,7 +183,14 @@ family. The overlay's `pkgs.marcel-rs.withSettings` constructor exposes the same
 mechanism without a module. The configured application-specific D-Bus service
 points at the wrapper so desktop activation receives the same settings as a
 shell launch. Neither module changes MIME associations nor claims generic
-FileManager1 ownership.
+FileManager1 ownership unless asked: `programs.marcel.defaultDirectoryHandler`
+registers the `inode/directory` default, and `programs.marcel.fileManager1`
+wraps the `file-manager1-service` variant under the settings wrapper and, in
+the Home Manager module, writes an `org.freedesktop.FileManager1.service`
+activation file to `~/.local/share/dbus-1/services`. D-Bus scans that
+directory before `XDG_DATA_DIRS` and keeps the first file it finds for a
+name, which is what makes the choice deterministic when Nautilus or Dolphin
+is also installed. Both options default to off.
 
 List/grid view and hidden-file visibility are interaction state rather than
 declarative package configuration. Marcel loads them from

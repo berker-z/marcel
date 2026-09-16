@@ -36,14 +36,19 @@ symlinkJoin {
   postBuild = ''
     wrapProgram "$out/bin/marcel-rs" ${lib.escapeShellArgs wrapperArgs}
 
-    service="$out/share/dbus-1/services/io.github.berker_z.Marcel.service"
-    if [[ -e "$service" ]]; then
-      cp --remove-destination \
-        "${marcel}/share/dbus-1/services/io.github.berker_z.Marcel.service" \
-        "$service"
-      substituteInPlace "$service" \
-        --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
-    fi
+    # D-Bus activation must launch this wrapper, not the binary underneath,
+    # or a Marcel started by "show in folder" runs without these settings.
+    # The generic file exists only when wrapping the file-manager1 variant.
+    for name in io.github.berker_z.Marcel org.freedesktop.FileManager1; do
+      service="$out/share/dbus-1/services/$name.service"
+      if [[ -e "$service" ]]; then
+        cp --remove-destination \
+          "${marcel}/share/dbus-1/services/$name.service" \
+          "$service"
+        substituteInPlace "$service" \
+          --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
+      fi
+    done
   '';
 
   inherit (marcel) meta;

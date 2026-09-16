@@ -102,18 +102,12 @@
 
       homeManagerModules.default = import ./nix/settings-module.nix {
         flake = self;
-        packageOption = [
-          "home"
-          "packages"
-        ];
+        integration = "home-manager";
       };
 
       nixosModules.default = import ./nix/settings-module.nix {
         flake = self;
-        packageOption = [
-          "environment"
-          "systemPackages"
-        ];
+        integration = "nixos";
       };
 
       checks = forAllSystems (system: {
