@@ -44,6 +44,20 @@ media inspection off GPUI's foreground executor. Preview work must be
 cancellable or safely superseded, bounded in memory use, and unable to publish
 stale results as current.
 
+## Picker windows
+
+A file-chooser window (the portal backend's open and save dialog) is not a
+separate UI. It is the same `Marcel` view with `picker: Some(_)`, rendered by
+the same `render()`, browsing the same `DirectorySession`. Anything added to
+the browser, such as sorting, a new view, a top-bar control, or a context-menu
+command, appears in pickers automatically; nothing has to be replicated.
+
+The only picker-specific code is the handful of `self.picker` checks: what
+activating a file means, Escape, the Trash place, single selection, and the
+bottom bar. Do not add a `picker` branch to a new feature unless the dialog
+genuinely needs different behaviour, and when it does, keep the branch next to
+the others so the list stays greppable.
+
 ## Keyboard shortcuts
 
 The README carries the user-facing list of shortcuts. That list is what people
