@@ -211,8 +211,13 @@ buildPackage (finalAttrs: {
 
     mkdir -p "$out/share/marcel/icons" "$out/share/licenses/marcel" \
       "$out/share/icons"
-    cp -R ${../assets/icons/nordzy} "$out/share/marcel/icons/nordzy"
-    cp -R ${../assets/icons/hicolor} "$out/share/icons/hicolor"
+    # Store paths are read-only; a plain `cp -R` carries that mode into
+    # `$out`, and Crane's post-install hook then fails to `sed -i` the tree
+    # while stripping toolchain references.
+    cp -R --no-preserve=mode ${../assets/icons/nordzy} \
+      "$out/share/marcel/icons/nordzy"
+    cp -R --no-preserve=mode ${../assets/icons/hicolor} \
+      "$out/share/icons/hicolor"
     install -Dm644 ${../assets/fonts/OFL-Iosevka.md} \
       "$out/share/licenses/marcel/OFL-Iosevka.md"
     install -Dm644 ${../assets/icons/nordzy/COPYING} \
