@@ -48,7 +48,7 @@ use crate::{
         TrashSelection, UndoFileOperation,
     },
     directory_session::{
-        ApplyDirectoryEvents, DirectoryEvent, DirectorySession, ReconcileSelection,
+        ApplyDirectoryEvents, ContentFilter, DirectoryEvent, DirectorySession, ReconcileSelection,
     },
     directory_watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     drag_controller::{DragController, EntryHitRegion, MarqueeGesture},
@@ -63,6 +63,8 @@ use crate::{
     history::NavigationHistory,
     launch::{LocationTarget, resolve_location},
     operations::{FileClipboard, OperationCoordinator, OperationEvent, OperationProgressKind},
+    picker::{PickerMode, PickerRequest, PickerResponse},
+    picker_state::PickerState,
     places::{Place, discover as discover_places},
     preview::{Preview, PreviewState, load_preview},
     preview_controller::{
@@ -212,6 +214,12 @@ pub struct Marcel {
     history: NavigationHistory,
     sidebar: SidebarController,
     drag_payload: Option<CachedFileDrag>,
+    /// Present when this window is a file chooser answering a portal request.
+    ///
+    /// Everything else about the window is the ordinary pane: same browser,
+    /// same preview, same operations. The picker adds a bar with the answer
+    /// controls and changes what activating a file means.
+    picker: Option<PickerState>,
 }
 
 impl Marcel {
@@ -296,14 +304,433 @@ impl Marcel {
             history: NavigationHistory::new(start_dir),
             sidebar: SidebarController::new(&home_dir),
             drag_payload: None,
+            picker: None,
         };
         this.start_places_load(home_dir, cx);
         this.start_directory_load(true, cx);
         this
     }
 
+    /// A window that answers a file-chooser request.
+    pub fn new_picker(request: PickerRequest, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let home_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let mut this = Self::new(request.initial_directory(&home_dir), window, cx);
+
+        let name_input = matches!(request.mode, PickerMode::SaveFile).then(|| {
+            let name = request.current_name.clone().unwrap_or_default();
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("File name")
+                    .default_value(name)
+            });
+            let subscription =
+                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.confirm_picker(window, cx);
+                    }
+                });
+            (input, subscription)
+        });
+        let filter_select = (!request.filters.is_empty()).then(|| {
+            let labels = request
+                .filters
+                .iter()
+                .map(|filter| SharedString::from(filter.name.clone()))
+                .collect::<Vec<_>>();
+            let initial = request
+                .current_filter
+                .unwrap_or(0)
+                .min(labels.len().saturating_sub(1));
+            let select = cx.new(|cx| {
+                SelectState::new(labels, Some(IndexPath::default().row(initial)), window, cx)
+            });
+            let subscription = cx.subscribe_in(
+                &select,
+                window,
+                |this, select, _: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let index = select.read(cx).selected_index(cx).map(|path| path.row);
+                    this.set_picker_filter(index, cx);
+                },
+            );
+            (select, subscription)
+        });
+
+        this.directory.selection.set_single(!request.multiple);
+        this.picker = Some(PickerState::new(request, name_input, filter_select));
+        this.apply_picker_filter(cx);
+        this
+    }
+
     pub fn focus_browser(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.browser_focus.focus(window, cx);
+    }
+
+    /// Where typing should land when a picker opens: the name field of a save
+    /// dialog, otherwise the listing.
+    pub fn focus_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.name_input.clone())
+        {
+            Some(input) => {
+                input.update(cx, |input, cx| input.focus(window, cx));
+                // Select the stem, as Rename does: the name is the part that
+                // usually changes, the extension the part the caller chose.
+                let value = input.read(cx).value().to_string();
+                let stem_end = rename_stem_end(&value, false);
+                let input = input.clone();
+                cx.defer_in(window, move |_, window, cx| {
+                    input.update(cx, |input, cx| {
+                        input.set_cursor_position(Position::new(0, stem_end as u32), window, cx);
+                    });
+                    window.dispatch_action(Box::new(InputSelectToStart), cx);
+                });
+            }
+            None => self.focus_browser(window, cx),
+        }
+    }
+
+    fn set_picker_filter(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        if picker.active_filter == index {
+            return;
+        }
+        picker.active_filter = index;
+        self.apply_picker_filter(cx);
+    }
+
+    /// Project the listing under the picker's active filter.
+    fn apply_picker_filter(&mut self, cx: &mut Context<Self>) {
+        let filter = self
+            .picker
+            .as_ref()
+            .and_then(PickerState::active_filter)
+            .cloned();
+        let reconcile = self.directory.set_content_filter(filter.map(|filter| {
+            Arc::new(move |entry: &FileEntry| filter.matches(entry)) as ContentFilter
+        }));
+        self.apply_selection_reconcile(reconcile, cx);
+        cx.notify();
+    }
+
+    /// Send the answer and close. Only the first answer leaves the window.
+    fn answer_picker(
+        &mut self,
+        response: PickerResponse,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        if picker.answer(response) {
+            window.remove_window();
+        }
+        cx.notify();
+    }
+
+    fn cancel_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.answer_picker(PickerResponse::Cancelled, window, cx);
+    }
+
+    /// The caller withdrew the request; there is nobody left to answer.
+    pub fn withdraw_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.answer_picker(PickerResponse::Closed, window, cx);
+    }
+
+    /// The selected paths in visible order, which is the order the caller
+    /// receives them in.
+    fn selected_visible_paths(&self) -> Vec<PathBuf> {
+        let selected = self.directory.selection.selected();
+        self.visible_paths()
+            .into_iter()
+            .filter(|path| selected.contains(path))
+            .collect()
+    }
+
+    fn is_navigable_entry(&self, path: &Path) -> bool {
+        self.directory
+            .entry(path)
+            .is_some_and(|entry| entry.navigable)
+    }
+
+    /// Turn what the window shows into the caller's answer.
+    fn confirm_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        if picker.confirming {
+            return;
+        }
+        if self.sidebar.browsing_trash {
+            window.push_notification(
+                Notification::info("Restore the item first; the Trash cannot be chosen from"),
+                cx,
+            );
+            return;
+        }
+        let mode = picker.mode.clone();
+        let filter = picker.active_filter;
+        let name_input = picker.name_input.clone();
+        let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) = self
+            .selected_visible_paths()
+            .into_iter()
+            .partition(|path| self.is_navigable_entry(path));
+
+        match mode {
+            PickerMode::OpenFiles => {
+                if files.is_empty() {
+                    // Open with only a folder selected means "go in", the
+                    // same thing Enter means in a browsing window.
+                    if let Some(folder) = folders.into_iter().next() {
+                        self.navigate_to(folder, true, cx);
+                    }
+                    return;
+                }
+                self.answer_picker(
+                    PickerResponse::Chosen {
+                        paths: files,
+                        filter,
+                    },
+                    window,
+                    cx,
+                );
+            }
+            PickerMode::OpenDirectories => {
+                let paths = if folders.is_empty() {
+                    // Nothing selected inside it: the folder being looked at
+                    // is the folder being chosen.
+                    vec![self.directory.current_dir.clone()]
+                } else {
+                    folders
+                };
+                self.answer_picker(PickerResponse::Chosen { paths, filter }, window, cx);
+            }
+            PickerMode::SaveFile => {
+                let Some(input) = name_input else {
+                    return;
+                };
+                let name = input.read(cx).value().to_string();
+                if let Err(error) = validate_entry_name(&name) {
+                    window.push_notification(Notification::error(error.to_string()), cx);
+                    input.update(cx, |input, cx| input.focus(window, cx));
+                    return;
+                }
+                let target = self.directory.current_dir.join(&name);
+                if self.is_navigable_entry(&target) {
+                    // Typing a folder's name and pressing Save goes into it,
+                    // which is what every other save dialog does.
+                    self.navigate_to(target, true, cx);
+                    return;
+                }
+                self.check_targets_then_answer(vec![target], filter, window, cx);
+            }
+            PickerMode::SaveFiles { names } => {
+                let folder = folders
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| self.directory.current_dir.clone());
+                let targets = names.iter().map(|name| folder.join(name)).collect();
+                self.check_targets_then_answer(targets, filter, window, cx);
+            }
+        }
+    }
+
+    /// Answer with `targets` once it is known which of them already exist,
+    /// asking before any of those is overwritten.
+    fn check_targets_then_answer(
+        &mut self,
+        targets: Vec<PathBuf>,
+        filter: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        picker.confirming = true;
+        cx.notify();
+
+        let probe = targets.clone();
+        let check = cx.background_executor().spawn(smol::unblock(move || {
+            probe
+                .into_iter()
+                .filter(|target| std::fs::symlink_metadata(target).is_ok())
+                .collect::<Vec<_>>()
+        }));
+        cx.spawn_in(window, async move |this, window| {
+            let existing = check.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                let Some(picker) = this.picker.as_mut() else {
+                    return;
+                };
+                picker.confirming = false;
+                let response = PickerResponse::Chosen {
+                    paths: targets,
+                    filter,
+                };
+                if existing.is_empty() {
+                    this.answer_picker(response, window, cx);
+                } else {
+                    this.open_overwrite_dialog(response, existing, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_overwrite_dialog(
+        &mut self,
+        response: PickerResponse,
+        existing: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = if let [only] = existing.as_slice() {
+            format!(
+                "“{}” already exists. Replace it?",
+                only.file_name()
+                    .map(display_filename)
+                    .unwrap_or_else(|| only.display().to_string())
+            )
+        } else {
+            format!(
+                "{} of these files already exist. Replace them?",
+                existing.len()
+            )
+        };
+        let view = cx.entity();
+        let danger = cx.theme().colors.danger;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let response = response.clone();
+            dialog
+                .title("Replace File")
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(description.clone())
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(danger)
+                                .child("The application will overwrite the existing contents."),
+                        ),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Replace")
+                        .ok_variant(ButtonVariant::Danger)
+                        .show_cancel(true),
+                )
+                .footer(dialog_footer(
+                    "replace-file",
+                    "Replace",
+                    ButtonVariant::Danger,
+                    true,
+                ))
+                .overlay_closable(false)
+                .close_button(false)
+                .on_ok(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.answer_picker(response.clone(), window, cx);
+                    });
+                    true
+                })
+        });
+        cx.notify();
+    }
+
+    /// The bar along the bottom of a picker: the name field, the filter,
+    /// and the two buttons every dialog has.
+    fn render_picker_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.picker.as_ref()?;
+        let colors = cx.theme().colors;
+        let name_input = picker.name_input.clone();
+        let filter_select = picker.filter_select.clone();
+        let accept_label = SharedString::from(picker.accept_label.clone());
+        let confirming = picker.confirming;
+        let hint = match &picker.mode {
+            PickerMode::OpenFiles if picker.multiple => "Choose one or more files",
+            PickerMode::OpenFiles => "Choose a file",
+            PickerMode::OpenDirectories if picker.multiple => {
+                "Choose folders, or open the one to use"
+            }
+            PickerMode::OpenDirectories => "Choose a folder, or open the one to use",
+            PickerMode::SaveFile => "Name",
+            PickerMode::SaveFiles { names } if names.len() == 1 => "Choose where to save the file",
+            PickerMode::SaveFiles { .. } => "Choose where to save the files",
+        };
+
+        Some(
+            h_flex()
+                .flex_none()
+                .w_full()
+                .h(px(56.0))
+                .px_4()
+                .gap_3()
+                .items_center()
+                .bg(colors.sidebar)
+                .border_t_1()
+                .border_color(colors.border)
+                .text_color(colors.sidebar_foreground)
+                .child(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .text_color(colors.muted_foreground)
+                        .child(hint),
+                )
+                .when_some(name_input, |this, input| {
+                    this.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&input).small().h_8()),
+                    )
+                })
+                .when(picker.name_input.is_none(), |this| {
+                    this.child(div().flex_1())
+                })
+                .when_some(filter_select, |this, select| {
+                    // The component fills whatever it is given; without a box
+                    // of its own it fills the bar and sits against its top.
+                    this.child(
+                        div()
+                            .flex_none()
+                            .w(px(200.0))
+                            .h(px(28.0))
+                            .child(Select::new(&select).small()),
+                    )
+                })
+                .child(
+                    Button::new("picker-cancel")
+                        .label("Cancel")
+                        .outline()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_picker(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("picker-accept")
+                        .label(accept_label)
+                        .primary()
+                        .small()
+                        .disabled(confirming)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.confirm_picker(window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn start_places_load(&mut self, home: PathBuf, cx: &mut Context<Self>) {
@@ -1342,7 +1769,7 @@ impl Marcel {
             BrowserCommand::SelectPageDown => {
                 self.move_keyboard_selection(SelectionMotion::PageDown, false, cx)
             }
-            BrowserCommand::ActivateSelection => self.activate_primary(cx),
+            BrowserCommand::ActivateSelection => self.activate_primary(window, cx),
             BrowserCommand::OpenWithSelection => self.open_primary_with(cx),
             BrowserCommand::ClearSelection => {
                 if self.ui.rename_path.is_some() {
@@ -1446,7 +1873,7 @@ impl Marcel {
         }
     }
 
-    fn activate_primary(&mut self, cx: &mut Context<Self>) {
+    fn activate_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self
             .directory
             .selection
@@ -1456,7 +1883,7 @@ impl Marcel {
         else {
             return;
         };
-        self.open_entry(entry, cx);
+        self.open_entry(entry, window, cx);
     }
 
     fn select_all_entries(&mut self, cx: &mut Context<Self>) {
@@ -2353,10 +2780,15 @@ impl Marcel {
             window.push_notification(Notification::info("Cancelling file operation…"), cx);
             return;
         }
-        if self.directory.filter_query.is_empty() {
-            self.execute_browser_command(BrowserCommand::ClearSelection, window, cx);
-        } else {
+        if !self.directory.filter_query.is_empty() {
             self.clear_filter(window, cx);
+        } else if self.picker.is_some() && self.ui.rename_path.is_none() {
+            // A dialog answers Escape by going away, not by deselecting. This
+            // is the binding's path; `on_window_key_down` covers focus that
+            // has no binding, such as the name field.
+            self.cancel_picker(window, cx);
+        } else {
+            self.execute_browser_command(BrowserCommand::ClearSelection, window, cx);
         }
     }
 
@@ -2982,7 +3414,7 @@ impl Marcel {
                     self.browser_focus.focus(window, cx);
                 }
             }
-            InputEvent::PressEnter { .. } => self.activate_primary(cx),
+            InputEvent::PressEnter { .. } => self.activate_primary(window, cx),
             InputEvent::Focus | InputEvent::Blur => {}
         }
     }
@@ -3144,6 +3576,21 @@ impl Marcel {
             return;
         }
 
+        // Escape in a picker dismisses the dialog, as it does everywhere
+        // else on the desktop — once nothing in front of the listing wants
+        // it: an edit in progress, a filter to clear, a dialog of its own.
+        if stroke.key == "escape"
+            && self.picker.is_some()
+            && !location_focused
+            && self.ui.rename_path.is_none()
+            && self.directory.filter_query.is_empty()
+            && !window.has_active_dialog(cx)
+        {
+            self.cancel_picker(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         if location_focused {
             if stroke.modifiers.control
                 && !stroke.modifiers.alt
@@ -3215,7 +3662,7 @@ impl Marcel {
                     return;
                 }
                 "enter" if !browser_focused => {
-                    self.activate_primary(cx);
+                    self.activate_primary(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -3305,7 +3752,13 @@ impl Marcel {
         }));
     }
 
-    fn activate_entry(&mut self, path: &Path, event: &ClickEvent, cx: &mut Context<Self>) {
+    fn activate_entry(
+        &mut self,
+        path: &Path,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Right-click selection is resolved on mouse-down before the context
         // menu is built. Do not apply ordinary click modifiers a second time.
         if event.is_right_click() {
@@ -3315,6 +3768,20 @@ impl Marcel {
         let Some(entry) = self.directory.entry(path).cloned() else {
             return;
         };
+
+        // Clicking a file in a save dialog proposes its name, the way every
+        // save dialog does. Only clicks: a name the caller supplied must not
+        // be overwritten by the listing settling on a first row.
+        if !entry.navigable
+            && let Some(input) = self
+                .picker
+                .as_ref()
+                .filter(|picker| picker.mode == PickerMode::SaveFile)
+                .and_then(|picker| picker.name_input.clone())
+        {
+            let name = entry.name.clone();
+            input.update(cx, |input, cx| input.set_value(name, window, cx));
+        }
 
         let modifiers = event.modifiers();
         if modifiers.shift {
@@ -3341,7 +3808,7 @@ impl Marcel {
         }
 
         if event.click_count() >= 2 {
-            self.open_entry(entry, cx);
+            self.open_entry(entry, window, cx);
         }
     }
 
@@ -4397,6 +4864,7 @@ impl Marcel {
         &mut self,
         path: &Path,
         event: &ClickEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.is_right_click() || event.click_count() < 2 {
@@ -4411,7 +4879,7 @@ impl Marcel {
         else {
             return;
         };
-        self.open_entry(entry, cx);
+        self.open_entry(entry, window, cx);
     }
 
     fn ensure_pdf_pages(&mut self, visible: Range<usize>, cx: &mut Context<Self>) {
@@ -4508,9 +4976,43 @@ impl Marcel {
         }
     }
 
-    fn open_entry(&mut self, entry: FileEntry, cx: &mut Context<Self>) {
+    fn open_entry(&mut self, entry: FileEntry, window: &mut Window, cx: &mut Context<Self>) {
         if entry.navigable {
             self.navigate_to(entry.path, true, cx);
+            return;
+        }
+
+        // In a picker a file is an answer, not something to launch.
+        if let Some(picker) = self.picker.as_ref() {
+            match picker.mode {
+                PickerMode::OpenFiles => {
+                    // Activating one of the selected files means the selection;
+                    // activating something outside it means that file alone.
+                    if self.directory.selection.is_selected(&entry.path) {
+                        self.confirm_picker(window, cx);
+                        return;
+                    }
+                    let filter = picker.active_filter;
+                    self.answer_picker(
+                        PickerResponse::Chosen {
+                            paths: vec![entry.path],
+                            filter,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                PickerMode::SaveFile => {
+                    // The click that came first already proposed the name;
+                    // an activation from elsewhere (the folder preview) is
+                    // about a file the name field cannot describe.
+                    if entry.path.parent() == Some(self.directory.current_dir.as_path()) {
+                        self.confirm_picker(window, cx);
+                    }
+                }
+                // A folder picker has nothing to say about a file.
+                PickerMode::OpenDirectories | PickerMode::SaveFiles { .. } => {}
+            }
             return;
         }
 
@@ -5017,8 +5519,8 @@ impl Marcel {
                                     },
                                 ))
                             })
-                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                this.activate_entry(&click_path, event, cx);
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                this.activate_entry(&click_path, event, window, cx);
                             }))
                             .on_mouse_down(
                                 MouseButton::Right,
@@ -5346,8 +5848,8 @@ impl Marcel {
                                         )
                                     })
                                     .on_click(cx.listener(
-                                        move |this, event: &ClickEvent, _, cx| {
-                                            this.activate_entry(&click_path, event, cx);
+                                        move |this, event: &ClickEvent, window, cx| {
+                                            this.activate_entry(&click_path, event, window, cx);
                                         },
                                     ))
                                     .on_mouse_down(
@@ -5649,10 +6151,11 @@ impl Marcel {
                                         .cursor_pointer()
                                         .hover(|this| this.bg(colors.list_hover))
                                         .on_click(cx.listener(
-                                            move |this, event: &ClickEvent, _, cx| {
+                                            move |this, event: &ClickEvent, window, cx| {
                                                 this.activate_folder_preview_entry(
                                                     &click_path,
                                                     event,
+                                                    window,
                                                     cx,
                                                 );
                                             },
@@ -5920,12 +6423,16 @@ impl Render for Marcel {
         if self.preview.width.get() == px(0.0) {
             self.preview.width.set(preview_default);
         }
+        // A picker chooses from the filesystem; the Trash is where things
+        // are not. Hiding the place is simpler than refusing at confirm.
+        let is_picker = self.picker.is_some();
         let place_buttons = self
             .sidebar
             .places
             .clone()
             .into_iter()
             .enumerate()
+            .filter(|(_, place)| !is_picker || !place.is_trash())
             .map(|(index, place)| self.render_place(index, place, cx))
             .collect::<Vec<_>>();
         let bookmarks = self.bookmarks.read(cx).bookmarks().to_vec();
@@ -6532,6 +7039,7 @@ impl Render for Marcel {
         let pane_view = cx.entity();
         let entry_menu = self.render_entry_menu(window, cx);
         let bookmark_menu = self.render_bookmark_menu(window, cx);
+        let picker_bar = self.render_picker_bar(cx);
         // gpui-component's Root stores dialog and notification state but
         // does not attach those layers in Root::render. Mount its public layer
         // renderers here so WindowExt dialogs/notifications are actually
@@ -6595,6 +7103,7 @@ impl Render for Marcel {
                     ),
                 ),
             )
+            .when_some(picker_bar, |this, bar| this.child(bar))
             .when_some(entry_menu, |this, menu| this.child(menu))
             .when_some(bookmark_menu, |this, menu| this.child(menu))
             .when_some(dialog_layer, |this, layer| this.child(layer))

@@ -62,7 +62,15 @@ pub struct DirectorySession {
     entries_revision: u64,
     projection_revision: u64,
     entry_index: RefCell<EntryIndex>,
+    /// A picker's file filter: which files stay visible alongside the folders.
+    ///
+    /// Applied under the hidden-file rule and before the fuzzy filter, so
+    /// type-to-filter searches only what the filter admits.
+    content_filter: Option<ContentFilter>,
 }
+
+/// Decides whether an entry belongs in the visible listing at all.
+pub type ContentFilter = Arc<dyn Fn(&FileEntry) -> bool>;
 
 impl DirectorySession {
     pub fn new(current_dir: PathBuf) -> Self {
@@ -87,7 +95,25 @@ impl DirectorySession {
             entries_revision: 1,
             projection_revision: 1,
             entry_index: RefCell::new(EntryIndex::default()),
+            content_filter: None,
         }
+    }
+
+    /// Replace the content filter and re-project the listing under it.
+    pub fn set_content_filter(&mut self, filter: Option<ContentFilter>) -> ReconcileSelection {
+        self.content_filter = filter;
+        self.rebuild_visible_entries();
+        self.reconcile_selection()
+    }
+
+    /// Whether the hidden-file rule and the content filter admit `entry`.
+    fn admits(&self, entry: &FileEntry) -> bool {
+        !crate::file_ops::is_internal_working_name(&entry.name_os)
+            && (self.show_hidden || !is_hidden_os_name(&entry.name_os))
+            && self
+                .content_filter
+                .as_ref()
+                .is_none_or(|filter| filter(entry))
     }
 
     /// Note paths whose state changed while the load streams, so the finished
@@ -337,11 +363,7 @@ impl DirectorySession {
                 .entries
                 .iter()
                 .enumerate()
-                .filter_map(|(index, entry)| {
-                    (!crate::file_ops::is_internal_working_name(&entry.name_os)
-                        && (self.show_hidden || !is_hidden_os_name(&entry.name_os)))
-                    .then_some(index)
-                })
+                .filter_map(|(index, entry)| self.admits(entry).then_some(index))
                 .collect();
             return;
         }
@@ -352,9 +374,7 @@ impl DirectorySession {
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                if crate::file_ops::is_internal_working_name(&entry.name_os)
-                    || (!self.show_hidden && is_hidden_os_name(&entry.name_os))
-                {
+                if !self.admits(entry) {
                     return None;
                 }
                 fuzzy_score_folded(&entry.folded_name, &folded_query).map(|score| (index, score))
@@ -653,6 +673,44 @@ mod tests {
             session.selection.primary().map(PathBuf::as_path),
             Some(Path::new("/folder/beta.txt")),
         );
+    }
+
+    /// A picker's filter narrows what type-to-filter searches, keeps folders
+    /// navigable, and drops a selection it no longer shows.
+    #[test]
+    fn a_content_filter_projects_under_the_fuzzy_filter_and_reconciles() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.entries = vec![
+            entry("assets", true, None),
+            entry("photo.png", false, Some(1)),
+            entry("photo.txt", false, Some(1)),
+        ];
+        session.rebuild_visible_entries();
+        session
+            .selection
+            .select_only(PathBuf::from("/folder/photo.txt"));
+
+        let result = session.set_content_filter(Some(Arc::new(|entry: &FileEntry| {
+            entry.navigable || entry.name.ends_with(".png")
+        })));
+        assert!(matches!(result, ReconcileSelection::ClearPreview));
+        assert_eq!(
+            session
+                .visible_paths()
+                .iter()
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["assets", "photo.png"]
+        );
+
+        session.set_filter_query("photo".to_string());
+        assert_eq!(
+            session.visible_paths(),
+            vec![PathBuf::from("/folder/photo.png")]
+        );
+
+        session.set_content_filter(None);
+        assert_eq!(session.visible_paths().len(), 2);
     }
 
     #[test]

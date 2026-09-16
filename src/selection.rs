@@ -9,6 +9,13 @@ pub struct SelectionModel {
     anchor: Option<PathBuf>,
     primary: Option<PathBuf>,
     revision: u64,
+    /// At most one item may be selected.
+    ///
+    /// A picker that asked for one file must not show three highlighted rows
+    /// and then hand back one of them. Every mutator ends by collapsing the
+    /// selection to its primary, so the model stays correct whichever gesture
+    /// — click, range, marquee, select-all, reveal — tried to grow it.
+    single: bool,
 }
 
 impl SelectionModel {
@@ -20,6 +27,29 @@ impl SelectionModel {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Restrict the model to one selected item from now on.
+    pub fn set_single(&mut self, single: bool) {
+        self.single = single;
+        self.collapse_if_single();
+    }
+
+    fn collapse_if_single(&mut self) {
+        if !self.single || self.selected.len() <= 1 {
+            return;
+        }
+        let keep = self
+            .primary
+            .clone()
+            .filter(|primary| self.selected.contains(primary))
+            .or_else(|| self.selected.iter().next().cloned());
+        self.selected.clear();
+        if let Some(keep) = keep {
+            self.selected.insert(keep.clone());
+            self.anchor = Some(keep.clone());
+            self.primary = Some(keep);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -67,6 +97,7 @@ impl SelectionModel {
             self.primary = Some(path.clone());
         }
         self.anchor = self.primary.clone().or(Some(path));
+        self.collapse_if_single();
     }
 
     pub fn select_range(&mut self, path: PathBuf, ordered: &[PathBuf], additive: bool) {
@@ -92,6 +123,7 @@ impl SelectionModel {
         };
         self.selected.extend(ordered[start..=end].iter().cloned());
         self.primary = Some(path);
+        self.collapse_if_single();
     }
 
     pub fn select_all(&mut self, ordered: &[PathBuf]) {
@@ -110,6 +142,7 @@ impl SelectionModel {
         self.selected = ordered.iter().cloned().collect();
         self.anchor = Some(primary.clone());
         self.primary = Some(primary);
+        self.collapse_if_single();
     }
 
     pub fn retain(&mut self, ordered: &[PathBuf], mut predicate: impl FnMut(&Path) -> bool) {
@@ -131,6 +164,7 @@ impl SelectionModel {
             self.anchor.get_or_insert_with(|| path.clone());
             self.selected.insert(path);
         }
+        self.collapse_if_single();
     }
 
     pub fn ensure_primary(&mut self, ordered: &[PathBuf]) {
@@ -152,6 +186,14 @@ impl SelectionModel {
     ) {
         self.touch();
         self.selected.clear();
+        if self.single {
+            // One row at most, so the first row the marquee touched — the
+            // topmost, in visible order — is the whole selection.
+            self.primary = intersecting.into_iter().next();
+            self.anchor = self.primary.clone();
+            self.selected.extend(self.primary.clone());
+            return;
+        }
         if additive {
             self.selected.extend(base.iter().cloned());
         }
@@ -314,5 +356,32 @@ mod tests {
 
         assert_eq!(selection.primary(), Some(&path("c")));
         assert_eq!(selection.selected(), &HashSet::from([path("a"), path("c")]));
+    }
+
+    /// A single-file picker never shows more than one highlighted row, whatever
+    /// gesture tried to grow the selection.
+    #[test]
+    fn single_mode_collapses_every_growing_gesture_to_the_primary() {
+        let ordered = vec![path("a"), path("b"), path("c")];
+        let mut selection = SelectionModel::default();
+        selection.select_only(path("a"));
+        selection.toggle(path("c"), &ordered);
+        assert_eq!(selection.selected().len(), 2);
+
+        selection.set_single(true);
+        assert_eq!(selection.selected(), &HashSet::from([path("c")]));
+        assert_eq!(selection.primary(), Some(&path("c")));
+
+        selection.select_range(path("a"), &ordered, false);
+        assert_eq!(selection.selected(), &HashSet::from([path("a")]));
+        selection.toggle(path("b"), &ordered);
+        assert_eq!(selection.selected(), &HashSet::from([path("b")]));
+        selection.select_all(&ordered);
+        assert_eq!(selection.selected(), &HashSet::from([path("b")]));
+        selection.add_all([path("a"), path("c")]);
+        assert_eq!(selection.selected(), &HashSet::from([path("b")]));
+        selection.replace_from_marquee(&HashSet::new(), [path("c"), path("a")], true);
+        assert_eq!(selection.selected(), &HashSet::from([path("c")]));
+        assert_eq!(selection.primary(), Some(&path("c")));
     }
 }

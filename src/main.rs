@@ -1,6 +1,10 @@
 use gpui::App;
 use marcel::window;
 
+/// How long a quitting Marcel waits for file-chooser answers to reach the bus.
+/// Under GPUI's 200 ms shutdown budget, and well past what one reply needs.
+const REPLY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(150);
+
 fn main() {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -46,6 +50,8 @@ fn main() {
 
         if let Some(runtime) = desktop_runtime {
             let requests = runtime.requests();
+            let pickers = runtime.pickers();
+            let replies = runtime.replies();
             let fallback_path = start_path.clone();
             cx.spawn(async move |cx| {
                 let _runtime = runtime;
@@ -53,6 +59,37 @@ fn main() {
                     cx.update(|cx| handle_desktop_request(request, &fallback_path, cx));
                 }
                 Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+            // A file chooser is a window of its own kind: it neither reuses
+            // nor counts as a browsing window, and its answer goes back over
+            // the bus rather than to the user.
+            cx.spawn(async move |cx| {
+                while let Ok(request) = pickers.recv().await {
+                    cx.update(|cx| {
+                        if let Err(error) = window::open_picker(request, cx) {
+                            eprintln!("Marcel could not open a file chooser: {error}");
+                        }
+                        cx.activate(true);
+                    });
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+            // A picker was the last window, the user closed it, and the
+            // answer is still being written to the bus from another thread.
+            // Leaving now would make the asking application see its dialog
+            // backend disappear. GPUI gives a quit hook 200 ms; a reply
+            // takes far less than that to leave.
+            cx.on_app_quit(move |cx| {
+                let replies = replies.clone();
+                let executor = cx.background_executor().clone();
+                async move {
+                    let deadline = std::time::Instant::now() + REPLY_DRAIN_LIMIT;
+                    while replies.pending() > 0 && std::time::Instant::now() < deadline {
+                        executor.timer(std::time::Duration::from_millis(5)).await;
+                    }
+                }
             })
             .detach();
         }

@@ -37,17 +37,13 @@ symlinkJoin {
     wrapProgram "$out/bin/marcel-rs" ${lib.escapeShellArgs wrapperArgs}
 
     # D-Bus activation must launch this wrapper, not the binary underneath,
-    # or a Marcel started by "show in folder" runs without these settings.
-    # The generic file exists only when wrapping the file-manager1 variant.
-    for name in io.github.berker_z.Marcel org.freedesktop.FileManager1; do
-      service="$out/share/dbus-1/services/$name.service"
-      if [[ -e "$service" ]]; then
-        cp --remove-destination \
-          "${marcel}/share/dbus-1/services/$name.service" \
-          "$service"
-        substituteInPlace "$service" \
-          --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
-      fi
+    # or a Marcel started by "show in folder" or by a file dialog runs
+    # without these settings. Which service files exist depends on the
+    # variants wrapped below, so re-point whatever is there.
+    for service in "$out/share/dbus-1/services/"*.service; do
+      cp --remove-destination "$(readlink -f "$service")" "$service"
+      substituteInPlace "$service" \
+        --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
     done
   '';
 

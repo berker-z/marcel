@@ -60,6 +60,9 @@
           marcelFileManager1Service = pkgs.callPackage ./nix/file-manager1-service.nix {
             inherit marcel;
           };
+          marcelFileChooserPortal = pkgs.callPackage ./nix/file-chooser-portal.nix {
+            inherit marcel;
+          };
         in
         {
           # `marcel-rs`, not `marcel`: nixpkgs already has an unrelated
@@ -68,6 +71,7 @@
           marcel-rs = marcel;
           marcel-deps = marcel.cargoArtifacts;
           file-manager1-service = marcelFileManager1Service;
+          file-chooser-portal = marcelFileChooserPortal;
           default = marcel;
         }
       );
@@ -96,6 +100,9 @@
           # overlay should add a package, not quietly replace someone else's.
           marcel-rs = marcel;
           marcelFileManager1Service = final.callPackage ./nix/file-manager1-service.nix {
+            inherit marcel;
+          };
+          marcelFileChooserPortal = final.callPackage ./nix/file-chooser-portal.nix {
             inherit marcel;
           };
         };

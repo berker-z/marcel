@@ -15,14 +15,19 @@ let
   system = pkgs.stdenv.hostPlatform.system;
   isHome = integration == "home-manager";
 
-  # Layer the wrappers: the generic-name claim goes under the settings
-  # wrapper, so the binary the module installs, activates over D-Bus, and
-  # names in the override below is the same fully configured one.
-  basePackage =
+  # Layer the wrappers: the name claims go under the settings wrapper, so
+  # the binary the module installs, activates over D-Bus, and names in the
+  # override below is the same fully configured one.
+  fileManager1Package =
     if cfg.fileManager1 then
       pkgs.callPackage ./file-manager1-service.nix { marcel = cfg.package; }
     else
       cfg.package;
+  basePackage =
+    if cfg.fileChooserPortal then
+      pkgs.callPackage ./file-chooser-portal.nix { marcel = fileManager1Package; }
+    else
+      fileManager1Package;
   configuredPackage = pkgs.callPackage ./configured-package.nix {
     marcel = basePackage;
     inherit (cfg) settings;
@@ -69,6 +74,20 @@ in
         variant; with a second file manager on the system, which one D-Bus
         starts is then decided by profile order, so prefer the Home Manager
         module when that matters.
+      '';
+    };
+
+    fileChooserPortal = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Have Marcel answer `org.freedesktop.impl.portal.FileChooser`, so
+        the open-file and save-file dialogs of every application that goes
+        through xdg-desktop-portal are Marcel windows. This adds the
+        portal variant to `xdg.portal.extraPortals` and names it in
+        `xdg.portal.config` for the FileChooser interface; `xdg.portal.enable`
+        still has to be on. Firefox and Zen use the portal picker only when
+        `widget.use-xdg-desktop-portal.file-picker` is `1`.
       '';
     };
 
@@ -138,6 +157,15 @@ in
 
       (lib.mkIf (cfg.fileManager1 && isHome) {
         xdg.dataFile."dbus-1/services/org.freedesktop.FileManager1.service".text = fileManager1Service;
+      })
+
+      # Both module systems spell these options the same way. The frontend
+      # takes the first configured name whose `.portal` file it can find, so
+      # naming Marcel alone is enough; a second entry would only be consulted
+      # if Marcel's portal file were missing, not if Marcel failed.
+      (lib.mkIf cfg.fileChooserPortal {
+        xdg.portal.extraPortals = [ configuredPackage ];
+        xdg.portal.config.common."org.freedesktop.impl.portal.FileChooser" = [ "marcel" ];
       })
     ]
   );

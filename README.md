@@ -108,6 +108,7 @@ Home Manager module:
     enable = true;
     defaultDirectoryHandler = true;
     fileManager1 = true;
+    fileChooserPortal = true;
     settings.theme = "nord";
   };
 }
@@ -118,8 +119,8 @@ nixpkgs, and the binary cache holds builds against that pin; following your
 nixpkgs produces a different derivation that has to be compiled locally.
 
 `enable` alone installs Marcel and changes nothing else about the desktop.
-The two flags are the integration you actually want from a file manager, and
-each is off by default because it takes something over:
+The three flags are the integration you actually want from a file manager,
+and each is off by default because it takes something over:
 
 - `defaultDirectoryHandler` makes Marcel the `inode/directory` handler, so
   `xdg-open` on a folder opens Marcel.
@@ -130,6 +131,15 @@ each is off by default because it takes something over:
   `~/.local/share/dbus-1/services`. D-Bus reads that directory before any
   installed package's, so Marcel wins even with Nautilus or Dolphin
   installed; both ship a file claiming the same name.
+- `fileChooserPortal` makes Marcel the open-file and save-file dialog of
+  every application that asks xdg-desktop-portal for one, which on Wayland is
+  most of them. It adds the portal variant to `xdg.portal.extraPortals` and
+  names `marcel` for the FileChooser interface in `xdg.portal.config`;
+  `xdg.portal.enable` is still yours to set. The dialog is an ordinary Marcel
+  window with a bar at the bottom, so the preview pane, bookmarks, and
+  type-to-filter all work while picking. Firefox and Zen only use the portal
+  picker when `widget.use-xdg-desktop-portal.file-picker` is `1`. Details in
+  [`docs/file-chooser-portal.md`](docs/file-chooser-portal.md).
 
 There is a NixOS module with the same options
 (`inputs.marcel.nixosModules.default`; packages land in
@@ -140,9 +150,12 @@ when that matters.
 
 The command is `marcel-rs`, not `marcel`. nixpkgs already has a `marcel`, an unrelated Python shell, and two packages installing the same `bin/marcel` collide in a profile. Only the command carries the suffix: the application is still Marcel everywhere you see it, including its icon, its desktop entry, its D-Bus name, and its config directory at `~/.config/marcel`.
 
-Without the module, `overlays.default` provides `pkgs.marcel-rs`, and
+Without the module, `overlays.default` provides `pkgs.marcel-rs`,
 `packages.<system>.file-manager1-service` is the variant that claims the
-D-Bus name. Installing either changes no MIME associations; the details are in
+`FileManager1` name, and `packages.<system>.file-chooser-portal` is the one
+that answers file dialogs (it goes in `xdg.portal.extraPortals`, with
+`xdg.portal.config.common."org.freedesktop.impl.portal.FileChooser" = ["marcel"]`).
+Installing any of them changes no MIME associations; the details are in
 [`docs/release.md`](docs/release.md).
 
 ## Declarative settings

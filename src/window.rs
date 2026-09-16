@@ -18,7 +18,10 @@ use gpui::{
 };
 use gpui_component::Root;
 
-use crate::Marcel;
+use crate::{
+    Marcel,
+    picker::{PickerMode, PickerRequest, PickerResponse},
+};
 
 /// The size a Marcel window opens at when nothing else decides for it.
 const DEFAULT_WINDOW_SIZE: (f32, f32) = (1200.0, 760.0);
@@ -56,6 +59,18 @@ const WINDOW_CASCADE_LENGTH: usize = 8;
 /// uses, well before a window flood freezes the session.
 pub const MAX_LIVE_WINDOWS: usize = 32;
 
+/// The most file-chooser windows open at once.
+///
+/// The portal frontend serialises requests per application, so one open
+/// dialog per application is the ordinary case and this is far past it. A
+/// request over the cap is answered with an error rather than queued behind
+/// dialogs the user has not noticed yet.
+pub const MAX_LIVE_PICKERS: usize = 8;
+
+/// The size a picker opens at: enough for the three panes without taking the
+/// whole screen the way a browsing window may.
+const PICKER_WINDOW_SIZE: (f32, f32) = (1080.0, 700.0);
+
 #[derive(Clone)]
 pub struct MarcelWindow {
     pub handle: WindowHandle<Root>,
@@ -66,6 +81,10 @@ pub struct MarcelWindow {
 #[derive(Default)]
 pub struct WindowRegistry {
     windows: Vec<MarcelWindow>,
+    /// File-chooser windows, kept apart: a reveal must never navigate a
+    /// dialog somebody is in the middle of answering, and a dialog is not
+    /// "the Marcel I have" for an `Activate`.
+    pickers: Vec<MarcelWindow>,
     opened: usize,
 }
 
@@ -139,6 +158,85 @@ pub fn open(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
     Ok(opened)
 }
 
+/// Open a window that answers `request`, and register it.
+///
+/// The answer travels back through the request itself, so this returns
+/// nothing. A refused request is answered before this returns, as
+/// [`PickerResponse::Closed`]: the caller sees an error, not a hang.
+pub fn open_picker(request: PickerRequest, cx: &mut App) -> anyhow::Result<()> {
+    let registry = global(cx);
+    let allowed = registry.update(cx, |registry, cx| {
+        registry.prune(cx);
+        registry.pickers.len() < MAX_LIVE_PICKERS
+    });
+    if !allowed {
+        let _ = request.reply.try_send(PickerResponse::Closed);
+        anyhow::bail!("Marcel already has {MAX_LIVE_PICKERS} file choosers open; not opening more");
+    }
+
+    let title = picker_title(&request);
+    let closed = request.closed.clone();
+    let (width, height) = PICKER_WINDOW_SIZE;
+    let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+
+    let mut view = None;
+    let handle = cx.open_window(
+        WindowOptions {
+            app_id: Some(crate::desktop_integration::APPLICATION_ID.to_string()),
+            icon: window_icon(),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.clone().into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        |window, cx| {
+            window.set_window_title(&title);
+            let marcel = cx.new(|cx| Marcel::new_picker(request, window, cx));
+            marcel.update(cx, |view, cx| view.focus_picker(window, cx));
+            view = Some(marcel.clone());
+            cx.new(|cx| Root::new(marcel, window, cx))
+        },
+    )?;
+    let opened = MarcelWindow {
+        handle,
+        view: view.expect("window builder must initialize Marcel"),
+    };
+    registry.update(cx, |registry, _| registry.pickers.push(opened.clone()));
+
+    // The frontend withdraws a request whose caller went away. The window
+    // answers `Closed` and leaves; a request that was already answered has
+    // dropped its end of this channel, and then there is nothing to do.
+    cx.spawn(async move |cx| {
+        if closed.recv().await.is_err() {
+            return;
+        }
+        let _ = opened.handle.update(cx, |_, window, cx| {
+            opened
+                .view
+                .update(cx, |view, cx| view.withdraw_picker(window, cx));
+        });
+    })
+    .detach();
+    Ok(())
+}
+
+/// The window title: what the caller asked for, or what the dialog is for.
+fn picker_title(request: &PickerRequest) -> String {
+    let title = request.title.trim();
+    if !title.is_empty() {
+        return title.to_string();
+    }
+    match request.mode {
+        PickerMode::OpenFiles => "Open File",
+        PickerMode::OpenDirectories | PickerMode::SaveFiles { .. } => "Select Folder",
+        PickerMode::SaveFile => "Save File",
+    }
+    .to_string()
+}
+
 /// Whether a desktop request may take over a window the user is already using.
 ///
 /// A launch may not. Somebody ran `marcel`, or picked Marcel to open a folder;
@@ -163,6 +261,7 @@ impl WindowRegistry {
     /// Forget windows the user has closed.
     pub fn prune(&mut self, cx: &App) {
         self.windows.retain(|window| window.handle.read(cx).is_ok());
+        self.pickers.retain(|window| window.handle.read(cx).is_ok());
     }
 
     /// The window a request should speak to when it does not name one.
@@ -228,6 +327,48 @@ mod tests {
         assert!(may_reuse_a_window(&DesktopRequest::ShowFolders(vec![
             PathBuf::from("/folder")
         ])));
+    }
+
+    /// A caller's title wins; without one the dialog says what it is for.
+    #[test]
+    fn a_picker_is_titled_by_its_caller_or_its_purpose() {
+        let request = |title: &str, mode: PickerMode| {
+            let (reply, _responses) = async_channel::bounded(1);
+            let (_close, closed) = async_channel::bounded(1);
+            PickerRequest {
+                title: title.to_string(),
+                mode,
+                multiple: false,
+                accept_label: None,
+                start_directory: None,
+                current_name: None,
+                filters: Vec::new(),
+                current_filter: None,
+                reply,
+                closed,
+            }
+        };
+
+        assert_eq!(
+            picker_title(&request("Choose a cover", PickerMode::OpenFiles)),
+            "Choose a cover"
+        );
+        assert_eq!(
+            picker_title(&request("  ", PickerMode::OpenFiles)),
+            "Open File"
+        );
+        assert_eq!(
+            picker_title(&request("", PickerMode::OpenDirectories)),
+            "Select Folder"
+        );
+        assert_eq!(
+            picker_title(&request("", PickerMode::SaveFile)),
+            "Save File"
+        );
+        assert_eq!(
+            picker_title(&request("", PickerMode::SaveFiles { names: Vec::new() })),
+            "Select Folder"
+        );
     }
 
     /// Every window at the same offset looks like one window. The cascade

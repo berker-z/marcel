@@ -8,6 +8,11 @@ use async_channel::{Receiver, Sender, TrySendError};
 use url::Url;
 use zbus::{self, zvariant::OwnedValue};
 
+use crate::{
+    file_chooser::{self, ReplyTracker},
+    picker::PickerRequest,
+};
+
 pub const APPLICATION_ID: &str = "io.github.berker_z.Marcel";
 pub const APPLICATION_OBJECT_PATH: &str = "/io/github/berker_z/Marcel";
 pub const FILE_MANAGER_BUS_NAME: &str = "org.freedesktop.FileManager1";
@@ -50,11 +55,42 @@ pub enum InstanceStartup {
 pub struct DesktopRuntime {
     _connection: zbus::Connection,
     requests: Receiver<DesktopRequest>,
+    pickers: Receiver<PickerRequest>,
+    replies: ReplyTracker,
 }
 
 impl DesktopRuntime {
     pub fn requests(&self) -> Receiver<DesktopRequest> {
         self.requests.clone()
+    }
+
+    /// File-chooser requests from the portal frontend. Empty for the life of
+    /// the process unless this instance was asked to be the portal backend.
+    pub fn pickers(&self) -> Receiver<PickerRequest> {
+        self.pickers.clone()
+    }
+
+    /// File-chooser answers still on their way to the bus; see [`ReplyTracker`].
+    pub fn replies(&self) -> ReplyTracker {
+        self.replies.clone()
+    }
+}
+
+/// The optional session-bus roles an instance may take on top of its own name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BusRoles {
+    /// Answer `org.freedesktop.FileManager1` ("show in folder").
+    pub file_manager: bool,
+    /// Answer `org.freedesktop.impl.portal.FileChooser` (open and save dialogs).
+    pub file_chooser: bool,
+}
+
+impl BusRoles {
+    pub fn from_environment() -> Self {
+        Self {
+            file_manager: std::env::var_os(CLAIM_FILE_MANAGER_ENV).is_some(),
+            file_chooser: std::env::var_os(file_chooser::CLAIM_FILE_CHOOSER_ENV).is_some(),
+        }
     }
 }
 
@@ -86,18 +122,16 @@ impl fmt::Display for DesktopRequestError {
 impl std::error::Error for DesktopRequestError {}
 
 pub async fn acquire_or_forward(initial_uris: Option<Vec<String>>) -> InstanceStartup {
-    acquire_or_forward_with_generic_name(
-        initial_uris,
-        std::env::var_os(CLAIM_FILE_MANAGER_ENV).is_some(),
-    )
-    .await
+    acquire_or_forward_with_roles(initial_uris, BusRoles::from_environment()).await
 }
 
-async fn acquire_or_forward_with_generic_name(
+async fn acquire_or_forward_with_roles(
     initial_uris: Option<Vec<String>>,
-    claim_file_manager_name: bool,
+    roles: BusRoles,
 ) -> InstanceStartup {
     let (sender, receiver) = async_channel::bounded(REQUEST_QUEUE_CAPACITY);
+    let (picker_sender, picker_receiver) = file_chooser::request_channel();
+    let replies = ReplyTracker::default();
     let builder = match zbus::connection::Builder::session() {
         Ok(builder) => builder,
         Err(error) => return InstanceStartup::Unavailable(error.to_string()),
@@ -131,12 +165,26 @@ async fn acquire_or_forward_with_generic_name(
             // `NameTaken`, which reads as "another Marcel is running" and
             // forwards the launch to an application name nobody owns,
             // re-activating another Marcel that fails the same way.
-            if claim_file_manager_name {
+            if roles.file_manager {
                 claim_generic_file_manager_name(&connection).await;
+            }
+            // Same rule for the portal backend name: an extra, not a
+            // condition. A failure here leaves a Marcel that browses files
+            // and cannot show pickers, which beats no Marcel at all.
+            if roles.file_chooser
+                && let Err(error) =
+                    file_chooser::serve(&connection, picker_sender, replies.clone()).await
+            {
+                eprintln!(
+                    "could not serve {}: {error}",
+                    file_chooser::FILE_CHOOSER_BUS_NAME
+                );
             }
             InstanceStartup::Primary(DesktopRuntime {
                 _connection: connection,
                 requests: receiver,
+                pickers: picker_receiver,
+                replies,
             })
         }
         Err(zbus::Error::NameTaken) => match forward_to_primary(initial_uris).await {
@@ -417,6 +465,14 @@ mod tests {
 
     const PRIVATE_BUS_CHILD: &str = "MARCEL_PRIVATE_BUS_TEST_CHILD";
     const PRIVATE_BUS_CONFIG: &str = "MARCEL_TEST_DBUS_SESSION_CONFIG";
+    const FILE_MANAGER_ROLE: BusRoles = BusRoles {
+        file_manager: true,
+        file_chooser: false,
+    };
+    const FILE_CHOOSER_ROLE: BusRoles = BusRoles {
+        file_manager: false,
+        file_chooser: true,
+    };
 
     fn uri(path: &Path) -> String {
         Url::from_file_path(path).unwrap().into()
@@ -645,7 +701,7 @@ mod tests {
             let mut last_error = None;
             let mut replacement = None;
             for _ in 0..80 {
-                match acquire_or_forward_with_generic_name(None, true).await {
+                match acquire_or_forward_with_roles(None, FILE_MANAGER_ROLE).await {
                     InstanceStartup::Primary(runtime) => {
                         replacement = Some(runtime);
                         break;
@@ -685,7 +741,7 @@ mod tests {
                 .expect("foreign file manager must own the generic name");
             let mut standalone = None;
             for _ in 0..80 {
-                match acquire_or_forward_with_generic_name(None, true).await {
+                match acquire_or_forward_with_roles(None, FILE_MANAGER_ROLE).await {
                     InstanceStartup::Primary(runtime) => {
                         standalone = Some(runtime);
                         break;
@@ -710,6 +766,137 @@ mod tests {
                     .as_str(),
                 "Marcel must not have displaced the owner of the generic name"
             );
+
+            // The portal backend role: the frontend's method call blocks
+            // until a window answers, and its `Close` withdraws the request.
+            drop(standalone);
+            let mut backend = None;
+            for _ in 0..80 {
+                match acquire_or_forward_with_roles(None, FILE_CHOOSER_ROLE).await {
+                    InstanceStartup::Primary(runtime) => {
+                        backend = Some(runtime);
+                        break;
+                    }
+                    InstanceStartup::Forwarded | InstanceStartup::Unavailable(_) => {}
+                }
+                smol::Timer::after(Duration::from_millis(25)).await;
+            }
+            let backend = backend.expect("the portal backend variant must start as primary");
+            let pickers = backend.pickers();
+            assert!(
+                bus.list_names()
+                    .await
+                    .expect("bus names must remain readable")
+                    .iter()
+                    .any(|name| name.as_str() == file_chooser::FILE_CHOOSER_BUS_NAME),
+                "the opt-in primary must own the portal backend name"
+            );
+            let chooser = zbus::Proxy::new(
+                &client,
+                file_chooser::FILE_CHOOSER_BUS_NAME,
+                file_chooser::PORTAL_OBJECT_PATH,
+                "org.freedesktop.impl.portal.FileChooser",
+            )
+            .await
+            .expect("file-chooser proxy must initialize");
+            let version: u32 = chooser
+                .get_property("version")
+                .await
+                .expect("the backend must advertise its interface version");
+            assert_eq!(version, 4);
+
+            type ChooserReply = (u32, HashMap<String, OwnedValue>);
+            let call_open_file = |handle: &str| {
+                let chooser = chooser.clone();
+                let handle =
+                    zbus::zvariant::OwnedObjectPath::try_from(handle).expect("valid handle path");
+                smol::spawn(async move {
+                    chooser
+                        .call::<_, _, ChooserReply>(
+                            "OpenFile",
+                            &(
+                                handle,
+                                "org.example.App",
+                                "",
+                                "Pick something",
+                                HashMap::<String, OwnedValue>::new(),
+                            ),
+                        )
+                        .await
+                })
+            };
+
+            // Answered by a window.
+            let call = call_open_file("/org/freedesktop/portal/desktop/request/test/1");
+            let request = receive_picker(&pickers).await;
+            assert_eq!(backend.replies().pending(), 1);
+            assert_eq!(request.title, "Pick something");
+            assert_eq!(request.mode, crate::picker::PickerMode::OpenFiles);
+            request
+                .reply
+                .send(crate::picker::PickerResponse::Chosen {
+                    paths: vec![file.clone()],
+                    filter: None,
+                })
+                .await
+                .expect("the backend must still be waiting for the answer");
+            let (code, results) = call.await.expect("OpenFile must succeed");
+            assert_eq!(code, file_chooser::RESPONSE_SUCCESS);
+            assert_eq!(
+                Vec::<String>::try_from(results["uris"].clone()).unwrap(),
+                vec![uri(&file)]
+            );
+            // The reply has reached the client, so the backend must stop
+            // counting it; the quit hook waits on exactly this.
+            for _ in 0..200 {
+                if backend.replies().pending() == 0 {
+                    break;
+                }
+                smol::Timer::after(Duration::from_millis(5)).await;
+            }
+            assert_eq!(backend.replies().pending(), 0);
+
+            // Withdrawn by the frontend before the window answered. The
+            // Request object exists for exactly as long as the call.
+            let handle = "/org/freedesktop/portal/desktop/request/test/2";
+            let call = call_open_file(handle);
+            let request = receive_picker(&pickers).await;
+            let request_object = zbus::Proxy::new(
+                &client,
+                file_chooser::FILE_CHOOSER_BUS_NAME,
+                handle,
+                "org.freedesktop.impl.portal.Request",
+            )
+            .await
+            .expect("request proxy must initialize");
+            request_object
+                .call::<_, _, ()>("Close", &())
+                .await
+                .expect("Close must reach the request object while the call is pending");
+            request
+                .closed
+                .recv()
+                .await
+                .expect("the window must be told the request was withdrawn");
+            request
+                .reply
+                .send(crate::picker::PickerResponse::Closed)
+                .await
+                .expect("the backend must still be waiting");
+            let (code, _) = call.await.expect("a withdrawn OpenFile still replies");
+            assert_eq!(code, file_chooser::RESPONSE_OTHER);
+            assert!(
+                request_object.call::<_, _, ()>("Close", &()).await.is_err(),
+                "the request object must be gone once the call has replied"
+            );
+
+            // A request nobody ever showed — the window failed to open — is
+            // reported as an error, not as the user cancelling.
+            let call = call_open_file("/org/freedesktop/portal/desktop/request/test/3");
+            let request = receive_picker(&pickers).await;
+            drop(request);
+            let (code, _) = call.await.expect("a dropped request still replies");
+            assert_eq!(code, file_chooser::RESPONSE_OTHER);
         });
     }
 
@@ -724,6 +911,17 @@ mod tests {
             async {
                 smol::Timer::after(Duration::from_secs(3)).await;
                 panic!("timed out waiting for a desktop request")
+            },
+        )
+        .await
+    }
+
+    async fn receive_picker(pickers: &Receiver<PickerRequest>) -> PickerRequest {
+        smol::future::race(
+            async { pickers.recv().await.expect("picker channel must stay open") },
+            async {
+                smol::Timer::after(Duration::from_secs(3)).await;
+                panic!("timed out waiting for a picker request")
             },
         )
         .await

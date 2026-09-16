@@ -300,8 +300,11 @@ The packaging contract, current dependency caveats, target formats, and
   submission policy. The current policy treats broad-scope file managers as
   exceptional and disallows AI-assisted application content and AI-generated
   submission work, so a compliant Flathub submission is currently blocked.
-- Treat becoming an `xdg-desktop-portal` file-picker backend as a separate
-  project, not part of becoming the default file explorer.
+- [x] Answer `org.freedesktop.impl.portal.FileChooser`, so open and save
+  dialogs are Marcel windows. Sprint 23; `programs.marcel.fileChooserPortal`
+  and `packages.<system>.file-chooser-portal`. Still open from that sprint:
+  the `choices` option is ignored and `parent_window` is not honoured (GPUI
+  has no xdg_foreign), so the dialog is a normal top-level window.
 
 ## File-management fundamentals
 

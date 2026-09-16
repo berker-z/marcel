@@ -9,6 +9,8 @@ pub mod desktop_integration;
 pub mod directory_session;
 mod directory_watcher;
 mod drag_controller;
+#[cfg(target_os = "linux")]
+pub mod file_chooser;
 pub mod file_ops;
 pub mod fs;
 mod history;
@@ -19,6 +21,8 @@ pub mod launch;
 mod local_fs;
 pub mod operations;
 mod pdf_preview;
+pub mod picker;
+mod picker_state;
 mod places;
 pub mod preview;
 mod preview_controller;

@@ -1,38 +1,36 @@
 # Being the file picker
 
-Marcel handles "show in folder" and `xdg-open` on a directory. It does not
-handle the open-file dialog or the save dialog, and those two are the same
-thing: both come from the `FileChooser` interface of xdg-desktop-portal.
-Right now the GTK portal backend answers them, which is why a GNOME-looking
-dialog pops up in the middle of a Hyprland session. This note is what it
-would take for Marcel to answer them instead.
+Marcel handles "show in folder" and `xdg-open` on a directory, and it now
+handles the open-file and save-file dialogs too. Those two are the same thing:
+both come from the `FileChooser` interface of xdg-desktop-portal. Before this,
+the GTK portal backend answered them, which is why a GNOME-looking dialog used
+to pop up in the middle of a Hyprland session. This note is how Marcel answers
+them instead: the wire protocol, where the code lives, how it is packaged, and
+what to check when a dialog does not appear.
 
 ## How the picker is chosen
 
 Applications do not open a file dialog themselves any more. They call
 `org.freedesktop.portal.FileChooser` on the session bus. The portal frontend
-(`xdg-desktop-portal`) reads `portals.conf`, finds which backend is
-configured for `org.freedesktop.impl.portal.FileChooser`, and forwards the
-call to it. The backend puts up a window, the user picks something, and the
-URIs travel back the same way.
+(`xdg-desktop-portal`) reads `portals.conf`, finds which backend is configured
+for `org.freedesktop.impl.portal.FileChooser`, and forwards the call to it. The
+backend puts up a window, the user picks something, and the URIs travel back
+the same way.
 
-A backend is just another D-Bus service that owns
-`org.freedesktop.impl.portal.desktop.<name>` and ships a
-`<name>.portal` file under `share/xdg-desktop-portal/portals/` listing the
-interfaces it implements. That is the whole registration. On this machine
-the configured backends are `hyprland` (screencast, global shortcuts) and
-`gtk` (everything else, including FileChooser), and nothing names a
-FileChooser backend explicitly, so the frontend falls through to GTK.
+A backend is a D-Bus service that owns `org.freedesktop.impl.portal.desktop.<name>`
+and ships a `<name>.portal` file under `share/xdg-desktop-portal/portals/`
+listing the interfaces it implements. That is the whole registration. The
+frontend loads every `.portal` file it can find, then walks the names in
+`portals.conf` and takes the first one whose file it loaded. It does not check
+whether that name is on the bus; that is D-Bus activation's job later. So
+naming `marcel` is enough once the portal file is installed, and a second entry
+after it would only ever be consulted if Marcel's portal file were missing,
+not if Marcel failed to answer.
 
-Marcel already has the pieces for the other side of this. `system_open.rs`
-calls the portal as a client, and `desktop_integration.rs` owns a bus name
-and implements `org.freedesktop.FileManager1` over zbus. A FileChooser
-backend is the same shape of code pointed the other way.
+## The protocol
 
-## What Marcel has to implement
-
-The interface is `org.freedesktop.impl.portal.FileChooser`, version 4, on
-the object path `/org/freedesktop/portal/desktop`, under the bus name
+The interface is `org.freedesktop.impl.portal.FileChooser`, version 4, on the
+object path `/org/freedesktop/portal/desktop`, under the bus name
 `org.freedesktop.impl.portal.desktop.marcel`. Three methods:
 
 - `OpenFile(handle, app_id, parent_window, title, options) -> (response, results)`
@@ -41,81 +39,128 @@ the object path `/org/freedesktop/portal/desktop`, under the bus name
 
 `response` is 0 for success, 1 for the user cancelling, 2 for anything else.
 `results` is a dict; the entry that matters is `uris` (an array of `file://`
-strings). `choices` and `current_filter` go in there too if the request
-asked for them.
+strings). Marcel also returns `current_filter` when the request offered
+filters, in the same `(s a(us))` shape it arrived in.
 
 The `options` dict is where the requests differ. `OpenFile` can ask for
 `multiple`, `directory` (pick a folder rather than a file; this is why
-version 4 matters), `filters` (name plus a list of glob or MIME patterns),
-`current_filter`, and `choices` (extra combo boxes or checkboxes the app
-wants in the dialog). `SaveFile` adds `current_name`, `current_folder` and
-`current_file`, which are what the app suggests the dialog start with.
-`SaveFiles` is the odd one: the app hands over a list of files it wants to
-write and asks for a single destination folder. Every option is optional,
-and a backend that ignores `choices` entirely still works; it just returns
-no `choices` in the results.
+version 4 matters), `filters` (a name plus a list of glob or MIME patterns),
+`current_filter`, and `accept_label`. `SaveFile` adds `current_name`,
+`current_folder`, and `current_file`, which are what the app suggests the
+dialog start with. `SaveFiles` hands over a list of file names and asks for a
+single folder to write them into; the answer is one URI per name, in order.
+Every option is optional. `choices` (extra combo boxes an app wants in the
+dialog) is accepted and ignored, and no `choices` come back, which the spec
+allows.
 
-`handle` is an object path the frontend creates for the request. The backend
-is expected to export an `org.freedesktop.impl.portal.Request` object at
-that path with a single `Close` method, so the frontend can cancel the
-dialog if the calling app goes away. `parent_window` is a string like
-`wayland:<xdg_foreign handle>` meant for making the dialog modal to the
-caller. GPUI does not expose xdg_foreign, so the first version should
-simply ignore it and open a normal top-level window. That is what
-termfilechooser does and nothing complains.
+`handle` is an object path the frontend chooses for the request. Marcel
+exports an `org.freedesktop.impl.portal.Request` object there for exactly as
+long as the call is pending. Its one method, `Close`, is how the frontend
+withdraws a dialog whose caller went away: the window closes itself and the
+call returns 2. `parent_window` is a `wayland:<xdg_foreign handle>` string
+meant for making the dialog modal to the caller. GPUI does not expose
+xdg_foreign, so Marcel ignores it and opens a normal top-level window. That is
+what termfilechooser does and nothing complains.
 
-For Marcel that means a picker window: a Marcel pane that opens at
-`current_folder` (or the home directory), applies the filters if any,
-allows single or multiple selection according to `multiple`, and has a
-confirm button. Save mode needs a filename field seeded with
-`current_name`, and a confirmation when the target exists. Directory mode
-confirms the current folder rather than a selection inside it. The method
-call blocks until the window closes, so the D-Bus handler awaits a oneshot
-from the window and returns whatever it sends.
+## Where the code lives
 
-The `.portal` file is small:
+`src/file_chooser.rs` is the D-Bus side. It decodes the options dictionary
+into a `PickerRequest`, hands it to the application over a bounded channel,
+and awaits the answer; the method call blocks until a window replies. Every
+caller-supplied value is bounded and type-checked, and a wrong type is an
+`InvalidArgs` error rather than a silently ignored option. The `files` of a
+`SaveFiles` request go through the same name validation as Rename, so a name
+carrying a directory cannot write outside the folder the user chose.
 
-```ini
-[portal]
-DBusName=org.freedesktop.impl.portal.desktop.marcel
-Interfaces=org.freedesktop.impl.portal.FileChooser;
-UseIn=Hyprland;
-```
+`src/picker.rs` is the request model with no D-Bus in it: modes, filters,
+the response. Filters use `globset`, matched case-insensitively on purpose.
+Applications write `*.[jJ][pP][gG]` because GTK matches case-sensitively, and a
+picker that hides `Photo.JPG` behind `*.jpg` is wrong on a filesystem where the
+user never chose the case. MIME patterns go through `mime_guess` on the file
+name and accept `image/*` families. Folders always pass a filter, or nothing
+could be navigated into.
 
-`UseIn` is only consulted when nothing in `portals.conf` names the backend,
-and we will name it, so it is there for completeness.
+`window::open_picker` opens the window. It is an ordinary Marcel pane (same
+browser, same preview, same operations, same bookmarks) built by
+`Marcel::new_picker`, with a bar along the bottom holding the name field of a
+save dialog, the filter dropdown, Cancel, and the accept button. Pickers are
+kept apart from browsing windows in the registry, so a "show in folder"
+request never navigates a dialog somebody is answering, and a raised
+`Activate` never counts a dialog as "the Marcel I have". There are at most
+eight open at once; past that a request is answered with 2 immediately.
 
-The Nix side is a new output next to `file-manager1-service`: the same
-wrapper with an environment variable that tells Marcel to claim the portal
-bus name, plus the `.portal` file and a D-Bus activation file so the
-frontend can start Marcel on demand. In dotfiles it becomes
+What changes inside the pane:
+
+- A single-file picker restricts the selection model to one item, so no
+  gesture (range, marquee, select all, reveal) can show three highlighted
+  rows and hand back one.
+- Double-clicking or pressing Enter on a file answers the dialog instead of
+  launching the file. On a file that is part of the selection, the answer is
+  the whole selection.
+- In a save dialog, clicking a file proposes its name, Enter in the name field
+  confirms, and typing a folder's name goes into it. If the target exists you
+  are asked before it is replaced. The existence check runs off the foreground
+  thread, like every other stat in Marcel.
+- In directory mode, Open with a folder selected picks that folder; with
+  nothing selected it picks the folder being looked at.
+- Escape cancels. The Trash is not offered in the sidebar, because a chooser
+  answers with things that exist.
+
+Closing the window by any other route, the title-bar button included, answers
+"cancelled": `PickerState` sends it on drop, so the caller's dialog is never
+left blocked on a reply that will not come.
+
+## Process lifetime
+
+GPUI quits when the last window closes, and for a Marcel that
+xdg-desktop-portal started on demand, the picker is the last window. The
+reply is written to the bus from zbus's own thread, so the process could in
+principle exit with the answer still in hand and the application would see
+its backend vanish. `ReplyTracker` counts requests from the moment they are
+decoded until the reply has left the process (zbus's
+`ResponseDispatchNotifier` reports that), and a quit hook in `main.rs` waits
+for the count to reach zero, up to 150 ms of the 200 ms GPUI allows. This was
+confirmed by hand: a cold-started Marcel answers, then exits, and the caller
+gets its reply.
+
+## Packaging
+
+`nix/file-chooser-portal.nix` is the variant that answers dialogs, built the
+same way as the FileManager1 variant: the binary is wrapped to set
+`MARCEL_CLAIM_FILE_CHOOSER=1`, which makes every launch claim the backend name
+after it owns its own; a D-Bus activation file lets the frontend start Marcel
+when a dialog is asked for while it is not running; and `marcel.portal` is
+what makes the frontend consider Marcel at all. The name claim is an extra,
+never a startup condition, exactly like `org.freedesktop.FileManager1`: if
+another backend already owns it, Marcel says so on stderr and keeps browsing.
+
+The flake exposes it as `packages.<system>.file-chooser-portal` and the
+overlay as `marcelFileChooserPortal`. With the module it is one flag:
 
 ```nix
-xdg.portal.extraPortals = [pkgs.marcel-portal];
-xdg.portal.config.common."org.freedesktop.impl.portal.FileChooser" = ["marcel"];
+programs.marcel.fileChooserPortal = true;
 ```
 
-and `xdg-desktop-portal` starts routing every picker to Marcel.
+which adds the configured package to `xdg.portal.extraPortals` and names
+`marcel` for the FileChooser interface in `xdg.portal.config.common`.
+`xdg.portal.enable` stays your responsibility. The three wrappers (FileManager1
+claim, portal claim, settings) stack, and each one re-points every D-Bus
+activation file underneath it at itself, so whichever combination is enabled,
+a Marcel started by the bus is the fully configured one.
 
 ## Things that will bite
 
-The frontend talks to exactly one backend per interface and expects it to
-answer. If Marcel crashes mid-dialog the app that asked sees an error and
-usually shows nothing. Worth a fallback in `portals.conf`
-(`["marcel" "gtk"]`) while it is young; the frontend uses the next entry
-when the first is not on the bus.
+Every launch of the *installed* binary claims the name, but a Marcel started
+some other way does not. If a `cargo run` build is the running primary and the
+frontend activates the installed one, the new process forwards its launch to
+the primary and exits, the primary never took the portal name, and the
+application gets an activation error. Close the development instance first.
 
-Browsers are not uniform about using the portal. Firefox and Zen use it
-when `widget.use-xdg-desktop-portal.file-picker` is `1`; the default `2`
-means "only under GNOME or in a sandbox". Chromium-based browsers have
-switched to the portal picker in recent releases, but if Helium keeps
-showing a GTK dialog after the switch, that is the first thing to check
-rather than the backend.
-
-Cold start matters here more than for FileManager1. A save dialog that
-takes two seconds to appear because Marcel had to launch is noticeable. The
-one-process-per-session design already covers this once Marcel is open;
-the D-Bus activation file covers the case where it is not.
+Browsers are not uniform about using the portal. Firefox and Zen use it when
+`widget.use-xdg-desktop-portal.file-picker` is `1`; the default `2` means
+"only under GNOME or in a sandbox". Chromium-based browsers have switched to
+the portal picker in recent releases, but if Helium keeps showing a GTK dialog
+after the switch, that is the first thing to check rather than the backend.
 
 ## Checking it works without a browser
 
@@ -131,6 +176,26 @@ That goes through the real routing, so a dialog from the configured backend
 should appear and the chosen URI comes back on a `Response` signal.
 `busctl --user status org.freedesktop.impl.portal.desktop.marcel` says
 whether Marcel is currently the one holding the name.
+
+The backend can also be called past the frontend, which is how it was
+exercised while being written. The method signature is `osssa{sv}` and the
+call blocks until the window answers:
+
+```sh
+busctl --user --timeout=300 call \
+  org.freedesktop.impl.portal.desktop.marcel \
+  /org/freedesktop/portal/desktop \
+  org.freedesktop.impl.portal.FileChooser OpenFile 'osssa{sv}' \
+  /org/freedesktop/portal/desktop/request/manual/1 org.example.App '' \
+  'Pick an image' 2 \
+  filters 'a(sa(us))' 1 Images 2 0 '*.png' 0 '*.jpg' \
+  multiple b true
+```
+
+`desktop_integration::tests::private_session_bus_child` covers the same
+ground on a private bus: name ownership, the `version` property, a call
+answered through the channel, `Close` withdrawing a pending call, a request
+dropped without an answer, and the reply tracker draining afterwards.
 
 ## Prior art
 

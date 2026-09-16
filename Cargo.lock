@@ -3742,6 +3742,7 @@ dependencies = [
  "ashpd 0.12.3",
  "async-channel",
  "freedesktop-icons",
+ "globset",
  "gpui",
  "gpui-component",
  "gpui_platform",
