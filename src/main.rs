@@ -33,8 +33,7 @@ fn main() {
     // the desktop entry's Exec line directly — still gets its window here.
     let wait_for_bus_request = !explicit_launch
         && desktop_runtime.is_some()
-        && (std::env::var_os("DBUS_STARTER_BUS_TYPE").is_some()
-            || std::env::var_os("DBUS_STARTER_ADDRESS").is_some());
+        && marcel::launch::started_by_bus_activation();
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);

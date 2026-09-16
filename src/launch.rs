@@ -204,3 +204,60 @@ mod tests {
         assert!(resolve_location("/definitely/missing/marcel-path", Path::new("/"), None).is_err());
     }
 }
+
+/// Whether this process was started by the session bus to answer a request.
+///
+/// `dbus-daemon` says so by setting `DBUS_STARTER_BUS_TYPE` or
+/// `DBUS_STARTER_ADDRESS` in the child. `dbus-broker` starts services through
+/// systemd instead and sets neither; what it leaves behind is the transient
+/// unit it asked for, `dbus-:1.4-<bus name>@0.service`, which is this
+/// process's cgroup. Missing that meant every portal- or FileManager1-started
+/// Marcel on a dbus-broker system opened a browsing window at the daemon's
+/// working directory before the real request arrived.
+pub fn started_by_bus_activation() -> bool {
+    if std::env::var_os("DBUS_STARTER_BUS_TYPE").is_some()
+        || std::env::var_os("DBUS_STARTER_ADDRESS").is_some()
+    {
+        return true;
+    }
+    fs::read_to_string("/proc/self/cgroup")
+        .map(|cgroup| cgroup_is_bus_activation(&cgroup))
+        .unwrap_or(false)
+}
+
+fn cgroup_is_bus_activation(cgroup: &str) -> bool {
+    cgroup.lines().any(|line| {
+        line.rsplit('/')
+            .next()
+            .is_some_and(|unit| unit.starts_with("dbus-") && unit.ends_with(".service"))
+    })
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::cgroup_is_bus_activation;
+
+    #[test]
+    fn a_dbus_broker_transient_unit_is_recognised() {
+        assert!(cgroup_is_bus_activation(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/dbus-:1.4-org.freedesktop.impl.portal.desktop.marcel@0.service\n"
+        ));
+        assert!(cgroup_is_bus_activation(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/dbus-:1.4-io.github.berker_z.Marcel@0.service\n"
+        ));
+    }
+
+    #[test]
+    fn ordinary_units_and_scopes_are_not() {
+        assert!(!cgroup_is_bus_activation(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-kitty-1234.scope\n"
+        ));
+        assert!(!cgroup_is_bus_activation(
+            "0::/user.slice/user-1000.slice/user@1000.service/session.slice/dbus.service\n"
+        ));
+        assert!(!cgroup_is_bus_activation(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-hyprland-marcel-rs-99.scope\n"
+        ));
+        assert!(!cgroup_is_bus_activation(""));
+    }
+}

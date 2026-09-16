@@ -150,6 +150,19 @@ a Marcel started by the bus is the fully configured one.
 
 ## Things that will bite
 
+The frontend reads `portals.conf` and scans the portal files once, at
+startup. After enabling Marcel, `systemctl --user restart xdg-desktop-portal`
+or you keep getting the old dialog. Restarting it also D-Bus-activates every
+configured backend straight away, to read their `version` properties, so a
+Marcel with no windows appears on the bus at that point and stays resident.
+That is the warm backend the dialog latency depends on, not a leak.
+
+On a system running `dbus-broker` (NixOS does), activated services are
+started through systemd and get no `DBUS_STARTER_*` variables. Marcel also
+recognises the transient unit it lands in, `dbus-:1.4-<name>.service`, from
+`/proc/self/cgroup`; before that check existed, every activated Marcel opened
+a browsing window at the daemon's working directory.
+
 Every launch of the *installed* binary claims the name, but a Marcel started
 some other way does not. If a `cargo run` build is the running primary and the
 frontend activates the installed one, the new process forwards its launch to
@@ -172,8 +185,12 @@ busctl --user call org.freedesktop.portal.Desktop \
   org.freedesktop.portal.FileChooser OpenFile 'ssa{sv}' '' 'Pick something' 0
 ```
 
-That goes through the real routing, so a dialog from the configured backend
-should appear and the chosen URI comes back on a `Response` signal.
+That goes through the real routing. It also returns the moment the frontend
+hands back a request handle, and the frontend cancels any request whose
+caller has gone, so `busctl` alone never shows a dialog: the frontend logs
+`Handling OpenFile` and drops it. Use it to check the routing (`xdg-desktop-portal
+--verbose` prints which portal file it chose) and a real application to see
+the dialog.
 `busctl --user status org.freedesktop.impl.portal.desktop.marcel` says
 whether Marcel is currently the one holding the name.
 

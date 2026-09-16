@@ -36,6 +36,8 @@ Copy and move operations show progress and can be cancelled. When a destination 
 
 On Wayland, files can be dragged to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. It runs one process per session, but each `marcel-rs` invocation opens a new window instead of taking over one you were already using.
 
+Marcel can also be the file dialog. Applications on a modern Linux desktop do not draw their own open and save dialogs; they ask xdg-desktop-portal for one, and the portal hands the job to whichever backend is configured. Marcel implements that backend, so with it enabled the dialog that opens from a browser, an editor, or a chat client is a Marcel window: the same browser, preview pane, bookmarks, and type-to-filter you use everywhere else, plus a bar along the bottom with the name field, the file-type filter the application asked for, Cancel, and the accept button. Filters match case-insensitively, so `*.jpg` finds `Photo.JPG`. If Marcel is not running when a dialog is requested, D-Bus starts it. How to turn it on is under Installing.
+
 ### Appearance
 
 Marcel includes several themes and ships its own icons and font, so it still looks right on a bare system. Missing icons fall back to the system icon theme. An explicit icon theme setting overrides both.
@@ -135,11 +137,14 @@ and each is off by default because it takes something over:
   every application that asks xdg-desktop-portal for one, which on Wayland is
   most of them. It adds the portal variant to `xdg.portal.extraPortals` and
   names `marcel` for the FileChooser interface in `xdg.portal.config`;
-  `xdg.portal.enable` is still yours to set. The dialog is an ordinary Marcel
-  window with a bar at the bottom, so the preview pane, bookmarks, and
-  type-to-filter all work while picking. Firefox and Zen only use the portal
-  picker when `widget.use-xdg-desktop-portal.file-picker` is `1`. Details in
-  [`docs/file-chooser-portal.md`](docs/file-chooser-portal.md).
+  `xdg.portal.enable` is still yours to set (the Home Manager Hyprland module
+  turns it on for you). After the rebuild, run
+  `systemctl --user restart xdg-desktop-portal`: the frontend reads
+  `portals.conf` once at startup, and until it restarts you keep getting the
+  old dialog. Chromium-based browsers pick it up straight away. Firefox and
+  Zen only use the portal picker when
+  `widget.use-xdg-desktop-portal.file-picker` is `1` in `about:config`.
+  Details in [`docs/file-chooser-portal.md`](docs/file-chooser-portal.md).
 
 There is a NixOS module with the same options
 (`inputs.marcel.nixosModules.default`; packages land in

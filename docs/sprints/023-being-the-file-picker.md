@@ -1,6 +1,6 @@
 # Sprint 23: Being the file picker
 
-**Status:** Implemented. The local quality gate is green (283 library tests
+**Status:** Implemented. The local quality gate is green (285 library tests
 plus 1 binary test, up from 260), the private-bus integration test covers the
 D-Bus surface, and the graphical checks below were run by hand once against
 the debug build. The design note this sprint started from is now the
@@ -124,11 +124,17 @@ it is given and was sitting against the top of the bar (now boxed), and
 Escape with the browser focused was dispatched as the `ClearSelection` action
 before the window key listener saw it (now cancels from the action path too).
 
+### Through the real frontend, same day
+
+- [x] Installed via the module, `portals.conf` written, frontend restarted;
+  Helium's open dialog is a Marcel picker and the pick reaches the page.
+- [x] Found and fixed: `dbus-broker` activation sets no `DBUS_STARTER_*`
+  variables, so the activated Marcel opened a browsing window before the
+  request; the cgroup's transient unit name is now recognised too.
+
 ### Not yet run
 
-- [ ] Through the real frontend from a browser and from a GTK application,
-  after switching `portals.conf`. The direct backend call exercises everything
-  but the frontend's routing and activation.
+- [ ] A GTK application and a Firefox-family browser through the frontend.
 - [ ] Bus activation from a fully stopped Marcel through the installed
   package, timing the first paint.
 
