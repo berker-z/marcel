@@ -147,6 +147,39 @@ cargo run
 
 The development shell is required. A plain shell will not find the system libraries the build needs.
 
+Use this repository's `nix develop` consistently for Marcel, including checks
+and tests. A general Rust shell or system `cargo` can select another compiler
+and invalidate the compiled dependencies in `target/`. The shell pins its
+compiler through `flake.lock` and defaults to two Cargo build jobs. Avoid
+`cargo clean` during routine development: it deletes those compiled dependencies.
+
+`cargo run` reuses local development artifacts. `nix build .#marcel-rs` builds
+the isolated release package; it cannot reuse `target/`. The flake uses Crane
+to compile dependencies separately and reuse them after application-only
+edits. Both routes select the same pinned compiler. Changes to dependencies,
+the compiler, native libraries or build flags still invalidate the relevant
+artifacts. The standalone nixpkgs recipe retains `buildRustPackage`.
+
+To retain the release dependencies locally across Nix garbage collection:
+
+```sh
+nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-deps --out-link .marcel-deps
+nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-rs
+```
+
+Keep the `.marcel-deps` symlink while developing. The first build with this
+recipe compiles the dependency set once unless Cachix already has it. Release
+CI publishes the compiled dependencies as well as the finished application;
+these artifacts use more cache storage than the runtime binary alone.
+
+Cachix serves complete Nix builds with matching inputs. System configurations
+should consume `packages.<system>.marcel-rs` from this flake, retaining its
+own locked nixpkgs, to match the published cache. Applying the overlay against
+another nixpkgs revision can produce a different build. The cache workflow
+runs on release tags or manual dispatch; an ordinary development commit is
+not guaranteed to be cached. Development-shell and release builds have
+different profiles and do not share compiled Cargo artifacts.
+
 ## Credits
 
 Built with [GPUI](https://github.com/zed-industries/zed) (Apache-2.0) and [gpui-component](https://github.com/longbridge/gpui-component). PDF rendering goes through Poppler, archives through 7-Zip. Icons are a small subset of [Nordzy](https://github.com/alvatip/Nordzy-icon) (GPL-3.0) and the bundled font is a subset of [Iosevka](https://github.com/be5invis/Iosevka) (SIL OFL).

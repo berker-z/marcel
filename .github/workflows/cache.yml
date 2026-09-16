@@ -2,7 +2,7 @@ name: cache
 
 # Keep the package Marcel's direct-flake users install in the public Cachix
 # cache. Like the release CI, this remains tag/manual-only and deliberately
-# publishes just the x86_64 package for an immutable release tag.
+# publishes the x86_64 package and its reusable compiled dependencies.
 on:
   push:
     tags: ["v*"]
@@ -34,22 +34,33 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Record the exact store path so Cachix receives only the package's
-      # runtime closure. Compiler outputs and Cargo build intermediates are not
-      # retained in the project's small public cache.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: marcel-rs
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: true
+          useDaemon: false
+
+      # Publish this before the application build so a later application/test
+      # failure does not discard a successful GPUI dependency build.
+      - name: Build and publish compiled dependencies
+        run: |
+          deps_path="$(
+            nix build --accept-flake-config --no-link --print-out-paths \
+              --max-jobs 1 --cores 2 --print-build-logs .#marcel-deps
+          )"
+          cachix push marcel-rs "$deps_path"
+
       - name: Build the package
         id: build
         run: |
           package_path="$(
             nix build --accept-flake-config --no-link --print-out-paths \
-              --print-build-logs .#marcel-rs
+              --max-jobs 1 --cores 2 --print-build-logs .#marcel-rs
           )"
           echo "path=$package_path" >> "$GITHUB_OUTPUT"
 
       - name: Publish the runtime closure
-        uses: cachix/cachix-action@v17
-        with:
-          name: marcel-rs
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          pathsToPush: "${{ steps.build.outputs.path }}"
-          useDaemon: false
+        env:
+          PACKAGE_PATH: "${{ steps.build.outputs.path }}"
+        run: cachix push marcel-rs "$PACKAGE_PATH"

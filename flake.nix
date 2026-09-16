@@ -10,6 +10,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    crane.url = "github:ipetkov/crane";
 
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -22,6 +23,7 @@
       self,
       nixpkgs,
       rust-overlay,
+      crane,
       ...
     }:
     let
@@ -31,6 +33,15 @@
       ];
 
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      mkRustToolchain =
+        pkgs:
+        pkgs.rust-bin.stable.latest.default.override {
+          extensions = [
+            "clippy"
+            "rust-src"
+            "rustfmt"
+          ];
+        };
       mkPkgs =
         system:
         import nixpkgs {
@@ -43,7 +54,9 @@
         system:
         let
           pkgs = mkPkgs system;
-          marcel = pkgs.callPackage ./nix/package.nix { };
+          marcel = pkgs.callPackage ./nix/package.nix {
+            craneLib = (crane.mkLib pkgs).overrideToolchain (mkRustToolchain pkgs);
+          };
           marcelFileManager1Service = pkgs.callPackage ./nix/file-manager1-service.nix {
             inherit marcel;
           };
@@ -53,6 +66,7 @@
           # `marcel`, and an overlay that binds that name would replace it for
           # every user of this flake rather than adding to it.
           marcel-rs = marcel;
+          marcel-deps = marcel.cargoArtifacts;
           file-manager1-service = marcelFileManager1Service;
           default = marcel;
         }
@@ -70,7 +84,11 @@
       overlays.default =
         final: _previous:
         let
-          marcel = final.callPackage ./nix/package.nix { };
+          marcel = final.callPackage ./nix/package.nix {
+            craneLib = (crane.mkLib final).overrideToolchain (
+              mkRustToolchain (mkPkgs final.stdenv.hostPlatform.system)
+            );
+          };
         in
         {
           # Binding `marcel` here would shadow nixpkgs' own `marcel`, an
@@ -107,13 +125,7 @@
         let
           pkgs = mkPkgs system;
 
-          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [
-              "clippy"
-              "rust-src"
-              "rustfmt"
-            ];
-          };
+          rustToolchain = mkRustToolchain pkgs;
 
           runtimeLibraries = with pkgs; [
             alsa-lib
@@ -153,6 +165,10 @@
 
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+
+            # Local Cargo builds run outside nix-daemon, so the daemon's job
+            # and memory limits do not apply to them.
+            CARGO_BUILD_JOBS = "2";
 
             # `desktop_integration`'s integration test starts a private session
             # bus, and it has to be a bus with no system configuration behind

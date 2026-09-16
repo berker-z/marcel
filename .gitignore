@@ -1,5 +1,6 @@
 /target
 /result
+/.marcel-deps
 /.direnv
 /.devenv
 /testo

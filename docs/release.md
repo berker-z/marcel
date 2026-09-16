@@ -89,22 +89,23 @@ Reproducibility also does not make the selected compiler infallible. A fresh
 Rust 1.97/LLVM 21 thin-LTO build was observed terminating in `libLLVM.so` with
 a segmentation fault despite adequate disk, inode, and memory headroom and no
 kernel OOM event. Increasing rustc's worker-thread stack to 16 MiB allowed that
-package build to complete, so `nix/package.nix` declares
-`RUST_MIN_STACK=16777216`. Keep the setting local to Marcel and retain thin LTO
-unless the crash recurs with the larger stack; disabling thin LTO for Marcel is
-the next fallback.
+package build to complete initially; a recurrence led to the current
+`RUST_MIN_STACK=33554432` in `nix/package.nix`. This is a worker-thread stack
+setting, not a cap on compiler RAM. If the crash returns, capture the failing
+crate and LLVM pass rather than increasing it again without evidence.
 
 A Git tag or GitHub Release pins and presents a source version, but does not by
 itself stop Nix from compiling that source. Fast Nix installation requires a
 binary cache containing Marcel's exact Nix store output. Marcel's public Cachix
-cache receives the x86_64 package runtime closure from immutable `v*` tags;
+cache workflow publishes the x86_64 package runtime closure and Crane's
+compiled-dependency artifacts from `v*` tags or explicit manual runs;
 release CI separately validates the tagged package on both declared
 architectures. The intended pipeline is:
 
 ```text
 immutable v* tag
     -> hosted x86_64-linux and aarch64-linux validation
-    -> signed x86_64-linux runtime closure at marcel-rs.cachix.org
+    -> compiled dependencies and signed x86_64-linux runtime closure at marcel-rs.cachix.org
     -> GitHub Release notes and any portable non-Nix artifacts
 ```
 
@@ -113,9 +114,26 @@ downloads the substitute and its closure instead of compiling Marcel. A local
 build remains the correct fallback when the cache lacks that derivation—for
 example after an input override or a lock-file update that the release builders
 have not built. The flake advertises the public Cachix substituter and its
-signing key. Cache publication deliberately pushes only the package runtime
-closure: development shells, compilers, and Cargo build intermediates are not
-retained in the project's bounded cache storage.
+signing key. The compiled-dependency output is published first so subsequent
+application-only changes can reuse it even on fresh runners. This requires
+more cache storage than the former runtime-only policy; eviction of that
+output means rebuilding dependencies again. Locally, developers can retain it
+with the `.marcel-deps` GC root documented in the README.
+
+The flake's package and development shell select the same pinned Rust
+toolchain. The standalone nixpkgs recipe still uses `buildRustPackage`, without
+requiring Crane in nixpkgs. Development and release Cargo profiles remain
+separate.
+
+Packaging follow-up checks (2026-09-16):
+
+- [x] Evaluate the Crane package for x86_64-linux and aarch64-linux.
+- [x] Verify an application-only source edit preserves the dependency
+      derivation, and a release-profile edit invalidates it.
+- [x] Verify the standalone recipe still produces the previously cached path.
+- [x] Pass fmt, Clippy, all 268 tests, and cache-workflow lint.
+- [ ] Complete a release build of the new Crane recipe and publish both
+      outputs before advancing downstream system lockfiles to it.
 
 ## Current packaging audit
 

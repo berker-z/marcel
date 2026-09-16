@@ -2,6 +2,7 @@
   lib,
   callPackage,
   rustPlatform,
+  craneLib ? null,
   copyDesktopItems,
   makeDesktopItem,
   makeWrapper,
@@ -29,6 +30,60 @@
   _7zz,
 }:
 let
+  # Keep the standalone nixpkgs recipe available; flake builds use Crane so
+  # dependencies survive application-only source changes.
+  buildPackage =
+    if craneLib == null then
+      rustPlatform.buildRustPackage
+    else
+      argsFn:
+      let
+        args = argsFn (args // { finalPackage = package; });
+        common = {
+          inherit (args)
+            pname
+            version
+            src
+            nativeBuildInputs
+            buildInputs
+            RUSTFLAGS
+            RUST_MIN_STACK
+            ;
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            cargoLock = args.cargoLock.lockFile;
+            # Crane keys git hashes by the full Cargo source URL, whereas
+            # importCargoLock keys them by one crate's name and version.
+            outputHashes = builtins.listToAttrs (
+              lib.concatMap (
+                p:
+                lib.optional (builtins.hasAttr "${p.name}-${p.version}" args.cargoLock.outputHashes) {
+                  name = p.source;
+                  value = args.cargoLock.outputHashes."${p.name}-${p.version}";
+                }
+              ) (builtins.fromTOML (builtins.readFile args.cargoLock.lockFile)).package
+            );
+            # Preserve importCargoLock's fetch mode for the existing hashes.
+            # Crane otherwise enables Git LFS when fetching hashed sources.
+            overrideVendorGitCheckout =
+              _: drv:
+              drv.overrideAttrs (old: {
+                src = old.src.override { fetchLFS = false; };
+              });
+          };
+        };
+        cargoArtifacts = craneLib.buildDepsOnly common;
+        package = craneLib.buildPackage (
+          builtins.removeAttrs args [ "cargoLock" ]
+          // common
+          // {
+            inherit cargoArtifacts;
+            passthru = args.passthru // {
+              inherit cargoArtifacts;
+            };
+          }
+        );
+      in
+      package;
   runtimeLibraries = [
     alsa-lib
     expat
@@ -45,7 +100,7 @@ let
     libxrandr
   ];
 in
-rustPlatform.buildRustPackage (finalAttrs: {
+buildPackage (finalAttrs: {
   pname = "marcel-rs";
   version = "0.1.0";
 
