@@ -122,7 +122,7 @@ jobs:
       # This also runs the package's own install check, which validates the
       # installed AppStream file and both desktop entries.
       - name: Build the package
-        run: nix build --print-build-logs .#marcel-rs
+        run: nix build --accept-flake-config --max-jobs 1 --cores 2 --print-build-logs .#marcel-rs
 
       - name: Inspect what was installed
         run: |
@@ -172,4 +172,4 @@ jobs:
 
       - uses: DeterminateSystems/magic-nix-cache-action@v9
 
-      - run: nix flake check --print-build-logs
+      - run: nix flake check --accept-flake-config --max-jobs 1 --cores 2 --print-build-logs
