@@ -18,11 +18,10 @@
 //! quarantine-backed replacement — and only moves where that model lives.
 //!
 //! Reaching a user interface stays a requirement rather than an assumption.
-//! Sprint 18 made conflict decisions interactive, so an operation can block a
-//! worker thread on an answer. An operation that outlives its window is
-//! re-homed onto another live window; with no window at all its questions
-//! resolve to refusal immediately, because a worker must never park on a reply
-//! that cannot arrive.
+//! A conflict decision is interactive, so an operation can block a worker
+//! thread on an answer. An operation that outlives its window is re-homed onto
+//! another live window; with no window at all its questions resolve to refusal
+//! immediately, because a worker must never park on a reply that cannot arrive.
 
 use std::{
     collections::HashSet,
@@ -49,23 +48,26 @@ use gpui_component::{
 };
 
 use crate::{
-    conflict::{
-        ConflictDecision, ConflictPolicy, ConflictResponse, PendingConflict, PromptingResolver,
-        unique_name_in,
+    browse::entries::display_filename,
+    fsops::{
+        CommittedOperation, CompletedTransfer, DirectoryChanges, HistoryDirection, MutationOutcome,
+        OperationJournal, OperationRecord, TransferMode, TransferProgress,
+        conflict::{
+            ConflictDecision, ConflictPolicy, ConflictResponse, PendingConflict, PromptingResolver,
+            unique_name_in,
+        },
+        create_directory, create_zip_operation,
+        delete::{DeleteOutcome, delete_paths},
+        extract_archive_operation,
+        quarantine::erase_replacement_quarantine,
+        redo_operation, rename_entry,
+        transfer::transfer_paths_with_conflicts,
+        trash::{
+            TrashOutcome, TrashRecord, purge_trash_records, restore_trash_records, trash_paths,
+        },
+        undo_operation,
     },
-    delete_ops::{DeleteOutcome, delete_paths, summarize_failures as summarize_delete_failures},
-    file_ops::{
-        CommittedOperation, CompletedTransfer, DirectoryChanges, MutationOutcome, OperationJournal,
-        OperationRecord, TransferMode, TransferProgress, create_directory, create_zip_operation,
-        extract_archive_operation, redo_operation, rename_entry, summarize_failures,
-        transfer_changes, transfer_paths_with_conflicts, undo_operation,
-    },
-    fs::display_filename,
     surface::{self, Report},
-    trash_ops::{
-        TrashOutcome, TrashRecord, purge_trash_records, restore_trash_records,
-        summarize_failures as summarize_trash_failures, trash_paths,
-    },
 };
 
 /// How often an active operation's progress is redrawn.
@@ -87,6 +89,20 @@ pub enum OperationProgressKind {
     EmptyTrash,
 }
 
+impl OperationProgressKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Copy => "Copying",
+            Self::Move => "Moving",
+            Self::Compress => "Compressing",
+            Self::Extract => "Extracting",
+            Self::Delete => "Deleting permanently",
+            Self::EmptyTrash => "Emptying Trash",
+        }
+    }
+}
+
+/// What the progress card says about the running operation.
 pub struct ActiveOperationProgress {
     pub kind: OperationProgressKind,
     pub source_count: usize,
@@ -170,6 +186,34 @@ impl Drop for OperationCoordinator {
     }
 }
 
+/// How an operation shows up on the progress card, if it does at all.
+struct ProgressCard {
+    kind: OperationProgressKind,
+    source_count: usize,
+    detail: String,
+    cancellable: bool,
+}
+
+impl ProgressCard {
+    fn transfer(mode: TransferMode, source_count: usize, destination: &std::path::Path) -> Self {
+        Self {
+            kind: match mode {
+                TransferMode::Copy => OperationProgressKind::Copy,
+                TransferMode::Move => OperationProgressKind::Move,
+            },
+            source_count,
+            detail: format!("to {}", destination.display()),
+            cancellable: true,
+        }
+    }
+}
+
+/// What a started operation runs with.
+struct Started {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<TransferProgress>,
+}
+
 impl OperationCoordinator {
     pub fn is_busy(&self) -> bool {
         self.busy
@@ -245,7 +289,7 @@ impl OperationCoordinator {
         }
         std::thread::spawn(move || {
             for item in &unreachable {
-                crate::file_ops::erase_replacement_quarantine(item);
+                erase_replacement_quarantine(item);
             }
         });
     }
@@ -275,90 +319,34 @@ impl OperationCoordinator {
         });
     }
 
-    fn begin_simple(&mut self) -> bool {
+    /// Take the one busy lock.
+    ///
+    /// `card` puts the operation on every window's progress card and, when
+    /// cancellable, arms the cancel flag; an operation without a card is
+    /// instantaneous from the user's point of view.
+    fn begin(&mut self, card: Option<ProgressCard>) -> Option<Started> {
         if self.busy {
-            return false;
+            return None;
         }
+        let started = Started {
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(TransferProgress::default()),
+        };
         self.busy = true;
         self.cancel = None;
-        true
-    }
-
-    fn begin_transfer(
-        &mut self,
-        mode: TransferMode,
-        source_count: usize,
-        destination: PathBuf,
-    ) -> Option<(Arc<AtomicBool>, Arc<TransferProgress>)> {
-        if self.busy || source_count == 0 {
-            return None;
+        if let Some(card) = card {
+            if card.cancellable {
+                self.cancel = Some(started.cancel.clone());
+            }
+            self.progress = Some(ActiveOperationProgress {
+                kind: card.kind,
+                source_count: card.source_count,
+                detail: card.detail,
+                cancellable: card.cancellable,
+                progress: started.progress.clone(),
+            });
         }
-        let cancel = Arc::new(AtomicBool::new(false));
-        let progress = Arc::new(TransferProgress::default());
-        self.busy = true;
-        self.cancel = Some(cancel.clone());
-        self.progress = Some(ActiveOperationProgress {
-            kind: match mode {
-                TransferMode::Copy => OperationProgressKind::Copy,
-                TransferMode::Move => OperationProgressKind::Move,
-            },
-            source_count,
-            detail: format!("to {}", destination.display()),
-            cancellable: true,
-            progress: progress.clone(),
-        });
-        Some((cancel, progress))
-    }
-
-    fn begin_permanent_delete(
-        &mut self,
-        kind: OperationProgressKind,
-        source_count: usize,
-    ) -> Option<Arc<TransferProgress>> {
-        if self.busy || source_count == 0 {
-            return None;
-        }
-        let progress = Arc::new(TransferProgress::default());
-        self.busy = true;
-        self.cancel = None;
-        self.progress = Some(ActiveOperationProgress {
-            kind,
-            source_count,
-            detail: "This cannot be undone".to_string(),
-            cancellable: false,
-            progress: progress.clone(),
-        });
-        Some(progress)
-    }
-
-    fn begin_archive(
-        &mut self,
-        kind: OperationProgressKind,
-        source_count: usize,
-        detail: String,
-    ) -> Option<(Arc<AtomicBool>, Arc<TransferProgress>)> {
-        if self.busy
-            || source_count == 0
-            || !matches!(
-                kind,
-                OperationProgressKind::Compress | OperationProgressKind::Extract
-            )
-        {
-            return None;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        let progress = Arc::new(TransferProgress::default());
-        progress.set_preparing(true);
-        self.busy = true;
-        self.cancel = Some(cancel.clone());
-        self.progress = Some(ActiveOperationProgress {
-            kind,
-            source_count,
-            detail,
-            cancellable: true,
-            progress: progress.clone(),
-        });
-        Some((cancel, progress))
+        Some(started)
     }
 
     fn finish_active(&mut self) {
@@ -373,8 +361,34 @@ impl OperationCoordinator {
         self.progress_task.take();
     }
 
-    fn set_task(&mut self, task: Task<()>) {
-        self.task = Some(task);
+    /// Run `work` on the blocking pool, then fold its result in with `finish`
+    /// and report to whichever window still speaks for `origin`.
+    ///
+    /// Every operation ends here: the lock is released and the result is
+    /// reported in one place, so no path can forget either.
+    fn run<T: Send + 'static>(
+        &mut self,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+        work: impl FnOnce() -> T + Send + 'static,
+        finish: impl FnOnce(&mut Self, T, &mut Context<Self>) -> Option<Report> + 'static,
+    ) {
+        self.operation_origin = Some(origin);
+        if self.progress.is_some() {
+            self.start_progress_refresh(cx);
+        }
+        let task = cx.background_executor().spawn(smol::unblock(work));
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let report = this.update(cx, |this, cx| {
+                let report = finish(this, result, cx);
+                this.finish_active();
+                cx.notify();
+                report
+            });
+            surface::deliver(origin, report.ok().flatten(), cx);
+        }));
+        cx.notify();
     }
 
     /// Record an operation and release anything the records it displaced were
@@ -387,44 +401,6 @@ impl OperationCoordinator {
         for evicted in self.journal.record(operation) {
             evicted.release_quarantines();
         }
-    }
-
-    fn begin_undo(&mut self) -> Option<OperationRecord> {
-        if !self.begin_simple() {
-            return None;
-        }
-        let operation = self.journal.begin_undo();
-        if operation.is_none() {
-            self.finish_active();
-        }
-        operation
-    }
-
-    fn finish_undo(&mut self, operation: OperationRecord) {
-        self.journal.finish_undo(operation);
-    }
-
-    fn cancel_undo(&mut self, operation: OperationRecord) {
-        self.journal.cancel_undo(operation);
-    }
-
-    fn begin_redo(&mut self) -> Option<OperationRecord> {
-        if !self.begin_simple() {
-            return None;
-        }
-        let operation = self.journal.begin_redo();
-        if operation.is_none() {
-            self.finish_active();
-        }
-        operation
-    }
-
-    fn finish_redo(&mut self, operation: OperationRecord) {
-        self.journal.finish_redo(operation);
-    }
-
-    fn cancel_redo(&mut self, operation: OperationRecord) {
-        self.journal.cancel_redo(operation);
     }
 
     /// Redraw the progress surface of every window while an operation runs.
@@ -450,6 +426,21 @@ impl OperationCoordinator {
         }));
     }
 
+    /// Tell every window what changed on disk.
+    fn applied(
+        &self,
+        changes: DirectoryChanges,
+        reveal: Vec<PathBuf>,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(OperationEvent::Applied {
+            changes,
+            reveal,
+            origin: Some(origin),
+        });
+    }
+
     /// Publish a mutation that has already committed to the filesystem.
     ///
     /// Every window reduces from the committed effect whether or not undo
@@ -467,12 +458,28 @@ impl OperationCoordinator {
         if let Some(record) = committed.into_record() {
             self.record(record);
         }
-        cx.emit(OperationEvent::Applied {
-            changes,
-            reveal,
-            origin: Some(origin),
-        });
+        self.applied(changes, reveal, origin, cx);
         undoable
+    }
+
+    /// Publish a single-path commit and word its success as `verb “name”`.
+    fn report_committed(
+        &mut self,
+        committed: CommittedOperation,
+        verb: &str,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Report {
+        let path = committed.path().to_path_buf();
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let undoable = self.apply_committed(committed, vec![path], origin, cx);
+        Report::Success(format!(
+            "{verb} “{name}”{}",
+            history_note(HistoryDirection::Undo, undoable)
+        ))
     }
 
     pub fn start_rename(
@@ -482,7 +489,7 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_simple() {
+        if self.begin(None).is_none() {
             return;
         }
         let attempted_destination = source
@@ -490,51 +497,28 @@ impl OperationCoordinator {
             .map(|parent| parent.join(&name))
             .unwrap_or_else(|| source.clone());
         let task_source = source.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || rename_entry(&task_source, &name)));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
-                    Ok(committed) => {
-                        let destination = committed.path().to_path_buf();
-                        let display_name = destination
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let undoable =
-                            this.apply_committed(committed, vec![destination], origin, cx);
-                        Report::Success(format!(
-                            "Renamed to “{display_name}”{}",
-                            undo_note(undoable)
-                        ))
-                    }
-                    Err(error) => {
-                        // Most failures leave the source untouched. A failure
-                        // after the no-replace syscall (for example while
-                        // inspecting the result) may still have renamed it, so
-                        // revalidate both possible paths instead of assuming
-                        // either filesystem state.
-                        cx.emit(OperationEvent::Applied {
-                            changes: DirectoryChanges {
-                                upserted: vec![source, attempted_destination],
-                                ..DirectoryChanges::default()
-                            },
-                            reveal: Vec::new(),
-                            origin: Some(origin),
-                        });
-                        Report::Error(error.to_string())
-                    }
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+        self.run(
+            origin,
+            cx,
+            move || rename_entry(&task_source, &name),
+            move |this, result, cx| match result {
+                Ok(committed) => Some(this.report_committed(committed, "Renamed to", origin, cx)),
+                Err(error) => {
+                    // Most failures leave the source untouched. A failure
+                    // after the no-replace syscall (for example while
+                    // inspecting the result) may still have renamed it, so
+                    // revalidate both possible paths instead of assuming
+                    // either filesystem state.
+                    this.applied(
+                        DirectoryChanges::upserted(vec![source, attempted_destination]),
+                        Vec::new(),
+                        origin,
+                        cx,
+                    );
+                    Some(Report::Error(error.to_string()))
+                }
+            },
+        );
     }
 
     pub fn start_create_directory(
@@ -544,38 +528,20 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_simple() {
+        if self.begin(None).is_none() {
             return;
         }
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || create_directory(&parent, &name)));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
-                    Ok(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let undoable =
-                            this.apply_committed(committed, vec![path.clone()], origin, cx);
-                        Report::Success(format!(
-                            "Created folder “{}”{}",
-                            path.file_name()
-                                .map(|name| name.to_string_lossy())
-                                .unwrap_or_default(),
-                            undo_note(undoable)
-                        ))
-                    }
+        self.run(
+            origin,
+            cx,
+            move || create_directory(&parent, &name),
+            move |this, result, cx| {
+                Some(match result {
+                    Ok(committed) => this.report_committed(committed, "Created folder", origin, cx),
                     Err(error) => Report::Error(error.to_string()),
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                })
+            },
+        );
     }
 
     pub fn start_compress(
@@ -585,44 +551,29 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let Some((cancel, _progress)) = self.begin_archive(
-            OperationProgressKind::Compress,
-            sources.len(),
-            format!("to {}", destination.display()),
-        ) else {
+        let card = ProgressCard {
+            kind: OperationProgressKind::Compress,
+            source_count: sources.len(),
+            detail: format!("to {}", destination.display()),
+            cancellable: true,
+        };
+        if sources.is_empty() {
+            return;
+        }
+        let Some(started) = self.begin_prepared(card) else {
             return;
         };
-        self.operation_origin = Some(origin);
-        self.start_progress_refresh(cx);
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            create_zip_operation(&sources, &destination, cancel)
-        }));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
-                    Ok(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let undoable =
-                            this.apply_committed(committed, vec![path.clone()], origin, cx);
-                        Report::Success(format!(
-                            "Created ZIP “{}”{}",
-                            path.file_name()
-                                .map(|name| name.to_string_lossy())
-                                .unwrap_or_default(),
-                            undo_note(undoable)
-                        ))
-                    }
+        self.run(
+            origin,
+            cx,
+            move || create_zip_operation(&sources, &destination, started.cancel),
+            move |this, result, cx| {
+                Some(match result {
+                    Ok(committed) => this.report_committed(committed, "Created ZIP", origin, cx),
                     Err(error) => Report::Error(error.to_string()),
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                })
+            },
+        );
     }
 
     pub fn start_extract(
@@ -631,200 +582,141 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let Some((cancel, _progress)) = self.begin_archive(
-            OperationProgressKind::Extract,
-            1,
-            format!("from {}", archive.display()),
-        ) else {
+        let card = ProgressCard {
+            kind: OperationProgressKind::Extract,
+            source_count: 1,
+            detail: format!("from {}", archive.display()),
+            cancellable: true,
+        };
+        let Some(started) = self.begin_prepared(card) else {
             return;
         };
-        self.operation_origin = Some(origin);
-        self.start_progress_refresh(cx);
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            extract_archive_operation(&archive, cancel)
-        }));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
-                    Ok(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let undoable =
-                            this.apply_committed(committed, vec![path.clone()], origin, cx);
-                        Report::Success(format!(
-                            "Extracted “{}”{}",
-                            path.file_name()
-                                .map(|name| name.to_string_lossy())
-                                .unwrap_or_default(),
-                            undo_note(undoable)
-                        ))
-                    }
+        self.run(
+            origin,
+            cx,
+            move || extract_archive_operation(&archive, started.cancel),
+            move |this, result, cx| {
+                Some(match result {
+                    Ok(committed) => this.report_committed(committed, "Extracted", origin, cx),
                     Err(error) => Report::Error(error.to_string()),
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                })
+            },
+        );
+    }
+
+    /// An archive shows "preparing" on the card until its backend reports.
+    fn begin_prepared(&mut self, card: ProgressCard) -> Option<Started> {
+        let started = self.begin(Some(card))?;
+        started.progress.set_preparing(true);
+        Some(started)
     }
 
     pub fn start_undo(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
-        let Some(operation) = self.begin_undo() else {
-            return;
-        };
-
-        let operation_for_task = operation.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || undo_operation(&operation_for_task)));
-
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
-                    MutationOutcome::Committed(committed) => {
-                        let reveal = matches!(&operation, OperationRecord::Rename { .. })
-                            .then(|| committed.path().to_path_buf());
-                        let changes = committed.changes().clone();
-                        let message = operation_history_message(&operation, false);
-                        let redoable = committed.is_undoable();
-                        let redo_record = committed.into_record();
-                        match &operation {
-                            OperationRecord::Trash { records } => {
-                                cx.emit(OperationEvent::TrashRemoved(
-                                    records
-                                        .iter()
-                                        .map(|record| record.backing_path().to_path_buf())
-                                        .collect(),
-                                ));
-                            }
-                            OperationRecord::Restore { .. } => {
-                                cx.emit(OperationEvent::TrashUpserted(
-                                    redo_record
-                                        .as_ref()
-                                        .and_then(OperationRecord::trash_records)
-                                        .unwrap_or_default()
-                                        .to_vec(),
-                                ));
-                            }
-                            _ => {}
-                        }
-                        cx.emit(OperationEvent::Applied {
-                            changes,
-                            reveal: reveal.into_iter().collect(),
-                            origin: Some(origin),
-                        });
-                        // The undo committed. Losing its record only costs
-                        // Redo, so never report the undo itself as failed.
-                        if let Some(record) = redo_record {
-                            this.finish_undo(record);
-                        }
-                        Report::Success(format!("{message}{}", redo_note(redoable)))
-                    }
-                    // Nothing reached the disk, so the record still describes
-                    // it exactly and the user can fix the obstacle and retry.
-                    MutationOutcome::Unchanged(error) => {
-                        this.cancel_undo(operation);
-                        Report::Error(error.to_string())
-                    }
-                    // The undo crossed its commit point. Whatever compensation
-                    // achieved, the record's identities predate it, so keeping
-                    // it would only produce a "changed or was replaced" refusal
-                    // later that blamed the user for Marcel's own recovery.
-                    MutationOutcome::Discarded { changes, error } => {
-                        cx.emit(OperationEvent::Applied {
-                            changes,
-                            reveal: Vec::new(),
-                            origin: Some(origin),
-                        });
-                        Report::Error(format!("{error}; this operation can no longer be undone"))
-                    }
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+        self.start_history(HistoryDirection::Undo, origin, cx);
     }
 
     pub fn start_redo(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
-        let Some(operation) = self.begin_redo() else {
+        self.start_history(HistoryDirection::Redo, origin, cx);
+    }
+
+    fn start_history(
+        &mut self,
+        direction: HistoryDirection,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        if self.begin(None).is_none() {
+            return;
+        }
+        let Some(record) = self.journal.begin(direction) else {
+            self.finish_active();
             return;
         };
+        let stepped = record.clone();
+        self.run(
+            origin,
+            cx,
+            move || match direction {
+                HistoryDirection::Undo => undo_operation(&stepped),
+                HistoryDirection::Redo => redo_operation(&stepped),
+            },
+            move |this, outcome, cx| {
+                Some(this.finish_history(direction, record, outcome, origin, cx))
+            },
+        );
+    }
 
-        let operation_for_task = operation.clone();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || redo_operation(&operation_for_task)));
-
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
-                    MutationOutcome::Committed(committed) => {
-                        let path = committed.path().to_path_buf();
-                        let changes = committed.changes().clone();
-                        let message = operation_history_message(&operation, true);
-                        let undoable = committed.is_undoable();
-                        let undo_record = committed.into_record();
-                        match &operation {
-                            OperationRecord::Trash { .. } => {
-                                cx.emit(OperationEvent::TrashUpserted(
-                                    undo_record
-                                        .as_ref()
-                                        .and_then(OperationRecord::trash_records)
-                                        .unwrap_or_default()
-                                        .to_vec(),
-                                ));
-                            }
-                            OperationRecord::Restore { records } => {
-                                cx.emit(OperationEvent::TrashRemoved(
-                                    records
-                                        .iter()
-                                        .map(|record| record.backing_path().to_path_buf())
-                                        .collect(),
-                                ));
-                            }
-                            _ => {}
-                        }
-                        cx.emit(OperationEvent::Applied {
-                            changes,
-                            reveal: vec![path],
-                            origin: Some(origin),
-                        });
-                        // The redo committed. Losing its record only costs Undo.
-                        if let Some(record) = undo_record {
-                            this.finish_redo(record);
-                        }
-                        Report::Success(format!("{message}{}", undo_note(undoable)))
+    fn finish_history(
+        &mut self,
+        direction: HistoryDirection,
+        record: OperationRecord,
+        outcome: MutationOutcome,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Report {
+        let step = match direction {
+            HistoryDirection::Undo => "undone",
+            HistoryDirection::Redo => "redone",
+        };
+        match outcome {
+            MutationOutcome::Committed(committed) => {
+                // A redo lands the item where it was; an undo only has
+                // somewhere to point at for a rename.
+                let reveal = match direction {
+                    HistoryDirection::Undo if !matches!(record, OperationRecord::Rename { .. }) => {
+                        Vec::new()
                     }
-                    MutationOutcome::Unchanged(error) => {
-                        this.cancel_redo(operation);
-                        Report::Error(error.to_string())
-                    }
-                    MutationOutcome::Discarded { changes, error } => {
-                        cx.emit(OperationEvent::Applied {
-                            changes,
-                            reveal: Vec::new(),
-                            origin: Some(origin),
-                        });
-                        Report::Error(format!("{error}; this operation can no longer be redone"))
-                    }
+                    _ => vec![committed.path().to_path_buf()],
                 };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                let changes = committed.changes().clone();
+                let message = history_message(&record, direction);
+                let reversible = committed.is_undoable();
+                let next = committed.into_record();
+                // A Trash view reconciles from the records themselves: what
+                // this step took out of the Trash, or what it put in.
+                if let Some(records) = record.trash_records() {
+                    let leaves_trash = matches!(
+                        (&record, direction),
+                        (OperationRecord::Trash { .. }, HistoryDirection::Undo)
+                            | (OperationRecord::Restore { .. }, HistoryDirection::Redo)
+                    );
+                    cx.emit(if leaves_trash {
+                        OperationEvent::TrashRemoved(backing_paths(records))
+                    } else {
+                        OperationEvent::TrashUpserted(
+                            next.as_ref()
+                                .and_then(OperationRecord::trash_records)
+                                .unwrap_or_default()
+                                .to_vec(),
+                        )
+                    });
+                }
+                self.applied(changes, reveal, origin, cx);
+                // The step committed. Losing its record only costs the
+                // reverse step, so never report the step itself as failed.
+                if let Some(next) = next {
+                    self.journal.finish(direction, next);
+                }
+                Report::Success(format!(
+                    "{message}{}",
+                    history_note(direction.opposite(), reversible)
+                ))
+            }
+            // Nothing reached the disk, so the record still describes it
+            // exactly and the user can fix the obstacle and retry.
+            MutationOutcome::Unchanged(error) => {
+                self.journal.cancel(direction, record);
+                Report::Error(error.to_string())
+            }
+            // The step crossed its commit point. Whatever compensation
+            // achieved, the record's identities predate it, so keeping it
+            // would only produce a "changed or was replaced" refusal later
+            // that blamed the user for Marcel's own recovery.
+            MutationOutcome::Discarded { changes, error } => {
+                self.applied(changes, Vec::new(), origin, cx);
+                Report::Error(format!("{error}; this operation can no longer be {step}"))
+            }
+        }
     }
 
     pub fn start_trash(
@@ -833,52 +725,41 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        if paths.is_empty() || !self.begin_simple() {
+        if paths.is_empty() || self.begin(None).is_none() {
             return;
         }
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || trash_paths(&paths)));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let outcome = task.await;
-            let report = this.update(cx, |this, cx| {
-                let changes = DirectoryChanges {
-                    removed: outcome.completed.clone(),
-                    ..DirectoryChanges::default()
-                };
-                if !outcome.records.is_empty() {
+        self.run(
+            origin,
+            cx,
+            move || trash_paths(&paths),
+            move |this, mut outcome, cx| {
+                let records = std::mem::take(&mut outcome.records);
+                if !records.is_empty() {
                     // A window browsing Trash gains the new entries, and the
                     // journal keeps its own copy for Undo.
-                    cx.emit(OperationEvent::TrashUpserted(outcome.records.clone()));
-                    this.record(OperationRecord::Trash {
-                        records: outcome.records,
-                    });
+                    cx.emit(OperationEvent::TrashUpserted(records.clone()));
+                    this.record(OperationRecord::Trash { records });
                 }
-                cx.emit(OperationEvent::Applied {
-                    changes,
-                    reveal: Vec::new(),
-                    origin: Some(origin),
-                });
-                let report = if outcome.failures.is_empty() {
+                this.applied(
+                    DirectoryChanges::removed(outcome.completed.clone()),
+                    Vec::new(),
+                    origin,
+                    cx,
+                );
+                Some(if outcome.failures.is_empty() {
                     Report::Success(format!(
                         "Moved {} item(s) to Trash",
                         outcome.completed.len()
                     ))
                 } else {
-                    let mut message = summarize_trash_failures(&outcome.failures);
+                    let mut message = outcome.summarize_failures();
                     if outcome.undo_unavailable {
                         message.push_str("; some successful items are not available to Undo");
                     }
                     Report::Error(message)
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                })
+            },
+        );
     }
 
     pub fn start_restore(
@@ -887,25 +768,21 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        if records.is_empty() || !self.begin_simple() {
+        if records.is_empty() || self.begin(None).is_none() {
             return;
         }
         let count = records.len();
-        let backing_paths = records
-            .iter()
-            .map(|record| record.backing_path().to_path_buf())
-            .collect::<Vec<_>>();
+        let backing = backing_paths(&records);
         let restored_paths = records
             .iter()
             .map(|record| record.original_path().to_path_buf())
             .collect::<Vec<_>>();
-        let task = cx
-            .background_executor()
-            .spawn(smol::unblock(move || restore_trash_records(&records)));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
-                let report = match result {
+        self.run(
+            origin,
+            cx,
+            move || restore_trash_records(&records),
+            move |this, result, cx| {
+                Some(match result {
                     Ok(restored) => {
                         // The payloads are restored. Losing the journal entry
                         // only costs Undo; the Trash view must still update.
@@ -915,16 +792,17 @@ impl OperationCoordinator {
                                 records: restored.records,
                             });
                         }
-                        cx.emit(OperationEvent::TrashRemoved(backing_paths));
-                        cx.emit(OperationEvent::Applied {
-                            changes: DirectoryChanges {
-                                upserted: restored_paths,
-                                ..DirectoryChanges::default()
-                            },
-                            reveal: Vec::new(),
-                            origin: Some(origin),
-                        });
-                        Report::Success(format!("Restored {count} item(s){}", undo_note(undoable)))
+                        cx.emit(OperationEvent::TrashRemoved(backing));
+                        this.applied(
+                            DirectoryChanges::upserted(restored_paths),
+                            Vec::new(),
+                            origin,
+                            cx,
+                        );
+                        Report::Success(format!(
+                            "Restored {count} item(s){}",
+                            history_note(HistoryDirection::Undo, undoable)
+                        ))
                     }
                     Err(failure) => {
                         if failure.committed {
@@ -935,15 +813,9 @@ impl OperationCoordinator {
                         }
                         Report::Error(failure.error.to_string())
                     }
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                })
+            },
+        );
     }
 
     pub fn start_permanent_delete(
@@ -957,71 +829,65 @@ impl OperationCoordinator {
         let source_count = trash_records
             .as_ref()
             .map_or(paths.len(), |records| records.len());
-        let Some(progress) = self.begin_permanent_delete(kind, source_count) else {
+        let card = ProgressCard {
+            kind,
+            source_count,
+            detail: "This cannot be undone".to_string(),
+            cancellable: false,
+        };
+        if source_count == 0 {
+            return;
+        }
+        let Some(started) = self.begin(Some(card)) else {
             return;
         };
-        self.start_progress_refresh(cx);
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            if let Some(records) = trash_records {
-                PermanentDeleteResult::Trash(purge_trash_records(&records, progress))
-            } else {
-                PermanentDeleteResult::Files(delete_paths(&paths, progress))
-            }
-        }));
-        let operation_task = cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let report = this.update(cx, |this, cx| {
+        self.run(
+            origin,
+            cx,
+            move || match trash_records {
+                Some(records) => {
+                    PermanentDeleteResult::Trash(purge_trash_records(&records, started.progress))
+                }
+                None => PermanentDeleteResult::Files(delete_paths(&paths, started.progress)),
+            },
+            move |this, result, cx| {
                 let (completed, failure) = match result {
                     PermanentDeleteResult::Files(outcome) => {
-                        let failure = (!outcome.failures.is_empty())
-                            .then(|| summarize_delete_failures(&outcome.failures));
-                        cx.emit(OperationEvent::Applied {
-                            changes: DirectoryChanges {
-                                removed: outcome.completed.clone(),
-                                ..DirectoryChanges::default()
-                            },
-                            reveal: Vec::new(),
-                            origin: Some(origin),
-                        });
+                        let failure =
+                            (!outcome.failures.is_empty()).then(|| outcome.summarize_failures());
+                        this.applied(
+                            DirectoryChanges::removed(outcome.completed.clone()),
+                            Vec::new(),
+                            origin,
+                            cx,
+                        );
                         (outcome.completed.len(), failure)
                     }
                     PermanentDeleteResult::Trash(outcome) => {
-                        let failure = (!outcome.failures.is_empty())
-                            .then(|| summarize_trash_failures(&outcome.failures));
+                        let failure =
+                            (!outcome.failures.is_empty()).then(|| outcome.summarize_failures());
                         // Reconcile the Trash view from the exact purged
                         // records. Matching by original path removed a
                         // surviving twin entry — the same file trashed twice —
                         // from the listing when only one purge succeeded.
-                        cx.emit(OperationEvent::TrashRemoved(
-                            outcome
-                                .records
-                                .iter()
-                                .map(|record| record.backing_path().to_path_buf())
-                                .collect(),
-                        ));
+                        cx.emit(OperationEvent::TrashRemoved(backing_paths(
+                            &outcome.records,
+                        )));
                         (outcome.completed.len(), failure)
                     }
                 };
-                let report = if let Some(failure) = failure {
-                    Report::Error(if completed > 0 {
-                        format!("Permanently deleted {completed} item(s); {failure}")
-                    } else {
-                        failure
-                    })
-                } else {
-                    Report::Success(match kind {
+                Some(match failure {
+                    Some(failure) if completed > 0 => Report::Error(format!(
+                        "Permanently deleted {completed} item(s); {failure}"
+                    )),
+                    Some(failure) => Report::Error(failure),
+                    None => Report::Success(match kind {
                         OperationProgressKind::EmptyTrash => "Trash emptied".to_string(),
                         _ => format!("Permanently deleted {completed} item(s)"),
-                    })
-                };
-                this.finish_active();
-                cx.notify();
-                report
-            });
-            surface::deliver(origin, report.ok(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+                    }),
+                })
+            },
+        );
     }
 
     pub fn start_transfer(
@@ -1033,13 +899,13 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let Some((cancel, progress)) =
-            self.begin_transfer(mode, sources.len(), destination.clone())
-        else {
+        if sources.is_empty() {
+            return;
+        }
+        let card = ProgressCard::transfer(mode, sources.len(), &destination);
+        let Some(started) = self.begin(Some(card)) else {
             return;
         };
-        self.operation_origin = Some(origin);
-        self.start_progress_refresh(cx);
         // Questions arrive one at a time: the transfer thread waits for each
         // answer, so a second conflict cannot be raised while the first is on
         // screen.
@@ -1065,46 +931,38 @@ impl OperationCoordinator {
             }
         })
         .detach();
-        let task = cx.background_executor().spawn(smol::unblock(move || {
-            let mut policy = ConflictPolicy::interactive(resolver);
-            transfer_paths_with_conflicts(
-                &sources,
-                &destination,
-                mode,
-                cancel,
-                progress,
-                &mut policy,
-            )
-        }));
 
-        let operation_task = cx.spawn(async move |this, cx| {
-            let outcome = task.await;
-            let report = this.update(cx, |this, cx| {
+        self.run(
+            origin,
+            cx,
+            move || {
+                let mut policy = ConflictPolicy::interactive(resolver);
+                transfer_paths_with_conflicts(
+                    &sources,
+                    &destination,
+                    mode,
+                    started.cancel,
+                    started.progress,
+                    &mut policy,
+                )
+            },
+            move |this, mut outcome, cx| {
                 // Reconcile from the exact recorded transfers. Deriving this
                 // from the undo record instead dropped every item that
                 // committed without one, leaving a moved source on screen
                 // until a watcher event corrected it.
-                let changes = transfer_changes(&outcome, mode);
+                let changes = outcome.changes(mode);
                 let reveal = outcome.completed_destinations();
-                if let Some(operation) = outcome.operation {
+                if let Some(operation) = outcome.operation.take() {
                     this.record(operation);
                 }
-
                 if mode == TransferMode::Move
                     && !outcome.completed.is_empty()
                     && let Some(clipboard) = clipboard
                 {
                     this.retain_uncompleted_move(clipboard, &outcome.completed);
                 }
-
-                cx.emit(OperationEvent::Applied {
-                    changes,
-                    reveal,
-                    origin: Some(origin),
-                });
-
-                this.finish_active();
-                cx.notify();
+                this.applied(changes, reveal, origin, cx);
 
                 // Dropping a selection onto the folder it already lives in asks
                 // for nothing. Announcing "Moved 0 items" would answer a
@@ -1117,7 +975,6 @@ impl OperationCoordinator {
                 {
                     return None;
                 }
-
                 Some(if outcome.failures.is_empty() {
                     let verb = match mode {
                         TransferMode::Copy => "Copied",
@@ -1130,26 +987,30 @@ impl OperationCoordinator {
                     Report::Success(format!(
                         "{verb} {} item(s){skipped}{}",
                         outcome.completed.len(),
-                        undo_note(!outcome.undo_unavailable)
+                        history_note(HistoryDirection::Undo, !outcome.undo_unavailable)
                     ))
                 } else {
-                    let mut message = summarize_failures(&outcome.failures);
+                    let mut message = outcome.summarize_failures();
                     if outcome.undo_unavailable {
                         message.push_str("; some completed items are not available to Undo");
                     }
                     Report::Error(message)
                 })
-            });
-            surface::deliver(origin, report.ok().flatten(), cx);
-        });
-        self.set_task(operation_task);
-        cx.notify();
+            },
+        );
     }
 }
 
 enum PermanentDeleteResult {
     Files(DeleteOutcome),
     Trash(TrashOutcome),
+}
+
+fn backing_paths(records: &[TrashRecord]) -> Vec<PathBuf> {
+    records
+        .iter()
+        .map(|record| record.backing_path().to_path_buf())
+        .collect()
 }
 
 /// Ask the user about one destination conflict.
@@ -1220,14 +1081,25 @@ fn ask_about_conflict(
                 }
             }
         };
+        // Each button answers and dismisses on its own rather than sitting
+        // inside a DialogClose wrapper. The wrapper closes on a click of its
+        // own surrounding element, which a button with its own handler never
+        // delivers — so every answer was sent while the dialog stayed on
+        // screen, and the next conflict opened another one on top of it.
+        let answer_button = |id: &'static str, label: &'static str, response: ConflictResponse| {
+            let answer = answer.clone();
+            Button::new(id)
+                .label(label)
+                .outline()
+                .on_click(move |_, window, cx| {
+                    answer(response.clone());
+                    window.close_dialog(cx);
+                })
+        };
         let toggle = apply_to_all.clone();
         let redraw = coordinator.clone();
-        let (skip, replace, rename, cancel) = (
-            answer.clone(),
-            answer.clone(),
-            answer.clone(),
-            answer.clone(),
-        );
+        let rename = answer.clone();
+        let replace = answer.clone();
 
         dialog
             .title(if request.destination_is_directory {
@@ -1268,31 +1140,18 @@ fn ask_about_conflict(
                             }),
                     ),
             )
-            // Each button answers and dismisses on its own rather than sitting
-            // inside a DialogClose wrapper. The wrapper closes on a click of
-            // its own surrounding element, which a button with its own handler
-            // never delivers — so every answer was sent while the dialog stayed
-            // on screen, and the next conflict opened another one on top of it.
             .footer(
                 DialogFooter::new()
-                    .child(
-                        Button::new("conflict-cancel")
-                            .label("Cancel")
-                            .outline()
-                            .on_click(move |_, window, cx| {
-                                cancel(ConflictResponse::Cancel);
-                                window.close_dialog(cx);
-                            }),
-                    )
-                    .child(
-                        Button::new("conflict-skip")
-                            .label("Skip")
-                            .outline()
-                            .on_click(move |_, window, cx| {
-                                skip(ConflictResponse::Skip);
-                                window.close_dialog(cx);
-                            }),
-                    )
+                    .child(answer_button(
+                        "conflict-cancel",
+                        "Cancel",
+                        ConflictResponse::Cancel,
+                    ))
+                    .child(answer_button(
+                        "conflict-skip",
+                        "Skip",
+                        ConflictResponse::Skip,
+                    ))
                     .child(
                         Button::new("conflict-rename")
                             .label("Rename")
@@ -1332,12 +1191,13 @@ fn ask_about_conflict(
     input.update(cx, |input, cx| input.focus(window, cx));
 }
 
-fn operation_history_message(operation: &OperationRecord, redo: bool) -> String {
+fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> String {
     let name = operation
         .path()
         .file_name()
         .map(|name| name.to_string_lossy())
         .unwrap_or_default();
+    let redo = direction == HistoryDirection::Redo;
     match (operation, redo) {
         (OperationRecord::CreateDirectory { .. }, false) => {
             format!("Undid creation of “{name}”")
@@ -1360,13 +1220,7 @@ fn operation_history_message(operation: &OperationRecord, redo: bool) -> String 
                 .unwrap_or_default();
             format!("Restored name “{original}”")
         }
-        (OperationRecord::Rename { destination, .. }, true) => {
-            let renamed = destination
-                .file_name()
-                .map(|name| name.to_string_lossy())
-                .unwrap_or_default();
-            format!("Renamed to “{renamed}” again")
-        }
+        (OperationRecord::Rename { .. }, true) => format!("Renamed to “{name}” again"),
         (OperationRecord::ArchiveCreate { .. }, false) => {
             format!("Removed created ZIP “{name}”")
         }
@@ -1382,37 +1236,26 @@ fn operation_history_message(operation: &OperationRecord, redo: bool) -> String 
     }
 }
 
-/// Suffix used when a mutation committed but its undo record was lost. Marcel
-/// reports that as success with a caveat, never as a failed operation.
-fn undo_note(undoable: bool) -> &'static str {
-    if undoable {
-        ""
-    } else {
-        " · not available to Undo"
-    }
-}
-
-fn redo_note(redoable: bool) -> &'static str {
-    if redoable {
-        ""
-    } else {
-        " · not available to Redo"
+/// Suffix used when a mutation committed but its record for the next step was
+/// lost. Marcel reports that as success with a caveat, never as a failed
+/// operation.
+fn history_note(next: HistoryDirection, available: bool) -> &'static str {
+    match (next, available) {
+        (_, true) => "",
+        (HistoryDirection::Undo, false) => " · not available to Undo",
+        (HistoryDirection::Redo, false) => " · not available to Redo",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_ops::create_directory;
 
     #[test]
     fn busy_and_cancel_transitions_are_explicit() {
         let mut coordinator = OperationCoordinator::default();
-        assert!(
-            coordinator
-                .begin_transfer(TransferMode::Copy, 1, PathBuf::from("/destination"))
-                .is_some()
-        );
+        let card = ProgressCard::transfer(TransferMode::Copy, 1, &PathBuf::from("/d"));
+        assert!(coordinator.begin(Some(card)).is_some());
         assert!(coordinator.is_busy());
         assert!(coordinator.request_cancel());
         assert!(coordinator.is_cancelling());
@@ -1428,36 +1271,29 @@ mod tests {
     #[test]
     fn one_running_operation_locks_out_every_other_surface() {
         let mut coordinator = OperationCoordinator::default();
-        assert!(
-            coordinator
-                .begin_transfer(TransferMode::Move, 2, PathBuf::from("/destination"))
-                .is_some()
-        );
+        let card = ProgressCard::transfer(TransferMode::Move, 2, &PathBuf::from("/d"));
+        assert!(coordinator.begin(Some(card)).is_some());
 
-        assert!(
-            coordinator
-                .begin_transfer(TransferMode::Copy, 1, PathBuf::from("/elsewhere"))
-                .is_none()
-        );
-        assert!(!coordinator.begin_simple());
-        assert!(
-            coordinator
-                .begin_archive(OperationProgressKind::Compress, 1, String::new())
-                .is_none()
-        );
-        assert!(
-            coordinator
-                .begin_permanent_delete(OperationProgressKind::Delete, 1)
-                .is_none()
-        );
-        assert!(coordinator.begin_undo().is_none());
+        let other = ProgressCard::transfer(TransferMode::Copy, 1, &PathBuf::from("/e"));
+        assert!(coordinator.begin(Some(other)).is_none());
+        assert!(coordinator.begin(None).is_none());
 
         coordinator.finish_active();
-        assert!(coordinator.begin_simple());
+        assert!(coordinator.begin(None).is_some());
+    }
+
+    /// An operation that never shows a card is not cancellable: there is no
+    /// flag for Escape to set, so it cannot be aborted halfway.
+    #[test]
+    fn an_instantaneous_operation_cannot_be_cancelled() {
+        let mut coordinator = OperationCoordinator::default();
+        assert!(coordinator.begin(None).is_some());
+        assert!(!coordinator.request_cancel());
+        assert!(coordinator.progress().is_none());
     }
 
     #[test]
-    fn undo_and_redo_reserve_the_coordinator_until_finished() {
+    fn undo_and_redo_reserve_the_journal_until_finished() {
         let root = tempfile::tempdir().unwrap();
         let operation = create_directory(root.path(), "created")
             .unwrap()
@@ -1466,32 +1302,21 @@ mod tests {
         let mut coordinator = OperationCoordinator::default();
         coordinator.record(operation.clone());
 
-        assert_eq!(coordinator.begin_undo(), Some(operation.clone()));
-        assert!(coordinator.is_busy());
-        coordinator.finish_undo(operation.clone());
-        coordinator.finish_active();
-
-        assert_eq!(coordinator.begin_redo(), Some(operation));
-        assert!(coordinator.is_busy());
-    }
-
-    /// History belongs to the application. A record written while one window
-    /// was open is still the next Undo after that window is gone, because the
-    /// journal never belonged to the window in the first place.
-    #[test]
-    fn history_outlives_the_surface_that_created_it() {
-        let root = tempfile::tempdir().unwrap();
-        let operation = create_directory(root.path(), "created")
-            .unwrap()
-            .into_record()
-            .expect("creating a directory retains undo");
-        let mut coordinator = OperationCoordinator::default();
-        coordinator.record(operation.clone());
-
-        // Whatever surface asked for it has gone; nothing about the coordinator
-        // changes.
+        // History belongs to the application. Whatever surface asked for it
+        // has gone; nothing about the coordinator changes.
         assert!(coordinator.can_undo());
-        assert_eq!(coordinator.begin_undo(), Some(operation));
+        assert_eq!(
+            coordinator.journal.begin(HistoryDirection::Undo),
+            Some(operation.clone())
+        );
+        assert!(!coordinator.can_undo());
+        coordinator
+            .journal
+            .finish(HistoryDirection::Undo, operation.clone());
+        assert_eq!(
+            coordinator.journal.begin(HistoryDirection::Redo),
+            Some(operation)
+        );
     }
 
     #[test]

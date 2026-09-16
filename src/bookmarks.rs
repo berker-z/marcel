@@ -18,7 +18,10 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Task};
 use url::Url;
 
-use crate::surface::{self, Report};
+use crate::{
+    config,
+    surface::{self, Report},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bookmark {
@@ -33,18 +36,6 @@ impl Bookmark {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| self.path.display().to_string())
     }
-}
-
-pub fn default_path(home: &Path) -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        // The XDG base-directory spec says a relative value must be ignored;
-        // honoring one would scatter the user's bookmarks across whatever
-        // directory Marcel happened to be launched from.
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".config"))
-        .join("marcel")
-        .join("bookmarks")
 }
 
 /// What one read of the bookmark file produced.
@@ -99,55 +90,39 @@ pub fn load(path: &Path) -> Result<LoadedBookmarks> {
 }
 
 pub fn save(path: &Path, bookmarks: &[Bookmark]) -> Result<()> {
-    // Resolve a symlinked bookmark file to its target: `persist` is a rename,
-    // and renaming over the link would silently replace the user's link (to a
-    // dotfiles repository, say) with a regular file.
-    let path = &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let parent = path
-        .parent()
-        .context("Bookmark file has no parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("Could not create “{}”", parent.display()))?;
-    // Bookmarks are user data, and every window runs its own save task under
-    // the same process id. Reserve the temporary file atomically so two
-    // windows cannot interleave writes into one predictable path.
-    let mut file = tempfile::NamedTempFile::new_in(parent).with_context(|| {
-        format!(
-            "Could not create a temporary file in “{}”",
-            parent.display()
-        )
-    })?;
-    for bookmark in bookmarks {
-        if !bookmark.path.is_absolute() {
-            bail!(
-                "Cannot save relative bookmark “{}”",
-                bookmark.path.display()
-            );
+    config::write_atomically(path, |file| {
+        for bookmark in bookmarks {
+            if !bookmark.path.is_absolute() {
+                bail!(
+                    "Cannot save relative bookmark “{}”",
+                    bookmark.path.display()
+                );
+            }
+            let url = Url::from_file_path(&bookmark.path)
+                .map_err(|_| anyhow::anyhow!("Invalid bookmark “{}”", bookmark.path.display()))?;
+            writeln!(file, "{url}")?;
         }
-        let url = Url::from_file_path(&bookmark.path)
-            .map_err(|_| anyhow::anyhow!("Invalid bookmark “{}”", bookmark.path.display()))?;
-        writeln!(file, "{url}")?;
-    }
-    file.as_file()
-        .sync_all()
-        .with_context(|| format!("Could not flush bookmarks for “{}”", path.display()))?;
-    file.persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("Could not update “{}”", path.display()))?;
-    crate::state::sync_directory(parent);
-    Ok(())
+        Ok(())
+    })
 }
 
-pub fn add(bookmarks: &mut Vec<Bookmark>, path: PathBuf) -> bool {
-    if !path.is_absolute() || bookmarks.iter().any(|bookmark| bookmark.path == path) {
+/// Move the bookmark at `from` to the slot before `insertion`, saying whether
+/// the list changed.
+pub fn reorder(bookmarks: &mut Vec<Bookmark>, from: usize, insertion: usize) -> bool {
+    if from >= bookmarks.len() || insertion > bookmarks.len() {
         return false;
     }
-    bookmarks.push(Bookmark { path });
+    let adjusted = if from < insertion {
+        insertion - 1
+    } else {
+        insertion
+    };
+    if adjusted == from {
+        return false;
+    }
+    let bookmark = bookmarks.remove(from);
+    bookmarks.insert(adjusted, bookmark);
     true
-}
-
-pub fn remove(bookmarks: &mut Vec<Bookmark>, index: usize) -> Option<Bookmark> {
-    (index < bookmarks.len()).then(|| bookmarks.remove(index))
 }
 
 struct GlobalBookmarks(Entity<BookmarkStore>);
@@ -159,7 +134,7 @@ pub fn global(home: &Path, cx: &mut App) -> Entity<BookmarkStore> {
     if let Some(existing) = cx.try_global::<GlobalBookmarks>() {
         return existing.0.clone();
     }
-    let store = cx.new(|cx| BookmarkStore::load(default_path(home), cx));
+    let store = cx.new(|cx| BookmarkStore::load(config::path(home, "bookmarks"), cx));
     cx.set_global(GlobalBookmarks(store.clone()));
     store
 }
@@ -186,7 +161,7 @@ impl BookmarkStore {
         let load_path = path.clone();
         let loaded = cx.background_executor().spawn(smol::unblock(move || {
             let loaded = load(&load_path)?;
-            let mut icon_provider = crate::icons::IconProvider::discover();
+            let mut icon_provider = crate::desktop::icons::IconProvider::discover();
             let icons = loaded
                 .bookmarks
                 .iter()
@@ -238,24 +213,25 @@ impl BookmarkStore {
         }
     }
 
-    /// Why a mutation cannot be accepted right now, if it cannot.
+    /// Refuse a mutation while the list is not the user's list yet, telling
+    /// them why on the window that asked.
     ///
-    /// While the load is still running the in-memory list is not the user's
-    /// list yet, and a save would overwrite the file with whatever slice of it
-    /// has been observed so far.
-    fn unavailable_reason(&self) -> Option<String> {
-        if self.loading {
-            return Some("Bookmarks are still loading; try again in a moment".to_string());
-        }
-        self.read_only.clone()
-    }
-
-    /// Refuse a mutation, telling the user why on the window that asked.
-    fn refuse(&self, reason: String, origin: AnyWindowHandle, cx: &mut Context<Self>) {
+    /// While the load is still running a save would overwrite the file with
+    /// whatever slice of it has been observed so far.
+    fn writable(&self, origin: AnyWindowHandle, cx: &mut Context<Self>) -> bool {
+        let reason = if self.loading {
+            Some("Bookmarks are still loading; try again in a moment".to_string())
+        } else {
+            self.read_only.clone()
+        };
+        let Some(reason) = reason else {
+            return true;
+        };
         cx.spawn(async move |_, cx| {
             surface::deliver(origin, Some(Report::Error(reason)), cx);
         })
         .detach();
+        false
     }
 
     pub fn bookmarks(&self) -> &[Bookmark] {
@@ -280,23 +256,22 @@ impl BookmarkStore {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
-        if let Some(reason) = self.unavailable_reason() {
-            self.refuse(reason, origin, cx);
+        if !self.writable(origin, cx) {
             return None;
         }
         let mut added = 0;
         for (path, icon) in paths {
-            if !add(&mut self.bookmarks, path.clone()) {
+            if !path.is_absolute() || self.bookmarks.iter().any(|b| &b.path == path) {
                 continue;
             }
+            self.bookmarks.push(Bookmark { path: path.clone() });
             if let Some(icon) = icon {
                 self.icons.insert(path.clone(), icon.clone());
             }
             added += 1;
         }
         if added > 0 {
-            self.start_save(origin, cx);
-            cx.notify();
+            self.changed(origin, cx);
         }
         Some(added)
     }
@@ -314,21 +289,12 @@ impl BookmarkStore {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Option<Bookmark> {
-        if let Some(reason) = self.unavailable_reason() {
-            self.refuse(reason, origin, cx);
+        if !self.writable(origin, cx) || !self.still_at(index, expected) {
             return None;
         }
-        if self
-            .bookmarks
-            .get(index)
-            .is_none_or(|bookmark| bookmark.path != expected)
-        {
-            return None;
-        }
-        let bookmark = remove(&mut self.bookmarks, index)?;
+        let bookmark = self.bookmarks.remove(index);
         self.icons.remove(&bookmark.path);
-        self.start_save(origin, cx);
-        cx.notify();
+        self.changed(origin, cx);
         Some(bookmark)
     }
 
@@ -342,23 +308,25 @@ impl BookmarkStore {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(reason) = self.unavailable_reason() {
-            self.refuse(reason, origin, cx);
-            return false;
-        }
-        if self
-            .bookmarks
-            .get(from)
-            .is_none_or(|bookmark| bookmark.path != dragged)
+        if !self.writable(origin, cx)
+            || !self.still_at(from, dragged)
+            || !reorder(&mut self.bookmarks, from, insertion)
         {
             return false;
         }
-        if !reorder(&mut self.bookmarks, from, insertion) {
-            return false;
-        }
+        self.changed(origin, cx);
+        true
+    }
+
+    fn still_at(&self, index: usize, expected: &Path) -> bool {
+        self.bookmarks
+            .get(index)
+            .is_some_and(|bookmark| bookmark.path == expected)
+    }
+
+    fn changed(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
         self.start_save(origin, cx);
         cx.notify();
-        true
     }
 
     /// Write the current list, then write again if it moved on while saving.
@@ -403,24 +371,6 @@ impl BookmarkStore {
             surface::deliver(origin, report.ok().flatten(), cx);
         }));
     }
-}
-
-pub fn reorder(bookmarks: &mut Vec<Bookmark>, from: usize, insertion: usize) -> bool {
-    if from >= bookmarks.len() || insertion > bookmarks.len() {
-        return false;
-    }
-    let bookmark = bookmarks.remove(from);
-    let adjusted = if from < insertion {
-        insertion.saturating_sub(1)
-    } else {
-        insertion
-    };
-    if adjusted == from {
-        bookmarks.insert(from, bookmark);
-        return false;
-    }
-    bookmarks.insert(adjusted, bookmark);
-    true
 }
 
 #[cfg(test)]
@@ -516,11 +466,13 @@ mod tests {
             bookmarks.iter().map(Bookmark::label).collect::<Vec<_>>(),
             ["a", "b", "c"]
         );
-
-        assert_eq!(remove(&mut bookmarks, 1).unwrap().label(), "b");
-        assert_eq!(
-            bookmarks.iter().map(Bookmark::label).collect::<Vec<_>>(),
-            ["a", "c"]
+        assert!(
+            !reorder(&mut bookmarks, 1, 1),
+            "a no-op slot changes nothing"
+        );
+        assert!(
+            !reorder(&mut bookmarks, 1, 2),
+            "the slot after itself is the same place"
         );
     }
 }

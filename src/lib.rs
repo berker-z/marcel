@@ -1,43 +1,29 @@
-mod app;
-pub mod archive_ops;
-mod bookmarks;
-pub mod commands;
-pub mod conflict;
-mod delete_ops;
-#[cfg(target_os = "linux")]
-pub mod desktop_integration;
-pub mod directory_session;
-mod directory_watcher;
-mod drag_controller;
-#[cfg(target_os = "linux")]
-pub mod file_chooser;
-pub mod file_ops;
-pub mod fs;
-mod history;
-mod icons;
-pub mod identity;
-mod image_preview;
-pub mod launch;
-mod local_fs;
-pub mod operations;
-mod pdf_preview;
-pub mod picker;
-mod picker_state;
-mod places;
-pub mod preview;
-mod preview_controller;
-pub mod selection;
-mod sidebar_controller;
-mod state;
-pub mod surface;
-#[cfg(target_os = "linux")]
-mod system_open;
-#[cfg(target_os = "linux")]
-mod system_terminal;
-pub mod theme;
-mod thumbnails;
-mod trash_ops;
-pub mod window;
-mod window_ui_state;
+//! Marcel, a preview-first graphical file explorer.
+//!
+//! The crate reads top-down:
+//!
+//! - [`app`] is the window: what it holds, what it does, and how it draws.
+//! - [`browse`] is the model a window shows — entries, projection, selection,
+//!   history — kept current by a watcher.
+//! - [`operations`] is the application's one owner of mutations; [`fsops`]
+//!   is how each mutation is carried out safely.
+//! - [`preview`] decodes what the preview pane shows.
+//! - [`desktop`] is everything outside the process: the bus, the portal,
+//!   launches, other applications, icon themes.
+//! - [`window`], [`surface`], [`theme`], [`fonts`], [`config`] and
+//!   [`bookmarks`] are the small application-wide services the rest lean on.
 
-pub use app::Marcel;
+mod app;
+pub mod bookmarks;
+pub mod browse;
+pub mod config;
+pub mod desktop;
+pub mod fonts;
+pub mod fsops;
+pub mod operations;
+pub mod preview;
+pub mod surface;
+pub mod theme;
+pub mod window;
+
+pub use app::{Marcel, init_key_bindings};

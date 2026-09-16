@@ -1,26 +1,24 @@
 //! Marcel's windows, and who owns the list of them.
 //!
-//! [`Sprint 19`](../docs/sprints/019-application-global-operations.md) moved
-//! operations and user data off the window and onto the application. This is the
-//! same move for the windows themselves: opening one was a private detail of
-//! `main.rs`, which meant the only way to get a second one was a D-Bus request,
-//! and a list `main.rs` maintained by hand would go stale the moment a window
-//! could come from anywhere else.
-//!
-//! The registry lives on the application, so a window opened from a context menu
-//! and a window opened by a desktop request are the same kind of thing.
+//! Operations and user data belong to the application rather than to the
+//! window that started them, and so do the windows themselves: a window opened
+//! from a context menu and a window opened by a desktop request are the same
+//! kind of thing, registered in one place.
 
 use std::{path::PathBuf, sync::Arc, sync::OnceLock};
 
 use gpui::{
-    App, AppContext as _, Bounds, Entity, Global, Point, TitlebarOptions, WindowBounds,
+    App, AppContext as _, Bounds, Entity, Global, Point, TitlebarOptions, Window, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
 use gpui_component::Root;
 
 use crate::{
     Marcel,
-    picker::{PickerMode, PickerRequest, PickerResponse},
+    desktop::{
+        bus::APPLICATION_ID,
+        picker::{PickerMode, PickerRequest, PickerResponse},
+    },
 };
 
 /// The size a Marcel window opens at when nothing else decides for it.
@@ -34,10 +32,9 @@ const DEFAULT_WINDOW_SIZE: (f32, f32) = (1200.0, 760.0);
 /// preview pane hangs off the right edge. 900 leaves room for a sidebar wider
 /// than this machine's.
 ///
-/// This is a floor, not a fix: the panes should shrink instead of overflowing,
-/// which is `0.2` work. A floating desktop honours this and stops the user
-/// resizing into the broken layout; a tiling compositor is free to ignore it,
-/// so the layout still has to be made to shrink eventually.
+/// This is a floor, not a fix: the panes should shrink instead of overflowing.
+/// A floating desktop honours this and stops the user resizing into the broken
+/// layout; a tiling compositor is free to ignore it.
 const MIN_WINDOW_SIZE: (f32, f32) = (900.0, 480.0);
 
 /// How far each additional window steps down and to the right.
@@ -108,6 +105,40 @@ pub fn global(cx: &App) -> Entity<WindowRegistry> {
     cx.global::<GlobalWindows>().0.clone()
 }
 
+/// Open a Marcel window of `size` at `bounds`, titled `title`, with the view
+/// `build` makes for it.
+fn open_window(
+    title: &str,
+    bounds: Bounds<gpui::Pixels>,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<Marcel>,
+    cx: &mut App,
+) -> anyhow::Result<MarcelWindow> {
+    let mut view = None;
+    let handle = cx.open_window(
+        WindowOptions {
+            app_id: Some(APPLICATION_ID.to_string()),
+            icon: window_icon(),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.to_string().into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        |window, cx| {
+            window.set_window_title(title);
+            let marcel = build(window, cx);
+            view = Some(marcel.clone());
+            cx.new(|cx| Root::new(marcel, window, cx))
+        },
+    )?;
+    Ok(MarcelWindow {
+        handle,
+        view: view.expect("window builder must initialize Marcel"),
+    })
+}
+
 /// Open a window showing `path`, and register it.
 pub fn open(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
     let registry = global(cx);
@@ -123,37 +154,20 @@ pub fn open(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
     let Some(cascade) = cascade else {
         anyhow::bail!("Marcel already has {MAX_LIVE_WINDOWS} windows open; not opening more");
     };
-
     let (width, height) = DEFAULT_WINDOW_SIZE;
     let mut bounds = Bounds::centered(None, size(px(width), px(height)), cx);
     bounds.origin += Point::new(px(cascade), px(cascade));
 
-    let mut view = None;
-    let handle = cx.open_window(
-        WindowOptions {
-            app_id: Some(crate::desktop_integration::APPLICATION_ID.to_string()),
-            icon: window_icon(),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Marcel".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
+    let opened = open_window(
+        "Marcel",
+        bounds,
         |window, cx| {
-            window.set_window_title("Marcel");
             let marcel = cx.new(|cx| Marcel::new(path, window, cx));
             marcel.update(cx, |view, cx| view.focus_browser(window, cx));
-            view = Some(marcel.clone());
-            cx.new(|cx| Root::new(marcel, window, cx))
+            marcel
         },
+        cx,
     )?;
-
-    let opened = MarcelWindow {
-        handle,
-        view: view.expect("window builder must initialize Marcel"),
-    };
     registry.update(cx, |registry, _| registry.windows.push(opened.clone()));
     Ok(opened)
 }
@@ -173,37 +187,21 @@ pub fn open_picker(request: PickerRequest, cx: &mut App) -> anyhow::Result<()> {
         let _ = request.reply.try_send(PickerResponse::Closed);
         anyhow::bail!("Marcel already has {MAX_LIVE_PICKERS} file choosers open; not opening more");
     }
-
     let title = picker_title(&request);
     let closed = request.closed.clone();
     let (width, height) = PICKER_WINDOW_SIZE;
     let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
 
-    let mut view = None;
-    let handle = cx.open_window(
-        WindowOptions {
-            app_id: Some(crate::desktop_integration::APPLICATION_ID.to_string()),
-            icon: window_icon(),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(title.clone().into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
+    let opened = open_window(
+        &title,
+        bounds,
         |window, cx| {
-            window.set_window_title(&title);
             let marcel = cx.new(|cx| Marcel::new_picker(request, window, cx));
             marcel.update(cx, |view, cx| view.focus_picker(window, cx));
-            view = Some(marcel.clone());
-            cx.new(|cx| Root::new(marcel, window, cx))
+            marcel
         },
+        cx,
     )?;
-    let opened = MarcelWindow {
-        handle,
-        view: view.expect("window builder must initialize Marcel"),
-    };
     registry.update(cx, |registry, _| registry.pickers.push(opened.clone()));
 
     // The frontend withdraws a request whose caller went away. The window
@@ -235,26 +233,6 @@ fn picker_title(request: &PickerRequest) -> String {
         PickerMode::SaveFile => "Save File",
     }
     .to_string()
-}
-
-/// Whether a desktop request may take over a window the user is already using.
-///
-/// A launch may not. Somebody ran `marcel`, or picked Marcel to open a folder;
-/// they asked for Marcel to show them something, and answering by navigating the
-/// window they were reading loses their place and gives them nothing extra.
-///
-/// A reveal may. "Show me where this file is" is a request about a view that
-/// already exists — it is the one case where reusing the window in front of the
-/// user is the answer rather than a shortcut.
-pub fn may_reuse_a_window(request: &crate::desktop_integration::DesktopRequest) -> bool {
-    use crate::desktop_integration::DesktopRequest;
-
-    match request {
-        DesktopRequest::ShowItems(_) | DesktopRequest::ShowFolders(_) => true,
-        DesktopRequest::Open(_)
-        | DesktopRequest::Activate
-        | DesktopRequest::ShowItemProperties(_) => false,
-    }
 }
 
 impl WindowRegistry {
@@ -289,45 +267,20 @@ impl WindowRegistry {
 }
 
 pub fn window_icon() -> Option<Arc<image::RgbaImage>> {
-    static ICON: OnceLock<Arc<image::RgbaImage>> = OnceLock::new();
-    if let Some(icon) = ICON.get() {
-        return Some(icon.clone());
-    }
-    let icon = Arc::new(
-        image::load_from_memory(include_bytes!(
+    static ICON: OnceLock<Option<Arc<image::RgbaImage>>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        let icon = image::load_from_memory(include_bytes!(
             "../assets/icons/hicolor/256x256/apps/io.github.berker_z.Marcel.png"
         ))
-        .ok()?
-        .into_rgba8(),
-    );
-    let _ = ICON.set(icon.clone());
-    Some(icon)
+        .ok()?;
+        Some(Arc::new(icon.into_rgba8()))
+    })
+    .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop_integration::{DesktopRequest, RevealedLocation};
-
-    /// The defect this rule exists to prevent: running `marcel` while Marcel is
-    /// already open navigated the window the user was reading, or — with no
-    /// argument at all — raised it and ignored the folder they were standing in.
-    #[test]
-    fn a_launch_never_takes_over_a_window_and_a_reveal_may() {
-        let location = || RevealedLocation {
-            directory: PathBuf::from("/folder"),
-            items: Vec::new(),
-        };
-
-        assert!(!may_reuse_a_window(&DesktopRequest::Open(vec![location()])));
-        assert!(!may_reuse_a_window(&DesktopRequest::Activate));
-        assert!(may_reuse_a_window(&DesktopRequest::ShowItems(vec![
-            location()
-        ])));
-        assert!(may_reuse_a_window(&DesktopRequest::ShowFolders(vec![
-            PathBuf::from("/folder")
-        ])));
-    }
 
     /// A caller's title wins; without one the dialog says what it is for.
     #[test]
