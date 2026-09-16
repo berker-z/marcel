@@ -176,8 +176,9 @@ Cachix serves complete Nix builds with matching inputs. System configurations
 should consume `packages.<system>.marcel-rs` from this flake, retaining its
 own locked nixpkgs, to match the published cache. Applying the overlay against
 another nixpkgs revision can produce a different build. The cache workflow
-runs on release tags or manual dispatch; an ordinary development commit is
-not guaranteed to be cached. Development-shell and release builds have
+runs on every push to `master` as well as on release tags, so a commit is
+cached a few minutes after it lands; pinning a revision before its workflow
+has finished still means a local build. Development-shell and release builds have
 different profiles and do not share compiled Cargo artifacts.
 
 ## Credits

@@ -98,7 +98,8 @@ A Git tag or GitHub Release pins and presents a source version, but does not by
 itself stop Nix from compiling that source. Fast Nix installation requires a
 binary cache containing Marcel's exact Nix store output. Marcel's public Cachix
 cache workflow publishes the x86_64 package runtime closure and Crane's
-compiled-dependency artifacts from `v*` tags or explicit manual runs;
+compiled-dependency artifacts on every `master` push, on `v*` tags, and on
+manual runs;
 release CI separately validates the tagged package on both declared
 architectures. The intended pipeline is:
 

@@ -1,10 +1,13 @@
 name: cache
 
 # Keep the package Marcel's direct-flake users install in the public Cachix
-# cache. Like the release CI, this remains tag/manual-only and deliberately
-# publishes the x86_64 package and its reusable compiled dependencies.
+# cache. Unlike the release CI this runs on every master push, because the
+# maintainer's own system configuration tracks master and refuses to compile
+# an uncached revision. With Crane holding the compiled dependencies, an
+# application-only commit costs minutes here rather than a full GPUI build.
 on:
   push:
+    branches: ["master"]
     tags: ["v*"]
   workflow_dispatch:
 
