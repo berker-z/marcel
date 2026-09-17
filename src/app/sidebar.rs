@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, Div, ExternalPaths, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, ObjectFit, Pixels, Stateful, TextRun, Window, canvas, div, font,
-    img, px, relative,
+    AnyElement, ClickEvent, Context, CursorStyle, Div, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, ObjectFit, Pixels, Stateful, TextRun, Window, div, font, img, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, notification::Notification,
@@ -25,7 +24,7 @@ use super::{
     Marcel,
     menu::{clamp_to_window, menu_row, popover},
     navigation::unblock,
-    pointer::{BookmarkDrag, FileDrag, can_drop_files_on},
+    pointer::{BookmarkDrag, FileDrag, accept_file_drops, painted_bounds},
     state::{BookmarkMenu, ViewMode},
 };
 
@@ -211,13 +210,8 @@ impl Marcel {
     ) -> Stateful<Div> {
         let colors = cx.theme().colors;
         let busy = self.operations_busy(cx);
-        let (can_drop_path, drop_path, external_drop_path, navigate_path) = (
-            path.to_path_buf(),
-            path.to_path_buf(),
-            path.to_path_buf(),
-            path.to_path_buf(),
-        );
-        h_flex()
+        let navigate_path = path.to_path_buf();
+        let row = h_flex()
             .id(id)
             .relative()
             .w_full()
@@ -233,38 +227,27 @@ impl Marcel {
             .when(active, |this| {
                 this.bg(colors.sidebar_accent)
                     .text_color(colors.sidebar_accent_foreground)
-            })
-            .when(droppable, |this| {
-                this.can_drop(move |value, _, _| !busy && can_drop_files_on(value, &can_drop_path))
-                    .drag_over::<FileDrag>(move |style, _, _, _| {
-                        style
-                            .bg(colors.sidebar_accent)
-                            .border_1()
-                            .border_color(colors.primary)
-                    })
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style
-                            .bg(colors.sidebar_accent)
-                            .border_1()
-                            .border_color(colors.primary)
-                    })
-                    .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
-                        this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
-                    }))
-                    .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
-                        this.start_external_copy(
-                            drag.paths(),
-                            external_drop_path.clone(),
-                            window,
-                            cx,
-                        );
-                    }))
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        if !event.is_right_click() {
-                            this.navigate_to(navigate_path.clone(), true, cx);
-                        }
-                    }))
-            })
+            });
+        if !droppable {
+            return row;
+        }
+        accept_file_drops(
+            row,
+            path,
+            busy,
+            move |style| {
+                style
+                    .bg(colors.sidebar_accent)
+                    .border_1()
+                    .border_color(colors.primary)
+            },
+            cx,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            if !event.is_right_click() {
+                this.navigate_to(navigate_path.clone(), true, cx);
+            }
+        }))
     }
 
     /// gpui-component's Button centers its inner label by design and its
@@ -292,18 +275,11 @@ impl Marcel {
             .child(icon)
             .child(div().flex_none().text_base().child(place.label))
             .when(!is_trash, |this| {
-                this.child(
-                    canvas(
-                        move |bounds, _, _| {
-                            place_drop_bounds
-                                .borrow_mut()
-                                .insert(bounds_path.clone(), bounds);
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
+                this.child(painted_bounds(move |bounds| {
+                    place_drop_bounds
+                        .borrow_mut()
+                        .insert(bounds_path.clone(), bounds);
+                }))
             })
             .into_any_element()
     }
@@ -363,16 +339,9 @@ impl Marcel {
                             .text_base()
                             .child(bookmark.label()),
                     )
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                bookmark_row_bounds.borrow_mut().insert(index, bounds);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    ),
+                    .child(painted_bounds(move |bounds| {
+                        bookmark_row_bounds.borrow_mut().insert(index, bounds);
+                    })),
             )
             .into_any_element()
     }
@@ -577,14 +546,9 @@ impl Marcel {
                     })
                     .child(insertion_marker(final_insertion, &colors))
                     .child(div().flex_1())
-                    .child(
-                        canvas(
-                            move |bounds, _, _| bookmark_region_bounds.set(Some(bounds)),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    ),
+                    .child(painted_bounds(move |bounds| {
+                        bookmark_region_bounds.set(Some(bounds))
+                    })),
             )
             .child(
                 div().flex().flex_col().gap_3().child(hidden_switch).child(

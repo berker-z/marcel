@@ -13,7 +13,7 @@ use gpui::prelude::*;
 use gpui::{
     Bounds, Context, CursorStyle, DragMoveEvent, ExternalDragPayload, ExternalPaths, FileDragPaths,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Task, Window, div, px,
+    StyleRefinement, Task, Window, canvas, div, px,
 };
 use gpui_component::{ActiveTheme as _, h_flex};
 
@@ -164,6 +164,44 @@ pub(super) fn can_drop_files_on(value: &dyn Any, destination: &Path) -> bool {
         || value
             .downcast_ref::<ExternalPaths>()
             .is_some_and(|drag| can_accept_external_drop(drag.paths(), destination))
+}
+
+/// Make `element` a folder that files can be dropped on: Marcel's own drags
+/// move there, drags from other applications copy there, and both light the
+/// row up with `highlight` while they hover.
+pub(super) fn accept_file_drops<E>(
+    element: E,
+    destination: &Path,
+    busy: bool,
+    highlight: impl Fn(StyleRefinement) -> StyleRefinement + Copy + 'static,
+    cx: &mut Context<Marcel>,
+) -> E
+where
+    E: InteractiveElement,
+{
+    let (can_drop_path, move_path, copy_path) = (
+        destination.to_path_buf(),
+        destination.to_path_buf(),
+        destination.to_path_buf(),
+    );
+    element
+        .can_drop(move |value, _, _| !busy && can_drop_files_on(value, &can_drop_path))
+        .drag_over::<FileDrag>(move |style, _, _, _| highlight(style))
+        .drag_over::<ExternalPaths>(move |style, _, _, _| highlight(style))
+        .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
+            this.start_drag_move(drag.paths.to_vec(), move_path.clone(), window, cx);
+        }))
+        .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
+            this.start_external_copy(drag.paths(), copy_path.clone(), window, cx);
+        }))
+}
+
+/// An invisible layer that records where its parent was painted, for
+/// hit-testing pointer gestures against later.
+pub(super) fn painted_bounds(record: impl Fn(Bounds<Pixels>) + 'static) -> impl IntoElement {
+    canvas(move |bounds, _, _| record(bounds), |_, _, _, _| {})
+        .absolute()
+        .inset_0()
 }
 
 fn can_drop_on_entry_hit(

@@ -5,9 +5,9 @@ use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Div, ElementId, ExternalPaths, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Stateful, canvas, div,
-    img, px, relative, uniform_list,
+    AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Stateful, canvas, div, img, px,
+    relative, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, h_flex, input::Input, scroll::ScrollableElement as _,
@@ -22,7 +22,7 @@ use crate::{
 use super::{
     DIRECTORY_ROW_HEIGHT, GRID_GAP, GRID_ROW_HEIGHT, GRID_SIDE_PADDING, GRID_TILE_HEIGHT,
     GRID_TILE_WIDTH, Marcel,
-    pointer::{FileDrag, can_drop_files_on},
+    pointer::{FileDrag, accept_file_drops, painted_bounds},
     preview::ThumbnailState,
     state::{EntryHitRegion, ViewMode},
 };
@@ -108,16 +108,9 @@ impl Marcel {
         let entry_content_bounds = self.drag.entry_content_bounds.clone();
         let browser_bounds = self.drag.browser_bounds.clone();
         let directory_scroll = self.ui.directory_scroll.clone();
-        let (click_path, context_path, bounds_path, can_drop_path, drop_path, external_drop_path) = (
-            path.clone(),
-            path.clone(),
-            path.clone(),
-            path.clone(),
-            path.clone(),
-            path,
-        );
+        let (click_path, context_path, bounds_path) = (path.clone(), path.clone(), path.clone());
 
-        div()
+        let surface = div()
             .id(id)
             .relative()
             .rounded(cx.theme().radius)
@@ -135,27 +128,19 @@ impl Marcel {
             })
             .on_drag_move::<FileDrag>(cx.listener(|this, event, window, cx| {
                 this.update_file_drag_cursor(event, window, cx);
-            }))
-            .when(navigable, |this| {
-                this.can_drop(move |value, _, _| !busy && can_drop_files_on(value, &can_drop_path))
-                    .drag_over::<FileDrag>(move |style, _, _, _| {
-                        style.bg(colors.list_active).border_color(colors.primary)
-                    })
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style.bg(colors.list_active).border_color(colors.primary)
-                    })
-                    .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
-                        this.start_drag_move(drag.paths.to_vec(), drop_path.clone(), window, cx);
-                    }))
-                    .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
-                        this.start_external_copy(
-                            drag.paths(),
-                            external_drop_path.clone(),
-                            window,
-                            cx,
-                        );
-                    }))
-            })
+            }));
+        let surface = if navigable {
+            accept_file_drops(
+                surface,
+                &path,
+                busy,
+                move |style| style.bg(colors.list_active).border_color(colors.primary),
+                cx,
+            )
+        } else {
+            surface
+        };
+        surface
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.activate_entry(&click_path, event, window, cx);
             }))
@@ -166,28 +151,21 @@ impl Marcel {
                     this.prepare_entry_context_menu(&context_path, event.position, cx);
                 }),
             )
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        entry_hit_bounds
-                            .borrow_mut()
-                            .insert(bounds_path.clone(), EntryHitRegion { bounds, navigable });
-                        if let Some(browser) = browser_bounds.get() {
-                            let scroll = directory_scroll.0.borrow().base_handle.offset();
-                            entry_content_bounds.borrow_mut().insert(
-                                bounds_path.clone(),
-                                Bounds {
-                                    origin: bounds.origin - browser.origin - scroll,
-                                    size: bounds.size,
-                                },
-                            );
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .child(painted_bounds(move |bounds| {
+                entry_hit_bounds
+                    .borrow_mut()
+                    .insert(bounds_path.clone(), EntryHitRegion { bounds, navigable });
+                if let Some(browser) = browser_bounds.get() {
+                    let scroll = directory_scroll.0.borrow().base_handle.offset();
+                    entry_content_bounds.borrow_mut().insert(
+                        bounds_path.clone(),
+                        Bounds {
+                            origin: bounds.origin - browser.origin - scroll,
+                            size: bounds.size,
+                        },
+                    );
+                }
+            }))
     }
 
     /// A drag payload for the rows to share. A marquee originates on empty
@@ -464,102 +442,78 @@ impl Marcel {
         let visible_hit_bounds = self.drag.entry_hit_bounds.clone();
         let gesture_view = cx.entity();
         let directory_scroll = self.ui.directory_scroll.clone();
-        let busy = self.operations_busy(cx);
-        let browsing_trash = self.sidebar.browsing_trash;
-        let (can_drop_path, internal_drop_path, external_drop_path) = (
-            self.directory.current_dir.clone(),
-            self.directory.current_dir.clone(),
-            self.directory.current_dir.clone(),
-        );
+        // The Trash listing is not a folder anything can be dropped into.
+        let refuses_drops = self.operations_busy(cx) || self.sidebar.browsing_trash;
+        let current_dir = self.directory.current_dir.clone();
 
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .can_drop(move |value, _, _| {
-                !browsing_trash && !busy && can_drop_files_on(value, &can_drop_path)
-            })
-            .drag_over::<FileDrag>(move |style, _, _, _| style.bg(colors.list_hover.opacity(0.55)))
-            .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                style.bg(colors.list_hover.opacity(0.55))
-            })
-            .on_drop(cx.listener(move |this, drag: &FileDrag, window, cx| {
-                if !browsing_trash {
-                    this.start_drag_move(
-                        drag.paths.to_vec(),
-                        internal_drop_path.clone(),
-                        window,
-                        cx,
-                    );
-                }
-            }))
-            .on_drop(cx.listener(move |this, drag: &ExternalPaths, window, cx| {
-                if !browsing_trash {
-                    this.start_external_copy(drag.paths(), external_drop_path.clone(), window, cx);
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event, _, cx| this.begin_marquee(event, cx)),
+        let surface = div().relative().flex().flex_col().flex_1().min_h_0();
+        accept_file_drops(
+            surface,
+            &current_dir,
+            refuses_drops,
+            move |style| style.bg(colors.list_hover.opacity(0.55)),
+            cx,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event, _, cx| this.begin_marquee(event, cx)),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, event, _, cx| this.prepare_directory_context_menu(event, cx)),
+        )
+        .child(
+            canvas(
+                move |bounds, _, _| {
+                    bounds_state.set(Some(bounds));
+                    visible_hit_bounds.borrow_mut().clear();
+                },
+                move |_, _, window, _| {
+                    let move_view = gesture_view.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            move_view.update(cx, |this, cx| this.update_marquee(event, cx));
+                        }
+                    });
+                    let up_view = gesture_view.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            up_view.update(cx, |this, cx| this.end_marquee(event, cx));
+                        }
+                    });
+                },
             )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event, _, cx| this.prepare_directory_context_menu(event, cx)),
+            .absolute()
+            .inset_0(),
+        )
+        .child(contents)
+        .children(marquee)
+        .when_some(self.directory.warning.clone(), |this, warning| {
+            this.child(
+                div()
+                    .mx_3()
+                    .mb_2()
+                    .px_3()
+                    .py_1()
+                    .rounded(cx.theme().radius)
+                    .bg(colors.warning.opacity(0.14))
+                    .text_xs()
+                    .text_color(colors.warning)
+                    .child(warning),
             )
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        bounds_state.set(Some(bounds));
-                        visible_hit_bounds.borrow_mut().clear();
-                    },
-                    move |_, _, window, _| {
-                        let move_view = gesture_view.clone();
-                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                            if phase.bubble() {
-                                move_view.update(cx, |this, cx| this.update_marquee(event, cx));
-                            }
-                        });
-                        let up_view = gesture_view.clone();
-                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase.bubble() {
-                                up_view.update(cx, |this, cx| this.end_marquee(event, cx));
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
+        })
+        .when_some(loading, |this, status| {
+            this.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(status),
             )
-            .child(contents)
-            .children(marquee)
-            .when_some(self.directory.warning.clone(), |this, warning| {
-                this.child(
-                    div()
-                        .mx_3()
-                        .mb_2()
-                        .px_3()
-                        .py_1()
-                        .rounded(cx.theme().radius)
-                        .bg(colors.warning.opacity(0.14))
-                        .text_xs()
-                        .text_color(colors.warning)
-                        .child(warning),
-                )
-            })
-            .when_some(loading, |this, status| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(colors.muted_foreground)
-                        .child(status),
-                )
-            })
-            .vertical_scrollbar(&directory_scroll)
-            .into_any_element()
+        })
+        .vertical_scrollbar(&directory_scroll)
+        .into_any_element()
     }
 }
 
