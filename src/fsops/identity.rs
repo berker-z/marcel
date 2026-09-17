@@ -20,10 +20,7 @@ pub struct ObjectKey {
 
 impl ObjectKey {
     pub fn of(metadata: &fs::Metadata) -> Self {
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
+        Self { device: metadata.dev(), inode: metadata.ino() }
     }
 
     /// Whether `path` still names this object.
@@ -31,10 +28,7 @@ impl ObjectKey {
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("Cannot continue: “{}” is missing", path.display()))?;
         if Self::of(&metadata) != self {
-            bail!(
-                "Cannot continue: “{}” changed or was replaced",
-                path.display()
-            );
+            bail!("Cannot continue: “{}” changed or was replaced", path.display());
         }
         Ok(())
     }
@@ -49,10 +43,7 @@ pub struct FileIdentity {
 
 impl FileIdentity {
     pub fn of(metadata: &fs::Metadata) -> Self {
-        Self {
-            key: ObjectKey::of(metadata),
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-        }
+        Self { key: ObjectKey::of(metadata), changed: (metadata.ctime(), metadata.ctime_nsec()) }
     }
 
     pub fn read(path: &Path) -> Result<Self> {
@@ -65,10 +56,7 @@ impl FileIdentity {
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("Cannot {action}: “{}” no longer exists", path.display()))?;
         if Self::of(&metadata) != *self {
-            bail!(
-                "Cannot {action}: “{}” changed or was replaced",
-                path.display()
-            );
+            bail!("Cannot {action}: “{}” changed or was replaced", path.display());
         }
         Ok(())
     }

@@ -38,10 +38,7 @@ fn breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
             std::path::Component::ParentDir => "..".to_string(),
             std::path::Component::Normal(name) => name.to_string_lossy().into_owned(),
         };
-        crumbs.push(Breadcrumb {
-            label,
-            path: Some(current.clone()),
-        });
+        crumbs.push(Breadcrumb { label, path: Some(current.clone()) });
     }
     crumbs
 }
@@ -54,10 +51,7 @@ fn compact(crumbs: Vec<Breadcrumb>, max_items: usize) -> Vec<Breadcrumb> {
     let tail_start = crumbs.len() - (max_items - 2);
     let mut compacted = Vec::with_capacity(max_items);
     compacted.push(crumbs[0].clone());
-    compacted.push(Breadcrumb {
-        label: "…".to_string(),
-        path: None,
-    });
+    compacted.push(Breadcrumb { label: "…".to_string(), path: None });
     compacted.extend_from_slice(&crumbs[tail_start..]);
     compacted
 }
@@ -71,12 +65,7 @@ impl Marcel {
         let colors = cx.theme().colors;
         if self.ui.location.active {
             let suffix = if self.ui.location.resolving {
-                Some(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted_foreground)
-                        .child("…"),
-                )
+                Some(div().text_xs().text_color(colors.muted_foreground).child("…"))
             } else {
                 self.ui
                     .location
@@ -88,18 +77,13 @@ impl Marcel {
                 .small()
                 .h_7()
                 .w_full()
-                .when(self.ui.location.error.is_some(), |input| {
-                    input.border_color(colors.danger)
-                })
+                .when(self.ui.location.error.is_some(), |input| input.border_color(colors.danger))
                 .when_some(suffix, |input, suffix| input.suffix(suffix))
                 .into_any_element();
         }
 
         let crumbs = if self.sidebar.browsing_trash {
-            vec![Breadcrumb {
-                label: "Trash".to_string(),
-                path: None,
-            }]
+            vec![Breadcrumb { label: "Trash".to_string(), path: None }]
         } else {
             compact(breadcrumbs(&self.directory.current_dir), max_breadcrumbs)
         };
@@ -117,11 +101,7 @@ impl Marcel {
                 );
             }
             let button = |label: String| {
-                Button::new(("location-breadcrumb", index))
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .label(label)
+                Button::new(("location-breadcrumb", index)).xsmall().compact().ghost().label(label)
             };
             items.push(match crumb.path {
                 Some(path) if index != last => button(crumb.label)
@@ -230,9 +210,7 @@ impl Marcel {
         self.ui.location.error = None;
         cx.notify();
 
-        let resolve = unblock(cx, move || {
-            resolve_location(&value, &current_dir, Some(&home_dir))
-        });
+        let resolve = unblock(cx, move || resolve_location(&value, &current_dir, Some(&home_dir)));
         cx.spawn_in(window, async move |this, window| {
             let result = resolve.await;
             let _ = this.update_in(window, |this, window, cx| {
@@ -253,9 +231,7 @@ impl Marcel {
                     Err(error) => {
                         this.ui.location.error = Some(error.clone());
                         window.push_notification(Notification::error(error), cx);
-                        this.ui
-                            .location_input
-                            .update(cx, |input, cx| input.focus(window, cx));
+                        this.ui.location_input.update(cx, |input, cx| input.focus(window, cx));
                     }
                 }
                 cx.notify();
@@ -270,10 +246,7 @@ mod tests {
     use super::*;
 
     fn crumb(label: &str, path: &str) -> Breadcrumb {
-        Breadcrumb {
-            label: label.to_string(),
-            path: Some(PathBuf::from(path)),
-        }
+        Breadcrumb { label: label.to_string(), path: Some(PathBuf::from(path)) }
     }
 
     #[test]
@@ -297,10 +270,7 @@ mod tests {
             compacted,
             vec![
                 crumb("root", "/"),
-                Breadcrumb {
-                    label: "…".to_string(),
-                    path: None,
-                },
+                Breadcrumb { label: "…".to_string(), path: None },
                 crumb("marcel", "/home/test/Projects/marcel"),
                 crumb("src", "/home/test/Projects/marcel/src"),
             ]

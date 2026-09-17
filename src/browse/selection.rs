@@ -116,11 +116,7 @@ impl SelectionModel {
         if !additive {
             self.selected.clear();
         }
-        let (start, end) = if anchor <= target {
-            (anchor, target)
-        } else {
-            (target, anchor)
-        };
+        let (start, end) = if anchor <= target { (anchor, target) } else { (target, anchor) };
         self.selected.extend(ordered[start..=end].iter().cloned());
         self.primary = Some(path);
         self.collapse_if_single();
@@ -170,10 +166,7 @@ impl SelectionModel {
     pub fn ensure_primary(&mut self, ordered: &[PathBuf]) {
         self.touch();
         if self.primary.is_none() && !self.selected.is_empty() {
-            self.primary = ordered
-                .iter()
-                .find(|path| self.selected.contains(*path))
-                .cloned();
+            self.primary = ordered.iter().find(|path| self.selected.contains(*path)).cloned();
             self.anchor = self.primary.clone();
         }
     }
@@ -253,10 +246,7 @@ mod tests {
         selection.select_only(path("d"));
         selection.select_range(path("b"), &ordered, false);
 
-        assert_eq!(
-            selection.selected(),
-            &HashSet::from([path("b"), path("c"), path("d")])
-        );
+        assert_eq!(selection.selected(), &HashSet::from([path("b"), path("c"), path("d")]));
         assert_eq!(selection.primary(), Some(&path("b")));
     }
 
@@ -266,10 +256,7 @@ mod tests {
         let mut selection = SelectionModel::default();
         selection.replace_from_marquee(&base, [path("c"), path("d")], true);
 
-        assert_eq!(
-            selection.selected(),
-            &HashSet::from([path("a"), path("c"), path("d")])
-        );
+        assert_eq!(selection.selected(), &HashSet::from([path("a"), path("c"), path("d")]));
     }
 
     #[test]
@@ -302,9 +289,7 @@ mod tests {
         selection.toggle(path("visible"), &[path("hidden"), path("visible")]);
         selection.make_primary(Path::new("hidden"));
 
-        selection.retain(&[path("visible")], |candidate| {
-            candidate == Path::new("visible")
-        });
+        selection.retain(&[path("visible")], |candidate| candidate == Path::new("visible"));
 
         assert_eq!(selection.selected(), &HashSet::from([path("visible")]));
         assert_eq!(selection.primary(), Some(&path("visible")));

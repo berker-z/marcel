@@ -59,10 +59,7 @@ impl FileDrag {
             [only] => file_name(only),
             paths => format!("{} selected items", paths.len()),
         };
-        cx.new(|_| DragPreview {
-            label,
-            detail: "Move",
-        })
+        cx.new(|_| DragPreview { label, detail: "Move" })
     }
 }
 
@@ -74,10 +71,7 @@ pub struct BookmarkDrag {
 
 impl BookmarkDrag {
     pub fn preview(&self, cx: &mut gpui::App) -> gpui::Entity<DragPreview> {
-        cx.new(|_| DragPreview {
-            label: file_name(&self.path),
-            detail: "Bookmark",
-        })
+        cx.new(|_| DragPreview { label: file_name(&self.path), detail: "Bookmark" })
     }
 }
 
@@ -106,12 +100,7 @@ impl Render for DragPreview {
             .bg(colors.popover.opacity(0.94))
             .text_color(colors.popover_foreground)
             .shadow_md()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.primary)
-                    .child(self.detail),
-            )
+            .child(div().text_xs().text_color(colors.primary).child(self.detail))
             .child(
                 div()
                     .min_w_0()
@@ -147,20 +136,12 @@ pub(super) fn accepted_external_drop_paths(
         return None;
     }
     let mut seen = HashSet::with_capacity(paths.len());
-    Some(
-        paths
-            .iter()
-            .filter(|path| seen.insert(*path))
-            .cloned()
-            .collect(),
-    )
+    Some(paths.iter().filter(|path| seen.insert(*path)).cloned().collect())
 }
 
 /// Whether whatever is being dragged may land on `destination`.
 pub(super) fn can_drop_files_on(value: &dyn Any, destination: &Path) -> bool {
-    value
-        .downcast_ref::<FileDrag>()
-        .is_some_and(|drag| can_move_files_to(&drag.paths, destination))
+    value.downcast_ref::<FileDrag>().is_some_and(|drag| can_move_files_to(&drag.paths, destination))
         || value
             .downcast_ref::<ExternalPaths>()
             .is_some_and(|drag| can_accept_external_drop(drag.paths(), destination))
@@ -179,11 +160,8 @@ pub(super) fn accept_file_drops<E>(
 where
     E: InteractiveElement,
 {
-    let (can_drop_path, move_path, copy_path) = (
-        destination.to_path_buf(),
-        destination.to_path_buf(),
-        destination.to_path_buf(),
-    );
+    let (can_drop_path, move_path, copy_path) =
+        (destination.to_path_buf(), destination.to_path_buf(), destination.to_path_buf());
     element
         .can_drop(move |value, _, _| !busy && can_drop_files_on(value, &can_drop_path))
         .drag_over::<FileDrag>(move |style, _, _, _| highlight(style))
@@ -199,9 +177,7 @@ where
 /// An invisible layer that records where its parent was painted, for
 /// hit-testing pointer gestures against later.
 pub(super) fn painted_bounds(record: impl Fn(Bounds<Pixels>) + 'static) -> impl IntoElement {
-    canvas(move |bounds, _, _| record(bounds), |_, _, _, _| {})
-        .absolute()
-        .inset_0()
+    canvas(move |bounds, _, _| record(bounds), |_, _, _, _| {}).absolute().inset_0()
 }
 
 fn can_drop_on_entry_hit(
@@ -238,18 +214,12 @@ impl Marcel {
     /// The drag payload for the current selection, rebuilt only when the
     /// selection or the visible projection actually changes.
     pub(super) fn selected_file_drag(&mut self) -> Option<FileDrag> {
-        let key = (
-            self.directory.selection.revision(),
-            self.directory.projection_revision(),
-        );
+        let key = (self.directory.selection.revision(), self.directory.projection_revision());
         if self.drag.payload.as_ref().map(|cached| cached.key) != Some(key) {
             let payload = self.build_selected_file_drag();
             self.drag.payload = Some(CachedFileDrag { key, payload });
         }
-        self.drag
-            .payload
-            .as_ref()
-            .and_then(|cached| cached.payload.clone())
+        self.drag.payload.as_ref().and_then(|cached| cached.payload.clone())
     }
 
     fn build_selected_file_drag(&self) -> Option<FileDrag> {
@@ -260,11 +230,8 @@ impl Marcel {
         let mut paths = Vec::with_capacity(selected.len());
         let mut native_paths = Vec::with_capacity(selected.len());
         let mut bookmark_candidates = Vec::new();
-        for entry in self
-            .directory
-            .visible_entries
-            .iter()
-            .filter_map(|i| self.directory.entries.get(*i))
+        for entry in
+            self.directory.visible_entries.iter().filter_map(|i| self.directory.entries.get(*i))
         {
             if !selected.contains(&entry.path) {
                 continue;
@@ -340,17 +307,13 @@ impl Marcel {
             .any(|(path, bounds)| bounds.contains(&pointer) && can_move_to(path));
         let bookmarks = self.bookmarks.read(cx);
         let over_bookmark =
-            self.sidebar
-                .bookmark_row_bounds
-                .borrow()
-                .iter()
-                .any(|(index, bounds)| {
-                    bounds.contains(&pointer)
-                        && bookmarks
-                            .bookmarks()
-                            .get(*index)
-                            .is_some_and(|bookmark| can_move_to(&bookmark.path))
-                });
+            self.sidebar.bookmark_row_bounds.borrow().iter().any(|(index, bounds)| {
+                bounds.contains(&pointer)
+                    && bookmarks
+                        .bookmarks()
+                        .get(*index)
+                        .is_some_and(|bookmark| can_move_to(&bookmark.path))
+            });
         let over_bookmark_region = self
             .sidebar
             .bookmark_region_bounds
@@ -371,10 +334,7 @@ impl Marcel {
 
     /// Whether `position` is on empty browser space rather than an entry.
     pub(super) fn on_empty_browser_space(&self, position: Point<Pixels>) -> bool {
-        self.drag
-            .browser_bounds
-            .get()
-            .is_some_and(|bounds| bounds.contains(&position))
+        self.drag.browser_bounds.get().is_some_and(|bounds| bounds.contains(&position))
             && !self
                 .drag
                 .entry_hit_bounds
@@ -391,17 +351,9 @@ impl Marcel {
             return;
         };
         let additive = event.modifiers.secondary();
-        let visible_paths = self
-            .drag
-            .entry_hit_bounds
-            .borrow()
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>();
-        self.drag
-            .entry_content_bounds
-            .borrow_mut()
-            .retain(|path, _| visible_paths.contains(path));
+        let visible_paths =
+            self.drag.entry_hit_bounds.borrow().keys().cloned().collect::<HashSet<_>>();
+        self.drag.entry_content_bounds.borrow_mut().retain(|path, _| visible_paths.contains(path));
         let scroll = self.ui.directory_scroll.0.borrow().base_handle.offset();
         let base_selection = self.directory.selection.selected().clone();
         if !additive {
@@ -451,10 +403,8 @@ impl Marcel {
             return;
         };
         let scroll = self.ui.directory_scroll.0.borrow().base_handle.offset();
-        let rectangle = marquee_bounds(
-            gesture.origin_content,
-            gesture.current_window - bounds.origin - scroll,
-        );
+        let rectangle =
+            marquee_bounds(gesture.origin_content, gesture.current_window - bounds.origin - scroll);
         let intersecting = self
             .drag
             .entry_content_bounds
@@ -464,9 +414,7 @@ impl Marcel {
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         let (base_selection, additive) = (gesture.base_selection.clone(), gesture.additive);
-        self.directory
-            .selection
-            .replace_from_marquee(&base_selection, intersecting, additive);
+        self.directory.selection.replace_from_marquee(&base_selection, intersecting, additive);
         if clear_preview {
             self.preview.clear();
         }
@@ -486,17 +434,11 @@ impl Marcel {
     /// The marquee rectangle to paint, clipped to the browser, in browser
     /// coordinates.
     pub(super) fn marquee_rectangle(&self) -> Option<Bounds<Pixels>> {
-        let gesture = self
-            .drag
-            .marquee
-            .as_ref()
-            .filter(|gesture| gesture.active)?;
+        let gesture = self.drag.marquee.as_ref().filter(|gesture| gesture.active)?;
         let bounds = self.drag.browser_bounds.get()?;
         let scroll = self.ui.directory_scroll.0.borrow().base_handle.offset();
-        let rectangle = marquee_bounds(
-            bounds.origin + gesture.origin_content + scroll,
-            gesture.current_window,
-        );
+        let rectangle =
+            marquee_bounds(bounds.origin + gesture.origin_content + scroll, gesture.current_window);
         let left = rectangle.left().max(bounds.left());
         let right = rectangle.right().min(bounds.right());
         let top = rectangle.top().max(bounds.top());
@@ -519,9 +461,7 @@ impl Marcel {
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(POINTER_EDGE_SCROLL_INTERVAL)
-                    .await;
+                cx.background_executor().timer(POINTER_EDGE_SCROLL_INTERVAL).await;
                 if !this.update(cx, tick).unwrap_or(false) {
                     break;
                 }
@@ -583,10 +523,7 @@ mod tests {
 
     #[test]
     fn marquee_bounds_normalizes_every_drag_direction() {
-        let bounds = marquee_bounds(
-            Point::new(px(20.0), px(40.0)),
-            Point::new(px(5.0), px(10.0)),
-        );
+        let bounds = marquee_bounds(Point::new(px(20.0), px(40.0)), Point::new(px(5.0), px(10.0)));
 
         assert_eq!(bounds.left(), px(5.0));
         assert_eq!(bounds.top(), px(10.0));
@@ -596,10 +533,8 @@ mod tests {
 
     #[test]
     fn marquee_edge_scroll_accelerates_toward_viewport_edges() {
-        let viewport = Bounds::from_corners(
-            Point::new(px(0.0), px(100.0)),
-            Point::new(px(500.0), px(500.0)),
-        );
+        let viewport =
+            Bounds::from_corners(Point::new(px(0.0), px(100.0)), Point::new(px(500.0), px(500.0)));
 
         assert_eq!(edge_scroll_delta(px(300.0), viewport), px(0.0));
         assert!(edge_scroll_delta(px(110.0), viewport) > px(0.0));
@@ -609,18 +544,12 @@ mod tests {
 
     #[test]
     fn internal_move_drop_rejects_noops_and_descendants() {
-        assert!(!can_move_files_to(
-            &[PathBuf::from("/work/report.txt")],
-            Path::new("/work")
-        ));
+        assert!(!can_move_files_to(&[PathBuf::from("/work/report.txt")], Path::new("/work")));
         assert!(!can_move_files_to(
             &[PathBuf::from("/work/photos")],
             Path::new("/work/photos/edited")
         ));
-        assert!(can_move_files_to(
-            &[PathBuf::from("/work/report.txt")],
-            Path::new("/archive")
-        ));
+        assert!(can_move_files_to(&[PathBuf::from("/work/report.txt")], Path::new("/archive")));
     }
 
     #[test]
@@ -633,15 +562,9 @@ mod tests {
         ];
         assert_eq!(
             accepted_external_drop_paths(&paths, destination),
-            Some(vec![
-                PathBuf::from("/downloads/report.pdf"),
-                PathBuf::from("/downloads/photos"),
-            ])
+            Some(vec![PathBuf::from("/downloads/report.pdf"), PathBuf::from("/downloads/photos"),])
         );
-        assert!(!can_accept_external_drop(
-            &[PathBuf::from("relative.txt")],
-            destination,
-        ));
+        assert!(!can_accept_external_drop(&[PathBuf::from("relative.txt")], destination,));
         assert!(!can_accept_external_drop(&[], destination));
         assert!(!can_accept_external_drop(
             &vec![PathBuf::from("/downloads/item"); MAX_EXTERNAL_DROP_PATHS + 1],
@@ -686,25 +609,13 @@ mod tests {
     #[test]
     fn browser_drop_hit_uses_painted_entry_metadata() {
         let pointer = Point::new(px(50.0), px(50.0));
-        let bounds = Bounds::from_corners(
-            Point::new(px(0.0), px(0.0)),
-            Point::new(px(100.0), px(100.0)),
-        );
+        let bounds =
+            Bounds::from_corners(Point::new(px(0.0), px(0.0)), Point::new(px(100.0), px(100.0)));
         let sources = [PathBuf::from("/work/report.txt")];
         let destination = Path::new("/archive");
         let hit = |navigable| EntryHitRegion { bounds, navigable };
 
-        assert!(can_drop_on_entry_hit(
-            &hit(true),
-            pointer,
-            &sources,
-            destination
-        ));
-        assert!(!can_drop_on_entry_hit(
-            &hit(false),
-            pointer,
-            &sources,
-            destination
-        ));
+        assert!(can_drop_on_entry_hit(&hit(true), pointer, &sources, destination));
+        assert!(!can_drop_on_entry_hit(&hit(false), pointer, &sources, destination));
     }
 }

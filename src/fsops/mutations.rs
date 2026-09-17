@@ -46,10 +46,7 @@ pub fn validate_entry_os_name(name: &OsStr) -> Result<()> {
         bail!("Enter a name");
     }
     if bytes == b"." || bytes == b".." {
-        bail!(
-            "“{}” is reserved and cannot be used as a name",
-            name.to_string_lossy()
-        );
+        bail!("“{}” is reserved and cannot be used as a name", name.to_string_lossy());
     }
     if bytes.contains(&b'/') || bytes.contains(&0) {
         bail!("Names cannot contain “/” or a null character");
@@ -99,12 +96,7 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<CommittedOperation> {
 
 /// Undo or redo a rename by renaming back, which is one more atomic commit.
 pub(super) fn reverse_rename(operation: &OperationRecord) -> Result<CommittedOperation> {
-    let OperationRecord::Rename {
-        source,
-        destination,
-        identity,
-    } = operation
-    else {
+    let OperationRecord::Rename { source, destination, identity } = operation else {
         bail!("Operation is not a rename");
     };
     // Prepare.
@@ -116,28 +108,18 @@ pub(super) fn reverse_rename(operation: &OperationRecord) -> Result<CommittedOpe
 /// Commit a rename and describe it, whichever direction it runs in.
 fn rename_committing(from: &Path, to: &Path) -> Result<CommittedOperation> {
     // Commit.
-    rename_no_replace(from, to).with_context(|| {
-        format!(
-            "Could not rename “{}” to “{}”",
-            from.display(),
-            to.display()
-        )
-    })?;
+    rename_no_replace(from, to)
+        .with_context(|| format!("Could not rename “{}” to “{}”", from.display(), to.display()))?;
     // Finalize: the entry is renamed on disk. A failed inspection costs undo,
     // never the rename itself.
-    let record = fs::symlink_metadata(to)
-        .ok()
-        .map(|metadata| OperationRecord::Rename {
-            source: from.to_path_buf(),
-            destination: to.to_path_buf(),
-            identity: FileIdentity::of(&metadata),
-        });
+    let record = fs::symlink_metadata(to).ok().map(|metadata| OperationRecord::Rename {
+        source: from.to_path_buf(),
+        destination: to.to_path_buf(),
+        identity: FileIdentity::of(&metadata),
+    });
     Ok(CommittedOperation::new(
         to.to_path_buf(),
-        DirectoryChanges {
-            removed: vec![from.to_path_buf()],
-            upserted: vec![to.to_path_buf()],
-        },
+        DirectoryChanges { removed: vec![from.to_path_buf()], upserted: vec![to.to_path_buf()] },
         record,
     ))
 }
@@ -153,13 +135,11 @@ pub fn create_zip_operation(
     let published = create_zip_archive(sources, destination, cancelled)?.published;
     // Finalize: a failed snapshot loses undo, it does not unpublish the ZIP.
     let record =
-        snapshot_removable_tree(&published)
-            .ok()
-            .map(|created| OperationRecord::ArchiveCreate {
-                sources: source_snapshots,
-                destination: published.clone(),
-                created,
-            });
+        snapshot_removable_tree(&published).ok().map(|created| OperationRecord::ArchiveCreate {
+            sources: source_snapshots,
+            destination: published.clone(),
+            created,
+        });
     Ok(CommittedOperation::published(published, record))
 }
 
@@ -175,14 +155,9 @@ pub fn extract_archive_operation(
     // Commit.
     let published = extract_archive(archive, cancelled)?.published;
     // Finalize.
-    let record =
-        snapshot_removable_tree(&published)
-            .ok()
-            .map(|created| OperationRecord::ArchiveExtract {
-                source,
-                output: published.clone(),
-                created,
-            });
+    let record = snapshot_removable_tree(&published).ok().map(|created| {
+        OperationRecord::ArchiveExtract { source, output: published.clone(), created }
+    });
     Ok(CommittedOperation::published(published, record))
 }
 

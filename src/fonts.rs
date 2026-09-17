@@ -10,10 +10,9 @@ static REGULAR_FONT: &[u8] = include_bytes!("../assets/fonts/MarcelIosevka-Regul
 static SEMIBOLD_FONT: &[u8] = include_bytes!("../assets/fonts/MarcelIosevka-SemiBold.ttf");
 
 pub fn init(cx: &mut App) {
-    if let Err(error) = cx.text_system().add_fonts(vec![
-        Cow::Borrowed(REGULAR_FONT),
-        Cow::Borrowed(SEMIBOLD_FONT),
-    ]) {
+    if let Err(error) =
+        cx.text_system().add_fonts(vec![Cow::Borrowed(REGULAR_FONT), Cow::Borrowed(SEMIBOLD_FONT)])
+    {
         eprintln!("failed to load Marcel's bundled font: {error}");
     }
 
@@ -22,9 +21,7 @@ pub fn init(cx: &mut App) {
     let unavailable_override = requested.as_deref().is_some_and(|requested| {
         let requested = requested.trim();
         !requested.is_empty()
-            && !available
-                .iter()
-                .any(|family| family.eq_ignore_ascii_case(requested))
+            && !available.iter().any(|family| family.eq_ignore_ascii_case(requested))
     });
     let family = select_font_family(requested.as_deref(), &available);
     if unavailable_override {
@@ -41,9 +38,7 @@ fn select_font_family(requested: Option<&str>, available: &[String]) -> String {
     let requested = requested.map(str::trim).filter(|value| !value.is_empty());
     requested
         .and_then(|requested| {
-            available
-                .iter()
-                .find(|family| family.eq_ignore_ascii_case(requested))
+            available.iter().find(|family| family.eq_ignore_ascii_case(requested))
         })
         .cloned()
         .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
@@ -55,10 +50,7 @@ mod tests {
 
     #[test]
     fn bundled_font_is_the_unconditional_default() {
-        assert_eq!(
-            select_font_family(None, &["DejaVu Sans".to_string()]),
-            DEFAULT_FONT_FAMILY
-        );
+        assert_eq!(select_font_family(None, &["DejaVu Sans".to_string()]), DEFAULT_FONT_FAMILY);
     }
 
     #[test]
@@ -75,13 +67,7 @@ mod tests {
     #[test]
     fn empty_or_unknown_overrides_fall_back_to_the_bundle() {
         let available = [DEFAULT_FONT_FAMILY.to_string()];
-        assert_eq!(
-            select_font_family(Some("  "), &available),
-            DEFAULT_FONT_FAMILY
-        );
-        assert_eq!(
-            select_font_family(Some("Missing Mono"), &available),
-            DEFAULT_FONT_FAMILY
-        );
+        assert_eq!(select_font_family(Some("  "), &available), DEFAULT_FONT_FAMILY);
+        assert_eq!(select_font_family(Some("Missing Mono"), &available), DEFAULT_FONT_FAMILY);
     }
 }

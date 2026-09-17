@@ -74,10 +74,7 @@ impl DeleteIdentity {
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("Cannot continue: “{}” is missing", path.display()))?;
         if !self.describes(Self::of(&metadata)) {
-            bail!(
-                "Cannot continue: “{}” changed or was replaced",
-                path.display()
-            );
+            bail!("Cannot continue: “{}” changed or was replaced", path.display());
         }
         Ok(())
     }
@@ -124,10 +121,7 @@ impl DeleteOutcome {
     fn failed(path: PathBuf, message: impl Into<String>) -> Self {
         Self {
             completed: Vec::new(),
-            failures: vec![PathFailure {
-                path,
-                message: message.into(),
-            }],
+            failures: vec![PathFailure { path, message: message.into() }],
         }
     }
 
@@ -151,10 +145,7 @@ pub(super) fn delete_trash_backings(
     backings: &[(PathBuf, ObjectKey)],
     progress: Arc<TransferProgress>,
 ) -> DeleteOutcome {
-    let paths = backings
-        .iter()
-        .map(|(path, _)| path.clone())
-        .collect::<Vec<_>>();
+    let paths = backings.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
     let expected = backings.iter().cloned().collect::<HashMap<_, _>>();
     delete_paths_with_policy(&paths, &expected, progress, true)
 }
@@ -169,17 +160,12 @@ fn delete_paths_with_policy(
     let mut quarantined = Vec::with_capacity(paths.len());
 
     for original in top_level_paths(paths) {
-        let staged = stage_root(
-            &original,
-            expected_keys.get(&original).copied(),
-            allow_trash_backings,
-        );
+        let staged =
+            stage_root(&original, expected_keys.get(&original).copied(), allow_trash_backings);
         match staged {
-            Ok(quarantine) => quarantined.push(QuarantinedRoot {
-                original,
-                quarantine,
-                entries: Vec::new(),
-            }),
+            Ok(quarantine) => {
+                quarantined.push(QuarantinedRoot { original, quarantine, entries: Vec::new() })
+            }
             Err(error) => {
                 return failed_after_rollback(&quarantined, original, format!("{error:#}"));
             }
@@ -222,10 +208,7 @@ fn delete_paths_with_policy(
         }
     }
     progress.set_current_path(None);
-    DeleteOutcome {
-        completed,
-        failures,
-    }
+    DeleteOutcome { completed, failures }
 }
 
 /// Move one root aside under a quarantine name, proving it is still the same
@@ -266,10 +249,7 @@ fn stage_root(
             },
         });
     staging.with_context(|| {
-        format!(
-            "Could not safely stage “{}” for permanent deletion",
-            original.display()
-        )
+        format!("Could not safely stage “{}” for permanent deletion", original.display())
     })?;
     Ok(quarantine)
 }
@@ -285,10 +265,7 @@ fn erase_root(root: &QuarantinedRoot, progress: &TransferProgress) -> Vec<PathFa
     let mut failures = Vec::new();
     for entry in root.entries.iter().rev() {
         progress.set_current_path(Some(root.display_path(&entry.path)));
-        let expected = directory_identities
-            .get(&entry.path)
-            .copied()
-            .unwrap_or(entry.identity);
+        let expected = directory_identities.get(&entry.path).copied().unwrap_or(entry.identity);
         let result = validate_ancestors(&entry.path, &root.quarantine, &directory_identities)
             .and_then(|()| expected.validate(&entry.path))
             .and_then(|()| {
@@ -326,20 +303,13 @@ fn collect_delete_plan(
     let mut pending = vec![path.to_path_buf()];
     while let Some(path) = pending.pop() {
         let metadata = inspect(&path)?;
-        let kind = if metadata.file_type().is_dir() {
-            DeleteKind::Directory
-        } else {
-            DeleteKind::Other
-        };
+        let kind =
+            if metadata.file_type().is_dir() { DeleteKind::Directory } else { DeleteKind::Other };
         let entry = DeleteEntry {
             path: path.clone(),
             identity: DeleteIdentity::of(&metadata),
             kind,
-            bytes: if metadata.file_type().is_file() {
-                metadata.len()
-            } else {
-                0
-            },
+            bytes: if metadata.file_type().is_file() { metadata.len() } else { 0 },
         };
         progress.add_total(1, entry.bytes);
         entries.push(entry);
@@ -365,17 +335,11 @@ fn rollback_quarantines(quarantined: &[QuarantinedRoot]) -> Result<()> {
 
 /// Deduplicate and drop paths that another requested path already contains.
 fn top_level_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut unique = paths
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut unique = paths.iter().cloned().collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();
     unique.sort();
     let all = unique.clone();
     unique.retain(|path| {
-        !all.iter()
-            .any(|candidate| candidate != path && path.starts_with(candidate))
+        !all.iter().any(|candidate| candidate != path && path.starts_with(candidate))
     });
     unique
 }
@@ -430,26 +394,17 @@ fn refresh_parent_identity(
     quarantine_root: &Path,
     directories: &mut HashMap<PathBuf, DeleteIdentity>,
 ) -> Result<()> {
-    let Some(parent) = removed_path
-        .parent()
-        .filter(|p| p.starts_with(quarantine_root))
-    else {
+    let Some(parent) = removed_path.parent().filter(|p| p.starts_with(quarantine_root)) else {
         return Ok(());
     };
     let previous = directories.get(parent).copied().with_context(|| {
-        format!(
-            "Cannot continue: parent “{}” was not in the delete plan",
-            parent.display()
-        )
+        format!("Cannot continue: parent “{}” was not in the delete plan", parent.display())
     })?;
     let metadata = fs::symlink_metadata(parent)
         .with_context(|| format!("Cannot continue: parent “{}” is missing", parent.display()))?;
     let current = DeleteIdentity::of(&metadata);
     if !previous.same_object(current) {
-        bail!(
-            "Cannot continue: parent “{}” changed or was replaced",
-            parent.display()
-        );
+        bail!("Cannot continue: parent “{}” changed or was replaced", parent.display());
     }
     directories.insert(parent.to_path_buf(), current);
     Ok(())
@@ -541,12 +496,7 @@ mod tests {
 
         let outcome = delete_paths(std::slice::from_ref(&target), progress.clone());
 
-        assert_eq!(
-            outcome.completed,
-            vec![target.clone()],
-            "{:#?}",
-            outcome.failures
-        );
+        assert_eq!(outcome.completed, vec![target.clone()], "{:#?}", outcome.failures);
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert!(!target.exists());
         assert_eq!(read(kept), b"keep");
@@ -558,10 +508,8 @@ mod tests {
     fn occupied_quarantine_names_do_not_overwrite() {
         let sandbox = Sandbox::new();
         let target = sandbox.file("note.txt", b"delete");
-        let collision = sandbox.file(
-            &format!(".marcel-delete-{}-0-note.txt", std::process::id()),
-            b"keep",
-        );
+        let collision =
+            sandbox.file(&format!(".marcel-delete-{}-0-note.txt", std::process::id()), b"keep");
 
         let outcome = delete(std::slice::from_ref(&target));
 

@@ -65,9 +65,9 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
         | OperationRecord::ArchiveCreate { created, .. }
         | OperationRecord::ArchiveExtract { created, .. } => {
             let (replaced, merged) = match operation {
-                OperationRecord::Copy {
-                    replaced, merged, ..
-                } => (replaced.as_slice(), merged.as_slice()),
+                OperationRecord::Copy { replaced, merged, .. } => {
+                    (replaced.as_slice(), merged.as_slice())
+                }
                 _ => (&[][..], &[][..]),
             };
             // The merged removals below commit one at a time, so when a merge
@@ -92,10 +92,8 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                     )
                 };
             }
-            let merged_removed = merged
-                .iter()
-                .map(|snapshot| snapshot.path.clone())
-                .collect::<Vec<_>>();
+            let merged_removed =
+                merged.iter().map(|snapshot| snapshot.path.clone()).collect::<Vec<_>>();
             match remove_snapshotted_tree(created) {
                 Ok(()) => {
                     // The output is gone, so whatever it displaced can come
@@ -135,10 +133,7 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 }
             }
         }
-        OperationRecord::Move {
-            transfers,
-            replaced,
-        } => {
+        OperationRecord::Move { transfers, replaced } => {
             // Prepare: validating every transfer also produces the snapshots
             // this undo needs, so no traversal is required after a rename
             // commits.
@@ -199,27 +194,20 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 return MutationOutcome::discarded(reversed, preserve_unrestored(unrestored));
             }
             MutationOutcome::Committed(CommittedOperation::new(
-                undone
-                    .first()
-                    .map(|transfer| transfer.source.clone())
-                    .unwrap_or_default(),
+                undone.first().map(|transfer| transfer.source.clone()).unwrap_or_default(),
                 reversed,
                 // A replacement is undoable but not redoable: redoing would
                 // displace the restored items again, which is a decision the
                 // user has not made a second time.
-                (undoable && replaced.is_empty()).then_some(OperationRecord::Move {
-                    transfers: undone,
-                    replaced: Vec::new(),
-                }),
+                (undoable && replaced.is_empty())
+                    .then_some(OperationRecord::Move { transfers: undone, replaced: Vec::new() }),
             ))
         }
         OperationRecord::Trash { records } => match restore_trash_records(records) {
             Ok(restored) => MutationOutcome::Committed(CommittedOperation::new(
                 operation.path().to_path_buf(),
                 reversed,
-                restored.undoable.then_some(OperationRecord::Trash {
-                    records: restored.records,
-                }),
+                restored.undoable.then_some(OperationRecord::Trash { records: restored.records }),
             )),
             Err(failure) => failure.into(),
         },
@@ -240,11 +228,7 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
     let no_cancel = || Arc::new(AtomicBool::new(false));
     match operation {
         OperationRecord::CreateDirectory { path, .. } => create_directory_at(path.clone()).into(),
-        OperationRecord::Copy {
-            sources,
-            destination,
-            ..
-        } => {
+        OperationRecord::Copy { sources, destination, .. } => {
             if let Err(error) = validate_snapshot_tree(sources) {
                 return MutationOutcome::unchanged(error);
             }
@@ -256,13 +240,10 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
                     return MutationOutcome::unchanged(error);
                 }
             }
-            let sources = transfers
-                .iter()
-                .map(|transfer| transfer.source.clone())
-                .collect::<Vec<_>>();
-            let Some(destination) = transfers
-                .first()
-                .and_then(|transfer| transfer.destination.parent())
+            let sources =
+                transfers.iter().map(|transfer| transfer.source.clone()).collect::<Vec<_>>();
+            let Some(destination) =
+                transfers.first().and_then(|transfer| transfer.destination.parent())
             else {
                 return MutationOutcome::unchanged(anyhow::anyhow!(
                     "Move record has no destination directory"
@@ -282,25 +263,21 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
             Ok(restored) => MutationOutcome::Committed(CommittedOperation::new(
                 operation.path().to_path_buf(),
                 forward,
-                restored.undoable.then_some(OperationRecord::Restore {
-                    records: restored.records,
-                }),
+                restored.undoable.then_some(OperationRecord::Restore { records: restored.records }),
             )),
             Err(failure) => failure.into(),
         },
         OperationRecord::Rename { .. } => reverse_rename(operation).into(),
         // The archive is published atomically, so a failure leaves the
         // destination untouched.
-        OperationRecord::ArchiveCreate {
-            sources,
-            destination,
-            ..
-        } => match validate_snapshot_tree(sources) {
-            Ok(()) => {
-                create_zip_operation(&top_level_paths(sources), destination, no_cancel()).into()
+        OperationRecord::ArchiveCreate { sources, destination, .. } => {
+            match validate_snapshot_tree(sources) {
+                Ok(()) => {
+                    create_zip_operation(&top_level_paths(sources), destination, no_cancel()).into()
+                }
+                Err(error) => MutationOutcome::unchanged(error),
             }
-            Err(error) => MutationOutcome::unchanged(error),
-        },
+        }
         OperationRecord::ArchiveExtract { source, .. } => {
             if let Err(error) = validate_snapshot_tree(source) {
                 return MutationOutcome::unchanged(error);
@@ -356,10 +333,7 @@ fn redo_transfer(sources: &[PathBuf], destination: &Path, mode: TransferMode) ->
             anyhow::anyhow!("{failure}; completed items were rolled back"),
         ),
         MutationOutcome::Unchanged(rollback_error)
-        | MutationOutcome::Discarded {
-            error: rollback_error,
-            ..
-        } => MutationOutcome::discarded(
+        | MutationOutcome::Discarded { error: rollback_error, .. } => MutationOutcome::discarded(
             outcome.changes(mode),
             anyhow::anyhow!("{failure}; rollback also failed: {rollback_error}"),
         ),

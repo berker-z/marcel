@@ -19,9 +19,7 @@ const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DECODE_BYTES: u64 = 128 * 1024 * 1024;
 
 pub fn supports(path: &Path) -> bool {
-    mime_guess::from_path(path)
-        .first()
-        .is_some_and(|mime| mime.type_() == "image")
+    mime_guess::from_path(path).first().is_some_and(|mime| mime.type_() == "image")
 }
 
 pub fn load_or_create(path: &Path) -> Result<PathBuf> {
@@ -30,9 +28,8 @@ pub fn load_or_create(path: &Path) -> Result<PathBuf> {
 }
 
 fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("could not resolve {}", path.display()))?;
+    let canonical =
+        path.canonicalize().with_context(|| format!("could not resolve {}", path.display()))?;
     let metadata = canonical.metadata()?;
     if !metadata.is_file() {
         // Thumbnail candidates are chosen by file name alone, and opening a
@@ -46,12 +43,8 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
     let uri = Url::from_file_path(&canonical)
         .map_err(|_| anyhow::anyhow!("could not build file URI"))?
         .to_string();
-    let mtime = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string();
+    let mtime =
+        metadata.modified()?.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
     let size = metadata.len().to_string();
     let cache_path = thumbnail_cache_path(cache_home, &uri);
 
@@ -64,9 +57,8 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
     limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
     limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
 
-    let mut reader = ImageReader::new(BufReader::new(crate::fsops::local::open_regular_file(
-        &canonical,
-    )?));
+    let mut reader =
+        ImageReader::new(BufReader::new(crate::fsops::local::open_regular_file(&canonical)?));
     reader.limits(limits);
     let mut decoder = reader.with_guessed_format()?.into_decoder()?;
     let dimensions = decoder.dimensions();
@@ -88,9 +80,7 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
     }
     let thumbnail = thumbnail.to_rgba8();
 
-    let cache_dir = cache_path
-        .parent()
-        .context("thumbnail cache path has no parent")?;
+    let cache_dir = cache_path.parent().context("thumbnail cache path has no parent")?;
     create_private_dir_all(cache_dir)?;
     let mut temporary = tempfile::NamedTempFile::new_in(cache_dir)?;
     {
@@ -106,9 +96,7 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
         let mut png = encoder.write_header()?;
         png.write_image_data(thumbnail.as_raw())?;
     }
-    temporary
-        .persist(&cache_path)
-        .map_err(|error| error.error)?;
+    temporary.persist(&cache_path).map_err(|error| error.error)?;
     Ok(cache_path)
 }
 
@@ -121,10 +109,7 @@ fn thumbnail_cache_home() -> Result<PathBuf> {
 
 fn thumbnail_cache_path(cache_home: &Path, uri: &str) -> PathBuf {
     let digest = Md5::digest(uri.as_bytes());
-    cache_home
-        .join("thumbnails")
-        .join("normal")
-        .join(format!("{digest:x}.png"))
+    cache_home.join("thumbnails").join("normal").join(format!("{digest:x}.png"))
 }
 
 fn cached_thumbnail_is_current(path: &Path, uri: &str, mtime: &str, size: &str) -> bool {
@@ -179,9 +164,7 @@ mod tests {
 
         let first = load_or_create_in(&source, &cache).unwrap();
         let second = load_or_create_in(&source, &cache).unwrap();
-        let uri = Url::from_file_path(source.canonicalize().unwrap())
-            .unwrap()
-            .to_string();
+        let uri = Url::from_file_path(source.canonicalize().unwrap()).unwrap().to_string();
 
         assert_eq!(first, second);
         assert!(first.is_file());

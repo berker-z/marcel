@@ -30,11 +30,7 @@ pub enum PlaceKind {
 
 impl Place {
     pub fn home(path: PathBuf) -> Self {
-        Self {
-            label: "Home".to_string(),
-            path,
-            kind: PlaceKind::Filesystem,
-        }
+        Self { label: "Home".to_string(), path, kind: PlaceKind::Filesystem }
     }
 
     pub fn trash() -> Self {
@@ -68,9 +64,7 @@ fn build_places(home: &Path, config: Option<&str>, is_dir: impl Fn(&Path) -> boo
 
     for (key, label, fallback_name) in USER_DIRS {
         let path = match &configured {
-            Some(values) => values
-                .get(key)
-                .and_then(|value| expand_user_dir(value, home)),
+            Some(values) => values.get(key).and_then(|value| expand_user_dir(value, home)),
             None => Some(home.join(fallback_name)),
         };
         let Some(path) = path else {
@@ -78,11 +72,7 @@ fn build_places(home: &Path, config: Option<&str>, is_dir: impl Fn(&Path) -> boo
         };
 
         if is_dir(&path) && seen.insert(path.clone()) {
-            places.push(Place {
-                label: label.to_string(),
-                path,
-                kind: PlaceKind::Filesystem,
-            });
+            places.push(Place { label: label.to_string(), path, kind: PlaceKind::Filesystem });
         }
     }
 
@@ -100,16 +90,10 @@ fn parse_user_dirs(contents: &str) -> HashMap<String, String> {
             }
 
             let (name, value) = line.split_once('=')?;
-            let key = name
-                .trim()
-                .strip_prefix("XDG_")?
-                .strip_suffix("_DIR")?
-                .to_string();
+            let key = name.trim().strip_prefix("XDG_")?.strip_suffix("_DIR")?.to_string();
             let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-                .unwrap_or(value);
+            let value =
+                value.strip_prefix('"').and_then(|value| value.strip_suffix('"')).unwrap_or(value);
             Some((key, unescape(value)))
         })
         .collect()
@@ -119,9 +103,7 @@ fn expand_user_dir(value: &str, home: &Path) -> Option<PathBuf> {
     if value == "$HOME" || value == "${HOME}" {
         return Some(home.to_path_buf());
     }
-    if let Some(relative) = value
-        .strip_prefix("$HOME/")
-        .or_else(|| value.strip_prefix("${HOME}/"))
+    if let Some(relative) = value.strip_prefix("$HOME/").or_else(|| value.strip_prefix("${HOME}/"))
     {
         return Some(home.join(relative));
     }
@@ -213,10 +195,7 @@ mod tests {
     #[test]
     fn unescapes_xdg_quoted_values_without_evaluating_shell_code() {
         let values = parse_user_dirs(r#"XDG_DOCUMENTS_DIR="$HOME/Work\ Files""#);
-        assert_eq!(
-            values.get("DOCUMENTS"),
-            Some(&"$HOME/Work Files".to_string())
-        );
+        assert_eq!(values.get("DOCUMENTS"), Some(&"$HOME/Work Files".to_string()));
         assert!(expand_user_dir("$(touch /tmp/nope)", Path::new("/home/test")).is_none());
     }
 }

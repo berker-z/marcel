@@ -169,12 +169,8 @@ impl ReplacedItem {
 /// that another writer could occupy, and the displaced object is never
 /// destroyed before its replacement is safely published.
 pub(super) fn quarantine_for_replacement(path: &Path) -> Result<ReplacedItem> {
-    let parent = path
-        .parent()
-        .context("Replacement target has no parent directory")?;
-    let name = path
-        .file_name()
-        .context("Replacement target has no file name")?;
+    let parent = path.parent().context("Replacement target has no parent directory")?;
+    let name = path.file_name().context("Replacement target has no file name")?;
     let expected = FileIdentity::read(path)?;
     let prefix = format!(".marcel-replaced-{}-", std::process::id());
 
@@ -196,22 +192,12 @@ pub(super) fn quarantine_for_replacement(path: &Path) -> Result<ReplacedItem> {
         // they prove this is still the object that was moved and not something
         // that took its place.
         let identity = FileIdentity::of(&inspect(&candidate).with_context(|| {
-            format!(
-                "Could not inspect “{}” after moving it aside",
-                candidate.display()
-            )
+            format!("Could not inspect “{}” after moving it aside", candidate.display())
         })?);
         if identity.key != expected.key {
-            bail!(
-                "“{}” changed while being moved aside to replace it",
-                path.display()
-            );
+            bail!("“{}” changed while being moved aside to replace it", path.display());
         }
-        return Ok(ReplacedItem {
-            path: path.to_path_buf(),
-            quarantine: candidate,
-            identity,
-        });
+        return Ok(ReplacedItem { path: path.to_path_buf(), quarantine: candidate, identity });
     }
     bail!("Could not reserve a unique replacement quarantine path")
 }
@@ -263,10 +249,8 @@ pub(super) struct UnrestoredItems<'a> {
 /// caller owes those items a home; it cannot treat this as a plain error.
 pub(super) fn restore_replaced_items(replaced: &[ReplacedItem]) -> Result<(), UnrestoredItems<'_>> {
     for (index, item) in replaced.iter().enumerate().rev() {
-        let unrestored = |error: anyhow::Error| UnrestoredItems {
-            error,
-            remaining: &replaced[..=index],
-        };
+        let unrestored =
+            |error: anyhow::Error| UnrestoredItems { error, remaining: &replaced[..=index] };
         item.identity
             .validate(&item.quarantine, "restore the replaced item")
             .map_err(unrestored)?;
@@ -293,11 +277,9 @@ pub(super) fn preserve_unrestored(unrestored: UnrestoredItems<'_>) -> anyhow::Er
     let notes = remaining
         .iter()
         .map(|item| match promote_to_recovery(item) {
-            Ok(recovery) => format!(
-                "“{}” is preserved at “{}”",
-                item.path.display(),
-                recovery.display()
-            ),
+            Ok(recovery) => {
+                format!("“{}” is preserved at “{}”", item.path.display(), recovery.display())
+            }
             Err(failure) => format!(
                 "“{}” remains at “{}” ({failure})",
                 item.path.display(),
@@ -315,14 +297,8 @@ pub(super) fn preserve_unrestored(unrestored: UnrestoredItems<'_>) -> anyhow::Er
 /// keeps its quarantine name and the caller says so, because a message naming
 /// the wrong path would be worse than a long one.
 fn promote_to_recovery(item: &ReplacedItem) -> Result<PathBuf> {
-    let parent = item
-        .quarantine
-        .parent()
-        .context("Quarantined item has no parent directory")?;
-    let name = item
-        .path
-        .file_name()
-        .context("Replaced item has no file name")?;
+    let parent = item.quarantine.parent().context("Quarantined item has no parent directory")?;
+    let name = item.path.file_name().context("Replaced item has no file name")?;
     for _ in 0..1024 {
         let sequence = REPLACEMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(quarantined_name(RECOVERY_REMNANT_PREFIX, sequence, name));

@@ -137,23 +137,13 @@ async fn acquire_or_forward_with_roles(
         Err(error) => return InstanceStartup::Unavailable(error.to_string()),
     };
     let builder = match builder
-        .serve_at(
-            APPLICATION_OBJECT_PATH,
-            ApplicationService {
-                requests: sender.clone(),
-            },
-        )
+        .serve_at(APPLICATION_OBJECT_PATH, ApplicationService { requests: sender.clone() })
         .and_then(|builder| {
-            builder.serve_at(
-                FILE_MANAGER_OBJECT_PATH,
-                FileManagerService { requests: sender },
-            )
+            builder.serve_at(FILE_MANAGER_OBJECT_PATH, FileManagerService { requests: sender })
         })
         .and_then(|builder| builder.name(APPLICATION_ID))
     {
-        Ok(builder) => builder
-            .allow_name_replacements(false)
-            .replace_existing_names(false),
+        Ok(builder) => builder.allow_name_replacements(false).replace_existing_names(false),
         Err(error) => return InstanceStartup::Unavailable(error.to_string()),
     };
     match builder.build().await {
@@ -175,10 +165,7 @@ async fn acquire_or_forward_with_roles(
                 && let Err(error) =
                     file_chooser::serve(&connection, picker_sender, replies.clone()).await
             {
-                eprintln!(
-                    "could not serve {}: {error}",
-                    file_chooser::FILE_CHOOSER_BUS_NAME
-                );
+                eprintln!("could not serve {}: {error}", file_chooser::FILE_CHOOSER_BUS_NAME);
             }
             InstanceStartup::Primary(DesktopRuntime {
                 _connection: connection,
@@ -271,9 +258,7 @@ impl FileManagerService {
         _uris: Vec<String>,
         _startup_id: String,
     ) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported(
-            "Marcel Properties is not implemented yet".to_string(),
-        ))
+        Err(zbus::fdo::Error::NotSupported("Marcel Properties is not implemented yet".to_string()))
     }
 }
 
@@ -354,9 +339,7 @@ fn local_path_from_uri(uri: &str) -> Result<PathBuf> {
         bail!("unsupported URI scheme in {uri}");
     }
 
-    parsed
-        .to_file_path()
-        .map_err(|_| anyhow!("non-local file URI: {uri}"))
+    parsed.to_file_path().map_err(|_| anyhow!("non-local file URI: {uri}"))
 }
 
 fn require_existing(path: &Path) -> Result<PathBuf> {
@@ -378,19 +361,13 @@ fn group_open_targets(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>> {
     for path in paths {
         let path = require_existing(&path)?;
         if path.is_dir() {
-            locations.push(RevealedLocation {
-                directory: path,
-                items: Vec::new(),
-            });
+            locations.push(RevealedLocation { directory: path, items: Vec::new() });
         } else {
             let directory = path
                 .parent()
                 .map(Path::to_path_buf)
                 .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
-            locations.push(RevealedLocation {
-                directory,
-                items: vec![path],
-            });
+            locations.push(RevealedLocation { directory, items: vec![path] });
         }
     }
     Ok(locations)
@@ -411,10 +388,7 @@ fn group_revealed_items(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>> {
             locations[index].items.push(path);
         } else {
             parent_indices.insert(directory.clone(), locations.len());
-            locations.push(RevealedLocation {
-                directory,
-                items: vec![path],
-            });
+            locations.push(RevealedLocation { directory, items: vec![path] });
         }
     }
 
@@ -435,10 +409,8 @@ mod tests {
     /// argument at all — raised it and ignored the folder they were standing in.
     #[test]
     fn a_launch_never_takes_over_a_window_and_a_reveal_may() {
-        let location = || RevealedLocation {
-            directory: PathBuf::from("/folder"),
-            items: Vec::new(),
-        };
+        let location =
+            || RevealedLocation { directory: PathBuf::from("/folder"), items: Vec::new() };
 
         assert!(!DesktopRequest::Open(vec![location()]).may_reuse_a_window());
         assert!(!DesktopRequest::Activate.may_reuse_a_window());
@@ -448,14 +420,8 @@ mod tests {
 
     const PRIVATE_BUS_CHILD: &str = "MARCEL_PRIVATE_BUS_TEST_CHILD";
     const PRIVATE_BUS_CONFIG: &str = "MARCEL_TEST_DBUS_SESSION_CONFIG";
-    const FILE_MANAGER_ROLE: BusRoles = BusRoles {
-        file_manager: true,
-        file_chooser: false,
-    };
-    const FILE_CHOOSER_ROLE: BusRoles = BusRoles {
-        file_manager: false,
-        file_chooser: true,
-    };
+    const FILE_MANAGER_ROLE: BusRoles = BusRoles { file_manager: true, file_chooser: false };
+    const FILE_CHOOSER_ROLE: BusRoles = BusRoles { file_manager: false, file_chooser: true };
 
     fn uri(path: &Path) -> String {
         Url::from_file_path(path).unwrap().into()
@@ -518,10 +484,7 @@ mod tests {
 
         assert_eq!(
             validate_uri_request(UriRequestKind::Open, &[uri(&folder), uri(&file)]).unwrap(),
-            DesktopRequest::Open(vec![
-                revealed(&folder, &[]),
-                revealed(sandbox.root(), &[&file]),
-            ])
+            DesktopRequest::Open(vec![revealed(&folder, &[]), revealed(sandbox.root(), &[&file]),])
         );
     }
 
@@ -542,10 +505,7 @@ mod tests {
 
     #[test]
     fn application_id_and_object_path_match() {
-        assert_eq!(
-            format!("/{}", APPLICATION_ID.replace('.', "/")),
-            APPLICATION_OBJECT_PATH
-        );
+        assert_eq!(format!("/{}", APPLICATION_ID.replace('.', "/")), APPLICATION_OBJECT_PATH);
     }
 
     #[test]
@@ -608,12 +568,9 @@ mod tests {
                 }
             };
             let requests = primary.requests();
-            let client = zbus::Connection::session()
-                .await
-                .expect("client must connect to the private bus");
-            let bus = zbus::fdo::DBusProxy::new(&client)
-                .await
-                .expect("bus proxy must initialize");
+            let client =
+                zbus::Connection::session().await.expect("client must connect to the private bus");
+            let bus = zbus::fdo::DBusProxy::new(&client).await.expect("bus proxy must initialize");
             assert!(
                 owns_name(&bus, APPLICATION_ID).await,
                 "primary must own Marcel's application name"
@@ -631,37 +588,27 @@ mod tests {
                 acquire_or_forward(Some(vec![uri(&file)])).await,
                 InstanceStartup::Forwarded
             ));
-            assert_eq!(
-                receive(&requests).await,
-                DesktopRequest::Open(vec![location.clone()])
-            );
+            assert_eq!(receive(&requests).await, DesktopRequest::Open(vec![location.clone()]));
 
             let proxy = |name: &'static str, path: &'static str, interface: &'static str| {
                 zbus::Proxy::new(&client, name, path, interface)
             };
-            let application = proxy(
-                APPLICATION_ID,
-                APPLICATION_OBJECT_PATH,
-                "org.freedesktop.Application",
-            )
-            .await
-            .expect("application proxy must initialize");
+            let application =
+                proxy(APPLICATION_ID, APPLICATION_OBJECT_PATH, "org.freedesktop.Application")
+                    .await
+                    .expect("application proxy must initialize");
             application
                 .call::<_, _, ()>("Activate", &(HashMap::<String, OwnedValue>::new(),))
                 .await
                 .expect("warm activation must succeed");
             assert_eq!(receive(&requests).await, DesktopRequest::Activate);
 
-            let file_manager = proxy(
-                APPLICATION_ID,
-                FILE_MANAGER_OBJECT_PATH,
-                "org.freedesktop.FileManager1",
-            )
-            .await
-            .expect("file-manager proxy must initialize");
-            let invalid: zbus::Result<()> = file_manager
-                .call("ShowFolders", &(vec![uri(&file)], String::new()))
-                .await;
+            let file_manager =
+                proxy(APPLICATION_ID, FILE_MANAGER_OBJECT_PATH, "org.freedesktop.FileManager1")
+                    .await
+                    .expect("file-manager proxy must initialize");
+            let invalid: zbus::Result<()> =
+                file_manager.call("ShowFolders", &(vec![uri(&file)], String::new())).await;
             match invalid.expect_err("a regular file is not a ShowFolders target") {
                 zbus::Error::MethodError(name, _, _) => {
                     assert_eq!(name.as_str(), "org.freedesktop.DBus.Error.InvalidArgs")
@@ -673,17 +620,12 @@ mod tests {
                 .call::<_, _, ()>("ShowItems", &(vec![uri(&file)], String::new()))
                 .await
                 .expect("ShowItems must accept a local file");
-            assert_eq!(
-                receive(&requests).await,
-                DesktopRequest::ShowItems(vec![location])
-            );
+            assert_eq!(receive(&requests).await, DesktopRequest::ShowItems(vec![location]));
 
             drop(primary);
-            let replacement = become_primary(FILE_MANAGER_ROLE)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("application name was not released after primary exit: {error:?}")
-                });
+            let replacement = become_primary(FILE_MANAGER_ROLE).await.unwrap_or_else(|error| {
+                panic!("application name was not released after primary exit: {error:?}")
+            });
             assert!(
                 replacement.requests().is_empty(),
                 "replacement primary must start with an empty queue"
@@ -698,9 +640,8 @@ mod tests {
             // launch to an application name nobody owned, re-activating
             // another Marcel that failed the same way.
             drop(replacement);
-            let foreign = zbus::Connection::session()
-                .await
-                .expect("foreign file manager must connect");
+            let foreign =
+                zbus::Connection::session().await.expect("foreign file manager must connect");
             foreign
                 .request_name(FILE_MANAGER_BUS_NAME)
                 .await
@@ -714,10 +655,7 @@ mod tests {
                 .expect("the generic name must stay owned");
             assert_eq!(
                 owner.as_str(),
-                foreign
-                    .unique_name()
-                    .expect("foreign connection has a unique name")
-                    .as_str(),
+                foreign.unique_name().expect("foreign connection has a unique name").as_str(),
                 "Marcel must not have displaced the owner of the generic name"
             );
 
@@ -774,18 +712,12 @@ mod tests {
             assert_eq!(request.mode, PickerMode::OpenFiles);
             request
                 .reply
-                .send(PickerResponse::Chosen {
-                    paths: vec![file.clone()],
-                    filter: None,
-                })
+                .send(PickerResponse::Chosen { paths: vec![file.clone()], filter: None })
                 .await
                 .expect("the backend must still be waiting for the answer");
             let (code, results) = call.await.expect("OpenFile must succeed");
             assert_eq!(code, file_chooser::RESPONSE_SUCCESS);
-            assert_eq!(
-                Vec::<String>::try_from(results["uris"].clone()).unwrap(),
-                vec![uri(&file)]
-            );
+            assert_eq!(Vec::<String>::try_from(results["uris"].clone()).unwrap(), vec![uri(&file)]);
             // The reply has reached the client, so the backend must stop
             // counting it; the quit hook waits on exactly this.
             for _ in 0..200 {
@@ -812,11 +744,7 @@ mod tests {
                 .call::<_, _, ()>("Close", &())
                 .await
                 .expect("Close must reach the request object while the call is pending");
-            request
-                .closed
-                .recv()
-                .await
-                .expect("the window must be told the request was withdrawn");
+            request.closed.recv().await.expect("the window must be told the request was withdrawn");
             request
                 .reply
                 .send(PickerResponse::Closed)
@@ -842,13 +770,10 @@ mod tests {
     /// The next message on `channel`, or a panic once the bus has clearly
     /// stopped delivering.
     async fn receive<T>(channel: &Receiver<T>) -> T {
-        smol::future::race(
-            async { channel.recv().await.expect("channel must stay open") },
-            async {
-                smol::Timer::after(Duration::from_secs(3)).await;
-                panic!("timed out waiting for a request")
-            },
-        )
+        smol::future::race(async { channel.recv().await.expect("channel must stay open") }, async {
+            smol::Timer::after(Duration::from_secs(3)).await;
+            panic!("timed out waiting for a request")
+        })
         .await
     }
 }

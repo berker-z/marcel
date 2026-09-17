@@ -43,10 +43,7 @@ pub fn inspect_pdf(source: &Path, cancelled: &Arc<AtomicBool>) -> io::Result<Pdf
     create_private_dir_all(&cache_dir)?;
     let identity = file_identity(source)?;
     let pages = page_count(source, &cache_dir, &identity, cancelled)?;
-    Ok(PdfDocument {
-        source: source.to_path_buf(),
-        pages,
-    })
+    Ok(PdfDocument { source: source.to_path_buf(), pages })
 }
 
 /// Rasterize one PDF page through Poppler without loading PDF machinery into
@@ -76,9 +73,7 @@ pub fn render_pdf_page(
     }
 
     check_cancelled(cancelled)?;
-    let output_dir = tempfile::Builder::new()
-        .prefix("render-")
-        .tempdir_in(&cache_dir)?;
+    let output_dir = tempfile::Builder::new().prefix("render-").tempdir_in(&cache_dir)?;
     let output_prefix = output_dir.path().join("page");
     let stderr = tempfile::tempfile()?;
     let stderr_writer = stderr.try_clone()?;
@@ -109,10 +104,7 @@ pub fn render_pdf_page(
     }
 
     let temporary_render = output_prefix.with_extension("jpg");
-    if !temporary_render
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
+    if !temporary_render.metadata().is_ok_and(|metadata| metadata.len() > 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Poppler produced an empty PDF preview",
@@ -162,16 +154,10 @@ fn run_pdfinfo(
 
     let output = read_bounded(stdout)?;
     let pages = parse_page_count(&output).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Poppler did not report a PDF page count",
-        )
+        io::Error::new(io::ErrorKind::InvalidData, "Poppler did not report a PDF page count")
     })?;
 
-    fs::write(
-        cache_dir.join(format!("{identity}.pages")),
-        pages.to_string(),
-    )?;
+    fs::write(cache_dir.join(format!("{identity}.pages")), pages.to_string())?;
     Ok(pages)
 }
 
@@ -191,10 +177,7 @@ fn run_child(command: &mut Command, cancelled: &AtomicBool) -> io::Result<ExitSt
     loop {
         if cancelled.load(Ordering::Acquire) {
             terminate(&mut child);
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "PDF preview was cancelled",
-            ));
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "PDF preview was cancelled"));
         }
         if let Some(status) = child.try_wait()? {
             return Ok(status);
@@ -217,10 +200,7 @@ fn terminate(child: &mut Child) {
 
 fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
     if cancelled.load(Ordering::Acquire) {
-        Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "PDF preview was cancelled",
-        ))
+        Err(io::Error::new(io::ErrorKind::Interrupted, "PDF preview was cancelled"))
     } else {
         Ok(())
     }
@@ -294,9 +274,7 @@ fn read_bounded(mut file: File) -> io::Result<Vec<u8>> {
     // writing; rewind before consuming the bounded output.
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
-    file.by_ref()
-        .take(MAX_TOOL_OUTPUT_BYTES)
-        .read_to_end(&mut bytes)?;
+    file.by_ref().take(MAX_TOOL_OUTPUT_BYTES).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -319,9 +297,7 @@ fn prune_cache(cache_dir: &Path) {
         .flatten()
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
-            metadata
-                .is_file()
-                .then(|| (metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()))
+            metadata.is_file().then(|| (metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()))
         })
         .collect::<Vec<_>>();
     if files.len() <= MAX_CACHE_FILES {
@@ -342,10 +318,7 @@ mod tests {
 
     #[test]
     fn parses_poppler_page_count() {
-        assert_eq!(
-            parse_page_count(b"Title:          Test\nPages:          42\n"),
-            Some(42)
-        );
+        assert_eq!(parse_page_count(b"Title:          Test\nPages:          42\n"), Some(42));
     }
 
     #[test]
@@ -371,10 +344,7 @@ mod tests {
     #[test]
     fn page_counts_beyond_the_bound_are_rejected_including_cached_ones() {
         let over = MAX_PDF_PAGES + 1;
-        assert_eq!(
-            parse_page_count(format!("Pages: {over}\n").as_bytes()),
-            None
-        );
+        assert_eq!(parse_page_count(format!("Pages: {over}\n").as_bytes()), None);
         assert_eq!(parse_page_count(b"Pages: 50000\n"), Some(MAX_PDF_PAGES));
 
         let cache = tempfile::tempdir().unwrap();
@@ -385,10 +355,7 @@ mod tests {
     #[test]
     fn cancellation_is_observable_before_work_starts() {
         let cancelled = AtomicBool::new(true);
-        assert_eq!(
-            check_cancelled(&cancelled).unwrap_err().kind(),
-            io::ErrorKind::Interrupted
-        );
+        assert_eq!(check_cancelled(&cancelled).unwrap_err().kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]

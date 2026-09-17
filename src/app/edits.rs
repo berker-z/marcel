@@ -116,9 +116,7 @@ impl Marcel {
             return;
         }
         self.ui.entry_menu = None;
-        self.with_operations(window, cx, |ops, origin, cx| {
-            ops.start_trash(paths, origin, cx)
-        });
+        self.with_operations(window, cx, |ops, origin, cx| ops.start_trash(paths, origin, cx));
     }
 
     /// The Trash records behind the selection, in visible order.
@@ -135,9 +133,7 @@ impl Marcel {
             return;
         }
         self.ui.entry_menu = None;
-        self.with_operations(window, cx, |ops, origin, cx| {
-            ops.start_restore(records, origin, cx)
-        });
+        self.with_operations(window, cx, |ops, origin, cx| ops.start_restore(records, origin, cx));
     }
 
     pub(super) fn open_permanent_delete_dialog(
@@ -149,10 +145,7 @@ impl Marcel {
         if paths.is_empty() {
             return;
         }
-        let trash_records = self
-            .sidebar
-            .browsing_trash
-            .then(|| self.selected_trash_records());
+        let trash_records = self.sidebar.browsing_trash.then(|| self.selected_trash_records());
         if trash_records.as_ref().is_some_and(Vec::is_empty) {
             return;
         }
@@ -186,12 +179,7 @@ impl Marcel {
     }
 
     pub(super) fn open_empty_trash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let records = self
-            .sidebar
-            .trash_records
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let records = self.sidebar.trash_records.values().cloned().collect::<Vec<_>>();
         if records.is_empty() {
             return;
         }
@@ -199,10 +187,8 @@ impl Marcel {
         // calling it "empty the Trash" when part of it was never read would
         // promise something this operation cannot deliver.
         let unreadable = self.sidebar.unreadable_trash_entries;
-        let mut description = format!(
-            "Permanently delete all {} item(s) currently shown in Trash?",
-            records.len()
-        );
+        let mut description =
+            format!("Permanently delete all {} item(s) currently shown in Trash?", records.len());
         if unreadable > 0 {
             description.push_str(&format!(
                 "\n{unreadable} further Trash entr(y/ies) could not be read and will be left behind."
@@ -296,20 +282,16 @@ impl Marcel {
             entry.kind == crate::browse::entries::EntryKind::Directory,
         );
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
-        let subscription = cx.subscribe_in(
-            &input,
-            window,
-            |this, input, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.submit_rename(input, false, window, cx),
-                InputEvent::Blur => this.submit_rename(input, true, window, cx),
-                InputEvent::Change | InputEvent::Focus => {}
-            },
-        );
-        self.ui.rename = Some(RenameEdit {
-            path,
-            input: input.clone(),
-            _subscription: subscription,
-        });
+        let subscription =
+            cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => this.submit_rename(input, false, window, cx),
+                    InputEvent::Blur => this.submit_rename(input, true, window, cx),
+                    InputEvent::Change | InputEvent::Focus => {}
+                }
+            });
+        self.ui.rename =
+            Some(RenameEdit { path, input: input.clone(), _subscription: subscription });
         cx.notify();
         select_stem(input, is_directory, window, cx);
     }
@@ -361,11 +343,7 @@ impl Marcel {
         self.ask_name(
             window,
             cx,
-            NameDialog {
-                title: "New Folder",
-                input,
-                action: "Create",
-            },
+            NameDialog { title: "New Folder", input, action: "Create" },
             |_| Ok(()),
             |this, name, window, cx| {
                 let parent = this.directory.current_dir.clone();
@@ -387,11 +365,7 @@ impl Marcel {
         self.ask_name(
             window,
             cx,
-            NameDialog {
-                title: "Compress to ZIP",
-                input,
-                action: "Compress",
-            },
+            NameDialog { title: "Compress to ZIP", input, action: "Compress" },
             |name| {
                 if name.to_ascii_lowercase().ends_with(".zip") {
                     Ok(())
@@ -414,9 +388,7 @@ impl Marcel {
         let Some(archive) = self.directory.selection.primary().cloned() else {
             return;
         };
-        self.with_operations(window, cx, |ops, origin, cx| {
-            ops.start_extract(archive, origin, cx)
-        });
+        self.with_operations(window, cx, |ops, origin, cx| ops.start_extract(archive, origin, cx));
     }
 
     // Opening things.
@@ -442,10 +414,7 @@ impl Marcel {
                     } else {
                         let filter = picker.active_filter;
                         self.answer_picker(
-                            PickerResponse::Chosen {
-                                paths: vec![entry.path],
-                                filter,
-                            },
+                            PickerResponse::Chosen { paths: vec![entry.path], filter },
                             window,
                             cx,
                         );
@@ -465,27 +434,21 @@ impl Marcel {
             return;
         }
         let ticket = self.preview.ticket;
-        self.launch(
-            crate::desktop::open::open_file(entry.path),
-            cx,
-            move |this| this.preview.ticket == ticket,
-        );
+        self.launch(crate::desktop::open::open_file(entry.path), cx, move |this| {
+            this.preview.ticket == ticket
+        });
     }
 
     pub(super) fn open_primary_with(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .primary_entry()
-            .filter(|entry| !entry.navigable)
-            .map(|entry| entry.path.clone())
+        let Some(path) =
+            self.primary_entry().filter(|entry| !entry.navigable).map(|entry| entry.path.clone())
         else {
             return;
         };
         let still_primary = path.clone();
-        self.launch(
-            crate::desktop::open::open_file_with(path),
-            cx,
-            move |this| this.directory.selection.primary() == Some(&still_primary),
-        );
+        self.launch(crate::desktop::open::open_file_with(path), cx, move |this| {
+            this.directory.selection.primary() == Some(&still_primary)
+        });
     }
 
     /// Hand a file to another application, showing a failure in the preview
@@ -512,9 +475,7 @@ impl Marcel {
 
     pub(super) fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let directory = self.directory.current_dir.clone();
-        let task = unblock(cx, move || {
-            crate::desktop::terminal::open_terminal(&directory)
-        });
+        let task = unblock(cx, move || crate::desktop::terminal::open_terminal(&directory));
         cx.spawn_in(window, async move |this, window| {
             if let Err(error) = task.await {
                 let _ = this.update_in(window, |_, window, cx| {

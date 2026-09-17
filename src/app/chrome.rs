@@ -44,15 +44,9 @@ pub(super) fn icon_button(
         .font_family(cx.theme().mono_font_family.clone())
         .line_height(relative(1.0))
         .text_lg()
-        .text_color(if enabled {
-            colors.sidebar_foreground
-        } else {
-            colors.muted_foreground
-        })
+        .text_color(if enabled { colors.sidebar_foreground } else { colors.muted_foreground })
         .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(|button| button.bg(colors.sidebar_accent))
+            button.cursor_pointer().hover(|button| button.bg(colors.sidebar_accent))
         })
         .child(glyph)
 }
@@ -97,12 +91,7 @@ impl Marcel {
                     .border_r_1()
                     .border_color(colors.sidebar_border)
                     .child(command_button("back", "←", BrowserCommand::GoBack, cx))
-                    .child(command_button(
-                        "forward",
-                        "→",
-                        BrowserCommand::GoForward,
-                        cx,
-                    ))
+                    .child(command_button("forward", "→", BrowserCommand::GoForward, cx))
                     .child(command_button("up", "↑", BrowserCommand::GoToParent, cx))
                     .child(command_button(
                         "undo-file-operation",
@@ -150,11 +139,7 @@ impl Marcel {
             )
         };
         let colors = cx.theme().colors;
-        let title = if cancelling {
-            "Cancelling…"
-        } else {
-            kind.title()
-        };
+        let title = if cancelling { "Cancelling…" } else { kind.title() };
         let percentage = if snapshot.total_bytes > 0 {
             snapshot.completed_bytes as f32 / snapshot.total_bytes as f32 * 100.0
         } else if snapshot.total_items > 0 {
@@ -163,10 +148,7 @@ impl Marcel {
             0.0
         };
         let progress_text = if snapshot.preparing {
-            format!(
-                "Preparing {} item(s)",
-                snapshot.total_items.max(source_count as u64)
-            )
+            format!("Preparing {} item(s)", snapshot.total_items.max(source_count as u64))
         } else if snapshot.total_bytes > 0 {
             format!(
                 "{} of {} items · {} of {}",
@@ -176,10 +158,7 @@ impl Marcel {
                 format_size(Some(snapshot.total_bytes))
             )
         } else {
-            format!(
-                "{} of {} items",
-                snapshot.completed_items, snapshot.total_items
-            )
+            format!("{} of {} items", snapshot.completed_items, snapshot.total_items)
         };
         let current_name = snapshot.current_path.as_ref().map(|path| {
             path.file_name()
@@ -287,20 +266,15 @@ impl Marcel {
                     .child(self.render_preview(window, cx)),
             )
             .when(!footer_lines.is_empty(), |this| {
-                this.child(
-                    div().flex().flex_col().gap_1().px_4().py_3().children(
-                        footer_lines
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, (text, color))| {
-                                div()
-                                    .when(index == 0, |line| line.text_sm().whitespace_normal())
-                                    .when(index > 0, |line| line.text_xs())
-                                    .text_color(color)
-                                    .child(text)
-                            }),
-                    ),
-                )
+                this.child(div().flex().flex_col().gap_1().px_4().py_3().children(
+                    footer_lines.into_iter().enumerate().map(|(index, (text, color))| {
+                        div()
+                            .when(index == 0, |line| line.text_sm().whitespace_normal())
+                            .when(index > 0, |line| line.text_xs())
+                            .text_color(color)
+                            .child(text)
+                    }),
+                ))
             })
             .into_any_element()
     }
@@ -310,9 +284,7 @@ impl Render for Marcel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.ui.search_input.read(cx).value().as_ref() != self.directory.filter_query {
             let query = self.directory.filter_query.clone();
-            self.ui
-                .search_input
-                .update(cx, |input, cx| input.set_value(query, window, cx));
+            self.ui.search_input.update(cx, |input, cx| input.set_value(query, window, cx));
         }
         let colors = cx.theme().colors;
         self.sidebar.place_drop_bounds.borrow_mut().clear();

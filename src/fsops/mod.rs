@@ -54,10 +54,7 @@ pub struct PathFailure {
 
 impl PathFailure {
     pub fn new(path: &Path, message: impl Into<String>) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            message: message.into(),
-        }
+        Self { path: path.to_path_buf(), message: message.into() }
     }
 
     /// One sentence for a notification: the only failure, or the first with a
@@ -86,24 +83,15 @@ pub struct DirectoryChanges {
 
 impl DirectoryChanges {
     pub fn removed(removed: Vec<PathBuf>) -> Self {
-        Self {
-            removed,
-            upserted: Vec::new(),
-        }
+        Self { removed, upserted: Vec::new() }
     }
 
     pub fn upserted(upserted: Vec<PathBuf>) -> Self {
-        Self {
-            removed: Vec::new(),
-            upserted,
-        }
+        Self { removed: Vec::new(), upserted }
     }
 
     pub fn reversed(self) -> Self {
-        Self {
-            removed: self.upserted,
-            upserted: self.removed,
-        }
+        Self { removed: self.upserted, upserted: self.removed }
     }
 }
 
@@ -154,10 +142,7 @@ impl TransferProgress {
     }
 
     pub fn set_current_path(&self, path: Option<PathBuf>) {
-        *self
-            .current_path
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+        *self.current_path.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
     }
 
     pub fn complete_item(&self) {

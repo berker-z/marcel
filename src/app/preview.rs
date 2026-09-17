@@ -271,15 +271,9 @@ impl PreviewState {
 
     fn wrap_columns(&self) -> usize {
         let width = f32::from(self.width.get());
-        let width = if width > 0.0 {
-            width
-        } else {
-            DEFAULT_PREVIEW_WIDTH
-        };
+        let width = if width > 0.0 { width } else { DEFAULT_PREVIEW_WIDTH };
         let cell_width = f32::from(self.mono_cell_width.get()).max(1.0);
-        ((width - PREVIEW_TEXT_CHROME_WIDTH) / cell_width)
-            .floor()
-            .max(16.0) as usize
+        ((width - PREVIEW_TEXT_CHROME_WIDTH) / cell_width).floor().max(16.0) as usize
     }
 }
 
@@ -290,18 +284,15 @@ impl Marcel {
         // becoming current:
         // https://github.com/sxyazi/yazi/blob/main/yazi-core/src/tab/preview.rs
         if entry.navigable {
-            let (ticket, cancelled) =
-                self.preview
-                    .begin(PreviewContent::Ready(Preview::Directory {
-                        path: entry.path.clone(),
-                    }));
+            let (ticket, cancelled) = self
+                .preview
+                .begin(PreviewContent::Ready(Preview::Directory { path: entry.path.clone() }));
             self.start_folder_preview_load(entry.path, ticket, cancelled, cx);
             cx.notify();
             return;
         }
-        let (ticket, cancelled) = self.preview.begin(PreviewContent::Loading {
-            name: entry.name.clone(),
-        });
+        let (ticket, cancelled) =
+            self.preview.begin(PreviewContent::Loading { name: entry.name.clone() });
         let load_task = unblock(cx, move || load_preview(&entry, &cancelled));
         self.preview.task = Some(cx.spawn(async move |this, cx| {
             let result = load_task.await;
@@ -335,10 +326,7 @@ impl Marcel {
         self.preview.folder_loading = true;
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
-        unblock(cx, move || {
-            stream_directory(&stream_path, sender, Some(&cancelled))
-        })
-        .detach();
+        unblock(cx, move || stream_directory(&stream_path, sender, Some(&cancelled))).detach();
 
         self.preview.folder_task = Some(pump(cx, receiver, move |this, update, cx| {
             if ticket != this.preview.ticket {
@@ -389,12 +377,8 @@ impl Marcel {
         if event.is_right_click() || event.click_count() < 2 {
             return;
         }
-        if let Some(entry) = self
-            .preview
-            .folder_entries
-            .iter()
-            .find(|entry| entry.path == path)
-            .cloned()
+        if let Some(entry) =
+            self.preview.folder_entries.iter().find(|entry| entry.path == path).cloned()
         {
             self.open_entry(entry, window, cx);
         }
@@ -480,15 +464,8 @@ impl Marcel {
             .filter(|entry| !entry.navigable && thumbnails::supports(&entry.path))
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
-        let done = self
-            .preview
-            .thumbnails
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>();
-        self.preview
-            .thumbnail_queue
-            .schedule(priority, |path| done.contains(path));
+        let done = self.preview.thumbnails.keys().cloned().collect::<HashSet<_>>();
+        self.preview.thumbnail_queue.schedule(priority, |path| done.contains(path));
         self.ensure_workers(
             cx,
             |this| &mut this.preview.thumbnail_queue,
@@ -519,15 +496,8 @@ impl Marcel {
         // viewport and retains only a one-page lookahead:
         // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-plugin/preset/plugins/pdf.lua
         let priority = prioritize_pdf_pages(visible, *pages);
-        let done = self
-            .preview
-            .pdf_pages
-            .keys()
-            .copied()
-            .collect::<HashSet<_>>();
-        self.preview
-            .pdf_queue
-            .schedule(priority, |page| done.contains(page));
+        let done = self.preview.pdf_pages.keys().copied().collect::<HashSet<_>>();
+        self.preview.pdf_queue.schedule(priority, |page| done.contains(page));
         self.ensure_workers(
             cx,
             |this| &mut this.preview.pdf_queue,
@@ -553,11 +523,8 @@ impl Marcel {
     // Text wrapping.
 
     pub(super) fn start_preview_wrap(&mut self, cx: &mut Context<Self>) {
-        let PreviewContent::Ready(Preview::Text {
-            lines,
-            render_rich: false,
-            ..
-        }) = &self.preview.state
+        let PreviewContent::Ready(Preview::Text { lines, render_rich: false, .. }) =
+            &self.preview.state
         else {
             self.preview.wrap_task.take();
             self.preview.wrap = None;
@@ -578,11 +545,7 @@ impl Marcel {
                 if ticket != this.preview.ticket || columns != this.preview.wrap_columns() {
                     return;
                 }
-                this.preview.wrap = Some(WrappedPreview {
-                    ticket,
-                    columns,
-                    lines,
-                });
+                this.preview.wrap = Some(WrappedPreview { ticket, columns, lines });
                 cx.notify();
             });
         }));
@@ -630,18 +593,9 @@ impl Marcel {
         if let Some(entry) = self.primary_entry() {
             lines.push((entry.name.clone(), colors.foreground));
             let details = if entry.navigable {
-                let folders = self
-                    .preview
-                    .folder_entries
-                    .iter()
-                    .filter(|e| e.navigable)
-                    .count();
+                let folders = self.preview.folder_entries.iter().filter(|e| e.navigable).count();
                 let files = self.preview.folder_entries.len() - folders;
-                let progress = if self.preview.folder_loading {
-                    " · Loading…"
-                } else {
-                    ""
-                };
+                let progress = if self.preview.folder_loading { " · Loading…" } else { "" };
                 format!("Folder · {folders} folders · {files} files{progress}")
             } else {
                 match format_size(entry.size) {
@@ -655,16 +609,10 @@ impl Marcel {
             PreviewContent::Ready(Preview::Image { mime, .. }) => {
                 lines.push((mime.clone(), colors.muted_foreground));
             }
-            PreviewContent::Ready(Preview::Text {
-                truncated,
-                clipped_lines,
-                ..
-            }) => {
+            PreviewContent::Ready(Preview::Text { truncated, clipped_lines, .. }) => {
                 if *truncated {
-                    lines.push((
-                        "Preview limited to the first 256 KiB".to_string(),
-                        colors.warning,
-                    ));
+                    lines
+                        .push(("Preview limited to the first 256 KiB".to_string(), colors.warning));
                 }
                 if *clipped_lines {
                     lines.push((
@@ -748,11 +696,8 @@ impl Marcel {
                 render_rich: true,
                 ..
             }) => {
-                let source = if *markdown {
-                    contents.clone()
-                } else {
-                    code_fence(contents, language)
-                };
+                let source =
+                    if *markdown { contents.clone() } else { code_fence(contents, language) };
                 TextView::markdown(("preview-text", self.preview.ticket), source)
                     .selectable(true)
                     .scrollable(true)
@@ -826,10 +771,9 @@ impl Marcel {
         let radius = cx.theme().radius;
         if self.preview.folder_entries.is_empty() {
             return match (&self.preview.folder_error, self.preview.folder_loading) {
-                (Some(error), _) => message(
-                    format!("Could not read this folder\n{error}"),
-                    colors.danger,
-                ),
+                (Some(error), _) => {
+                    message(format!("Could not read this folder\n{error}"), colors.danger)
+                }
                 (None, true) => message("Loading folder contents…", colors.muted_foreground),
                 (None, false) => message("This folder is empty", colors.muted_foreground),
             };
@@ -898,12 +842,7 @@ impl Marcel {
 
 /// A list that fills the pane, with its scrollbar.
 fn scrolled(list: impl IntoElement, scroll: &UniformListScrollHandle) -> AnyElement {
-    div()
-        .relative()
-        .size_full()
-        .child(list)
-        .vertical_scrollbar(scroll)
-        .into_any_element()
+    div().relative().size_full().child(list).vertical_scrollbar(scroll).into_any_element()
 }
 
 /// An image that fills the pane, saying so while it decodes and if it cannot.
@@ -950,10 +889,7 @@ fn code_fence(contents: &str, language: &str) -> String {
 }
 
 fn prioritize_thumbnail_indices(visible: Range<usize>, nearby: Range<usize>) -> Vec<usize> {
-    visible
-        .clone()
-        .chain(nearby.filter(|index| !visible.contains(index)))
-        .collect()
+    visible.clone().chain(nearby.filter(|index| !visible.contains(index))).collect()
 }
 
 fn prioritize_pdf_pages(visible: Range<usize>, pages: usize) -> Vec<usize> {
@@ -973,10 +909,8 @@ fn wrap_preview_lines(lines: &[String], columns: usize) -> Arc<[WrappedPreviewLi
     let mut wrapped = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
         if line.is_empty() {
-            wrapped.push(WrappedPreviewLine {
-                source_line: Some(index + 1),
-                contents: String::new(),
-            });
+            wrapped
+                .push(WrappedPreviewLine { source_line: Some(index + 1), contents: String::new() });
             continue;
         }
         let mut remaining = line.as_str();
@@ -998,11 +932,7 @@ fn preview_wrap_break(line: &str, columns: usize) -> usize {
     let mut width = 0;
     let mut last_preferred_break = None;
     for (byte_index, character) in line.char_indices() {
-        let character_width = if character == '\t' {
-            4
-        } else {
-            character.width().unwrap_or(0)
-        };
+        let character_width = if character == '\t' { 4 } else { character.width().unwrap_or(0) };
         if width + character_width > columns {
             return last_preferred_break.unwrap_or(if byte_index == 0 {
                 character.len_utf8()
@@ -1031,10 +961,7 @@ mod tests {
 
     #[test]
     fn thumbnail_priority_puts_visible_items_before_lookahead() {
-        assert_eq!(
-            prioritize_thumbnail_indices(10..13, 8..15),
-            vec![10, 11, 12, 8, 9, 13, 14]
-        );
+        assert_eq!(prioritize_thumbnail_indices(10..13, 8..15), vec![10, 11, 12, 8, 9, 13, 14]);
     }
 
     #[test]

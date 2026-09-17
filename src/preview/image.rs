@@ -25,18 +25,16 @@ const MAX_ANIMATION_OUTPUT_PIXELS: u64 = 64_000_000;
 
 pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<Arc<RenderImage>> {
     check_cancelled(cancelled)?;
-    let metadata = path
-        .metadata()
-        .with_context(|| format!("could not inspect {}", path.display()))?;
+    let metadata =
+        path.metadata().with_context(|| format!("could not inspect {}", path.display()))?;
     if metadata.len() > MAX_SOURCE_BYTES {
         bail!("image exceeds the 64 MiB preview source limit");
     }
 
     // Every open below goes through `open_regular_file`: a FIFO named like an
     // image would otherwise block the preview worker forever.
-    let format = ImageReader::new(BufReader::new(open_regular_file(path)?))
-        .with_guessed_format()?
-        .format();
+    let format =
+        ImageReader::new(BufReader::new(open_regular_file(path)?)).with_guessed_format()?.format();
     let format = format.context("image format could not be identified")?;
     let frames =
         if matches!(format, ImageFormat::Gif | ImageFormat::WebP) && is_animated(path, format)? {
@@ -183,10 +181,7 @@ mod tests {
     fn rejects_oversized_source_files_before_decode() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("huge.png");
-        File::create(&source)
-            .unwrap()
-            .set_len(MAX_SOURCE_BYTES + 1)
-            .unwrap();
+        File::create(&source).unwrap().set_len(MAX_SOURCE_BYTES + 1).unwrap();
 
         assert!(prepare(&source, &AtomicBool::new(false)).is_err());
     }
@@ -208,9 +203,7 @@ mod tests {
     fn prepares_gpui_bgra_pixels_without_a_second_decode() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("pixel.png");
-        RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 40]))
-            .save(&source)
-            .unwrap();
+        RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 40])).save(&source).unwrap();
 
         let output = prepare(&source, &AtomicBool::new(false)).unwrap();
 

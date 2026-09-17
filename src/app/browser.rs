@@ -35,15 +35,10 @@ const GRID_LABEL_COLUMNS: usize = 30;
 /// An entry's icon at row size: the themed image, or the glyph fallback.
 pub(super) fn entry_icon(entry: &FileEntry, fallback_color: Hsla) -> AnyElement {
     match entry.icon_path.clone() {
-        Some(icon_path) => img(icon_path)
-            .size(px(20.0))
-            .object_fit(ObjectFit::Contain)
-            .into_any_element(),
-        None => div()
-            .w(px(20.0))
-            .text_color(fallback_color)
-            .child(entry.icon())
-            .into_any_element(),
+        Some(icon_path) => {
+            img(icon_path).size(px(20.0)).object_fit(ObjectFit::Contain).into_any_element()
+        }
+        None => div().w(px(20.0)).text_color(fallback_color).child(entry.icon()).into_any_element(),
     }
 }
 
@@ -73,9 +68,7 @@ impl Marcel {
             .cloned()
             .and_then(|primary| self.scroll_row_of(&primary))
         {
-            self.ui
-                .directory_scroll
-                .scroll_to_item(row, gpui::ScrollStrategy::Center);
+            self.ui.directory_scroll.scroll_to_item(row, gpui::ScrollStrategy::Center);
         }
         cx.notify();
     }
@@ -119,8 +112,7 @@ impl Marcel {
             .cursor_pointer()
             .hover(|this| this.bg(colors.list_hover))
             .when(selected, |this| {
-                this.bg(colors.list_active)
-                    .border_color(colors.list_active_border)
+                this.bg(colors.list_active).border_color(colors.list_active_border)
             })
             .when(dragging_enabled, |this| {
                 this.on_drag(drag, |drag, _, _, cx| drag.preview(cx))
@@ -173,11 +165,7 @@ impl Marcel {
     /// rebuilding a potentially huge selected-file payload on every marquee
     /// repaint would be wasted.
     fn shared_drag(&mut self) -> Option<FileDrag> {
-        self.drag
-            .marquee
-            .is_none()
-            .then(|| self.selected_file_drag())
-            .flatten()
+        self.drag.marquee.is_none().then(|| self.selected_file_drag()).flatten()
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -322,22 +310,12 @@ impl Marcel {
     fn grid_visual(&self, entry: &FileEntry, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
-        let square = || {
-            div()
-                .flex()
-                .flex_none()
-                .size(px(GRID_VISUAL_SIZE))
-                .items_center()
-                .justify_center()
-        };
+        let square =
+            || div().flex().flex_none().size(px(GRID_VISUAL_SIZE)).items_center().justify_center();
         let fallback = |opacity: f32| match entry.icon_path.clone() {
             Some(icon_path) => square()
                 .opacity(opacity)
-                .child(
-                    img(icon_path)
-                        .size(px(GRID_ICON_SIZE))
-                        .object_fit(ObjectFit::Contain),
-                )
+                .child(img(icon_path).size(px(GRID_ICON_SIZE)).object_fit(ObjectFit::Contain))
                 .into_any_element(),
             None => square()
                 .opacity(opacity)
@@ -504,12 +482,7 @@ impl Marcel {
         })
         .when_some(loading, |this, status| {
             this.child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(colors.muted_foreground)
-                    .child(status),
+                div().px_3().py_1().text_xs().text_color(colors.muted_foreground).child(status),
             )
         })
         .vertical_scrollbar(&directory_scroll)
@@ -540,9 +513,7 @@ fn thumbnail_presentation(
 
 fn grid_column_count(viewport_width: f32) -> usize {
     let available = (viewport_width - GRID_SIDE_PADDING * 2.0).max(GRID_TILE_WIDTH);
-    ((available + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP))
-        .floor()
-        .max(1.0) as usize
+    ((available + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP)).floor().max(1.0) as usize
 }
 
 /// Shorten a name to `max_columns` of display width, keeping the extension.
@@ -554,24 +525,16 @@ fn elide_filename(name: &str, max_columns: usize) -> String {
         return String::new();
     }
     const ELLIPSIS: &str = "…";
-    if let Some((stem, suffix)) = name
-        .rfind('.')
-        .filter(|dot| *dot > 0)
-        .map(|dot| name.split_at(dot))
+    if let Some((stem, suffix)) =
+        name.rfind('.').filter(|dot| *dot > 0).map(|dot| name.split_at(dot))
     {
         let suffix_width = UnicodeWidthStr::width(suffix);
         if suffix_width + 2 < max_columns {
             let stem_columns = max_columns - suffix_width - 1;
-            return format!(
-                "{}{ELLIPSIS}{suffix}",
-                take_display_columns(stem, stem_columns)
-            );
+            return format!("{}{ELLIPSIS}{suffix}", take_display_columns(stem, stem_columns));
         }
     }
-    format!(
-        "{}{ELLIPSIS}",
-        take_display_columns(name, max_columns.saturating_sub(1))
-    )
+    format!("{}{ELLIPSIS}", take_display_columns(name, max_columns.saturating_sub(1)))
 }
 
 fn take_display_columns(value: &str, max_columns: usize) -> &str {
@@ -627,21 +590,12 @@ mod tests {
             thumbnail_presentation(Some(&ready), false, true),
             ThumbnailPresentation::Ready(PathBuf::from("/cache/thumbnail.png"))
         );
-        assert_eq!(
-            thumbnail_presentation(None, true, true),
-            ThumbnailPresentation::Loading
-        );
+        assert_eq!(thumbnail_presentation(None, true, true), ThumbnailPresentation::Loading);
         assert_eq!(
             thumbnail_presentation(Some(&failed), false, true),
             ThumbnailPresentation::Failed
         );
-        assert_eq!(
-            thumbnail_presentation(None, false, false),
-            ThumbnailPresentation::Unsupported
-        );
-        assert_eq!(
-            thumbnail_presentation(None, true, false),
-            ThumbnailPresentation::Unsupported
-        );
+        assert_eq!(thumbnail_presentation(None, false, false), ThumbnailPresentation::Unsupported);
+        assert_eq!(thumbnail_presentation(None, true, false), ThumbnailPresentation::Unsupported);
     }
 }

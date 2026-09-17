@@ -55,11 +55,7 @@ fn command(
     shortcut: Option<&'static str>,
     command: BrowserCommand,
 ) -> MenuItem {
-    MenuItem::Command {
-        label,
-        shortcut,
-        command,
-    }
+    MenuItem::Command { label, shortcut, command }
 }
 
 fn menu_height(items: &[MenuItem]) -> f32 {
@@ -80,14 +76,9 @@ pub(super) fn clamp_to_window(
 ) -> (f32, f32) {
     let window_size = window.bounds().size;
     let clamp = |wanted: Pixels, extent: f32, limit: Pixels| {
-        f32::from(wanted)
-            .min((f32::from(limit) - extent - MENU_MARGIN).max(0.0))
-            .max(MENU_MARGIN)
+        f32::from(wanted).min((f32::from(limit) - extent - MENU_MARGIN).max(0.0)).max(MENU_MARGIN)
     };
-    (
-        clamp(position.x, size.0, window_size.width),
-        clamp(position.y, size.1, window_size.height),
-    )
+    (clamp(position.x, size.0, window_size.width), clamp(position.y, size.1, window_size.height))
 }
 
 /// The popover shell every menu shares.
@@ -130,10 +121,7 @@ pub(super) fn menu_row(
         .h(px(MENU_ROW_HEIGHT))
         .px_3()
         .rounded(cx.theme().radius)
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(|this| this.bg(colors.list_active))
-        })
+        .when(enabled, |this| this.cursor_pointer().hover(|this| this.bg(colors.list_active)))
         .when(!enabled, |this| this.text_color(colors.muted_foreground))
         .child(label)
 }
@@ -233,12 +221,7 @@ impl Marcel {
             .into_iter()
             .enumerate()
             .map(|(index, item)| match item {
-                Separator => div()
-                    .h(px(1.0))
-                    .mx_1()
-                    .my_1()
-                    .bg(colors.border)
-                    .into_any_element(),
+                Separator => div().h(px(1.0)).mx_1().my_1().bg(colors.border).into_any_element(),
                 Planned(label) => div()
                     .flex()
                     .h(px(MENU_ROW_HEIGHT))
@@ -247,11 +230,7 @@ impl Marcel {
                     .text_color(colors.muted_foreground)
                     .child(format!("– {label}"))
                     .into_any_element(),
-                MenuItem::Command {
-                    label,
-                    shortcut,
-                    command,
-                } => {
+                MenuItem::Command { label, shortcut, command } => {
                     let enabled = self.command_enabled(command, cx);
                     menu_row(("menu-row", index), label, enabled, cx)
                         .when(enabled, |this| {
@@ -263,19 +242,12 @@ impl Marcel {
                         .child(div().flex_1())
                         .when_some(shortcut, |this, shortcut| {
                             this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_foreground)
-                                    .child(shortcut),
+                                div().text_xs().text_color(colors.muted_foreground).child(shortcut),
                             )
                         })
                         .into_any_element()
                 }
-                Action {
-                    label,
-                    checked,
-                    run,
-                } => menu_row(("menu-row", index), label, true, cx)
+                Action { label, checked, run } => menu_row(("menu-row", index), label, true, cx)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui.entry_menu = None;
                         run(this, window, cx);
@@ -332,9 +304,7 @@ impl Marcel {
                 modifiers.secondary(),
             );
         } else if modifiers.secondary() {
-            self.directory
-                .selection
-                .toggle(entry.path.clone(), &ordered);
+            self.directory.selection.toggle(entry.path.clone(), &ordered);
         } else {
             self.directory.selection.select_only(entry.path.clone());
         }
@@ -363,10 +333,7 @@ impl Marcel {
         } else {
             self.directory.selection.select_only(path.to_path_buf());
         }
-        self.ui.entry_menu = Some(EntryMenu {
-            position,
-            target: ContextMenuTarget::Entry,
-        });
+        self.ui.entry_menu = Some(EntryMenu { position, target: ContextMenuTarget::Entry });
         self.start_preview(entry, cx);
     }
 

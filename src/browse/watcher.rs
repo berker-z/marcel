@@ -116,10 +116,7 @@ pub fn watch_directory(
         }
 
         let Some(paths) = collect_changed_paths(directory, raw) else {
-            if updates
-                .send_blocking(DirectoryWatcherUpdate::RescanRequired)
-                .is_err()
-            {
+            if updates.send_blocking(DirectoryWatcherUpdate::RescanRequired).is_err() {
                 return;
             }
             continue;
@@ -130,9 +127,7 @@ pub fn watch_directory(
 
         let events = revalidate_paths_with_icons(paths, &mut icons);
         if !events.is_empty()
-            && updates
-                .send_blocking(DirectoryWatcherUpdate::Events(events))
-                .is_err()
+            && updates.send_blocking(DirectoryWatcherUpdate::Events(events)).is_err()
         {
             return;
         }
@@ -238,9 +233,9 @@ mod tests {
         assert!(
             collect_changed_paths(
                 &directory,
-                vec![Ok(
-                    Event::new(EventKind::Create(CreateKind::Any)).add_path(directory.clone())
-                )],
+                vec![
+                    Ok(Event::new(EventKind::Create(CreateKind::Any)).add_path(directory.clone()))
+                ],
             )
             .is_none()
         );

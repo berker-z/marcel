@@ -98,10 +98,7 @@ impl TransferOutcome {
     }
 
     pub fn completed_destinations(&self) -> Vec<PathBuf> {
-        self.completed
-            .iter()
-            .map(|t| t.destination.clone())
-            .collect()
+        self.completed.iter().map(|t| t.destination.clone()).collect()
     }
 
     /// The visible effect of the transfer, taken from the exact recorded
@@ -120,11 +117,9 @@ impl TransferOutcome {
         match self.failures.as_slice() {
             [] => String::new(),
             [failure] => failure.message.clone(),
-            failures => format!(
-                "{} items failed; first error: {}",
-                failures.len(),
-                failures[0].message
-            ),
+            failures => {
+                format!("{} items failed; first error: {}", failures.len(), failures[0].message)
+            }
         }
     }
 }
@@ -162,9 +157,7 @@ pub fn transfer_paths_with_conflicts(
     progress: Arc<TransferProgress>,
     policy: &mut ConflictPolicy,
 ) -> TransferOutcome {
-    Transfer::new(sources, destination, mode, cancelled)
-        .with_progress(progress)
-        .run(policy)
+    Transfer::new(sources, destination, mode, cancelled).with_progress(progress).run(policy)
 }
 
 /// What a transfer may spend on undo bookkeeping.
@@ -345,10 +338,7 @@ struct Ledger<T> {
 
 impl<T> Ledger<T> {
     fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            unavailable: false,
-        }
+        Self { entries: Vec::new(), unavailable: false }
     }
 
     fn give_up(&mut self) {
@@ -402,14 +392,7 @@ impl<'a> Transfer<'a> {
     }
 
     pub(super) fn run(self, policy: &mut ConflictPolicy) -> TransferOutcome {
-        let Self {
-            sources,
-            destination,
-            mode,
-            cancelled,
-            progress,
-            budget,
-        } = self;
+        let Self { sources, destination, mode, cancelled, progress, budget } = self;
         let progress = progress.as_deref();
         let mut completed = Vec::new();
         let mut failures = Vec::new();
@@ -602,10 +585,8 @@ impl<'a> Transfer<'a> {
                             replaced.push(item);
                         }
                     }
-                    completed.push(CompletedTransfer {
-                        source: source.clone(),
-                        destination: target,
-                    });
+                    completed
+                        .push(CompletedTransfer { source: source.clone(), destination: target });
                 }
                 Err(error) => {
                     // The transfer failed, so put back what it displaced rather

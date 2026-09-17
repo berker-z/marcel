@@ -40,18 +40,14 @@ use super::{
 impl Marcel {
     /// A window that answers a file-chooser request.
     pub fn new_picker(request: PickerRequest, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let home_dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
+        let home_dir =
+            std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
         let mut this = Self::new(request.initial_directory(&home_dir), window, cx);
 
         let name_input = matches!(request.mode, PickerMode::SaveFile).then(|| {
             let name = request.current_name.clone().unwrap_or_default();
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("File name")
-                    .default_value(name)
-            });
+            let input = cx
+                .new(|cx| InputState::new(window, cx).placeholder("File name").default_value(name));
             let subscription =
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                     if let InputEvent::PressEnter { .. } = event {
@@ -66,10 +62,7 @@ impl Marcel {
                 .iter()
                 .map(|filter| SharedString::from(filter.name.clone()))
                 .collect::<Vec<_>>();
-            let initial = request
-                .current_filter
-                .unwrap_or(0)
-                .min(labels.len().saturating_sub(1));
+            let initial = request.current_filter.unwrap_or(0).min(labels.len().saturating_sub(1));
             let select = cx.new(|cx| {
                 SelectState::new(labels, Some(IndexPath::default().row(initial)), window, cx)
             });
@@ -93,11 +86,7 @@ impl Marcel {
     /// Where typing should land when a picker opens: the name field of a save
     /// dialog, otherwise the listing.
     pub fn focus_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self
-            .picker
-            .as_ref()
-            .and_then(|picker| picker.name_input.clone())
-        {
+        match self.picker.as_ref().and_then(|picker| picker.name_input.clone()) {
             // Select the stem, as Rename does: the name is the part that
             // usually changes, the extension the part the caller chose.
             Some(input) => select_stem(input, false, window, cx),
@@ -117,11 +106,7 @@ impl Marcel {
 
     /// Project the listing under the picker's active filter.
     fn apply_picker_filter(&mut self, cx: &mut Context<Self>) {
-        let filter = self
-            .picker
-            .as_ref()
-            .and_then(PickerState::active_filter)
-            .cloned();
+        let filter = self.picker.as_ref().and_then(PickerState::active_filter).cloned();
         let reconcile = self.directory.set_content_filter(filter.map(|filter| {
             Arc::new(move |entry: &FileEntry| filter.matches(entry)) as ContentFilter
         }));
@@ -154,9 +139,7 @@ impl Marcel {
     }
 
     fn is_navigable_entry(&self, path: &Path) -> bool {
-        self.directory
-            .entry(path)
-            .is_some_and(|entry| entry.navigable)
+        self.directory.entry(path).is_some_and(|entry| entry.navigable)
     }
 
     /// Turn what the window shows into the caller's answer.
@@ -177,10 +160,8 @@ impl Marcel {
         let mode = picker.mode.clone();
         let filter = picker.active_filter;
         let name_input = picker.name_input.clone();
-        let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) = self
-            .selected_paths()
-            .into_iter()
-            .partition(|path| self.is_navigable_entry(path));
+        let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
+            self.selected_paths().into_iter().partition(|path| self.is_navigable_entry(path));
         let here = self.directory.current_dir.clone();
 
         match mode {
@@ -193,23 +174,12 @@ impl Marcel {
                     }
                     return;
                 }
-                self.answer_picker(
-                    PickerResponse::Chosen {
-                        paths: files,
-                        filter,
-                    },
-                    window,
-                    cx,
-                );
+                self.answer_picker(PickerResponse::Chosen { paths: files, filter }, window, cx);
             }
             PickerMode::OpenDirectories => {
                 // Nothing selected inside it: the folder being looked at is
                 // the folder being chosen.
-                let paths = if folders.is_empty() {
-                    vec![here]
-                } else {
-                    folders
-                };
+                let paths = if folders.is_empty() { vec![here] } else { folders };
                 self.answer_picker(PickerResponse::Chosen { paths, filter }, window, cx);
             }
             PickerMode::SaveFile => {
@@ -268,10 +238,7 @@ impl Marcel {
                     return;
                 };
                 picker.confirming = false;
-                let response = PickerResponse::Chosen {
-                    paths: targets,
-                    filter,
-                };
+                let response = PickerResponse::Chosen { paths: targets, filter };
                 if existing.is_empty() {
                     this.answer_picker(response, window, cx);
                     return;
@@ -283,10 +250,7 @@ impl Marcel {
                             .map(display_filename)
                             .unwrap_or_else(|| only.display().to_string())
                     ),
-                    _ => format!(
-                        "{} of these files already exist. Replace them?",
-                        existing.len()
-                    ),
+                    _ => format!("{} of these files already exist. Replace them?", existing.len()),
                 };
                 this.confirm(
                     window,
@@ -335,18 +299,9 @@ impl Marcel {
                 .border_t_1()
                 .border_color(colors.border)
                 .text_color(colors.sidebar_foreground)
-                .child(
-                    div()
-                        .flex_none()
-                        .text_sm()
-                        .text_color(colors.muted_foreground)
-                        .child(hint),
-                )
+                .child(div().flex_none().text_sm().text_color(colors.muted_foreground).child(hint))
                 .child(match &picker.name_input {
-                    Some(input) => div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(input).small().h_8()),
+                    Some(input) => div().flex_1().min_w_0().child(Input::new(input).small().h_8()),
                     None => div().flex_1(),
                 })
                 .when_some(picker.filter_select.as_ref(), |this, select| {
@@ -361,13 +316,9 @@ impl Marcel {
                     )
                 })
                 .child(
-                    Button::new("picker-cancel")
-                        .label("Cancel")
-                        .outline()
-                        .small()
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.cancel_picker(window, cx)),
-                        ),
+                    Button::new("picker-cancel").label("Cancel").outline().small().on_click(
+                        cx.listener(|this, _, window, cx| this.cancel_picker(window, cx)),
+                    ),
                 )
                 .child(
                     Button::new("picker-accept")

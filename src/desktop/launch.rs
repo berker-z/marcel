@@ -29,9 +29,7 @@ where
 /// Marcel to raise whichever window it already had — which is what it used to
 /// do, ignoring the folder the user was standing in.
 pub fn launch_uris(start_path: &Path) -> Option<Vec<String>> {
-    url::Url::from_file_path(start_path)
-        .map(|uri| vec![String::from(uri)])
-        .ok()
+    url::Url::from_file_path(start_path).map(|uri| vec![String::from(uri)]).ok()
 }
 
 pub fn resolve_location(
@@ -54,60 +52,40 @@ pub fn resolve_location(
             .ok_or_else(|| "Cannot expand ~ because HOME is unavailable".to_string())?
     } else if value.starts_with("file:") {
         let url = Url::parse(value).map_err(|_| "This file URI is invalid".to_string())?;
-        url.to_file_path()
-            .map_err(|_| "Only local file:// URIs can be opened".to_string())?
+        url.to_file_path().map_err(|_| "Only local file:// URIs can be opened".to_string())?
     } else if value.contains("://") {
         return Err("Only local paths and file:// URIs can be opened".to_string());
     } else {
         let path = PathBuf::from(value);
-        if path.is_absolute() {
-            path
-        } else {
-            current_dir.join(path)
-        }
+        if path.is_absolute() { path } else { current_dir.join(path) }
     };
 
     let metadata = fs::metadata(&path)
         .map_err(|error| format!("Cannot open “{}”: {error}", path.display()))?;
     let path = fs::canonicalize(&path).unwrap_or(path);
     if metadata.is_dir() {
-        return Ok(LocationTarget {
-            directory: path,
-            reveal: None,
-        });
+        return Ok(LocationTarget { directory: path, reveal: None });
     }
     if metadata.is_file() {
         let directory = path
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| format!("“{}” has no parent folder", path.display()))?;
-        return Ok(LocationTarget {
-            directory,
-            reveal: Some(path),
-        });
+        return Ok(LocationTarget { directory, reveal: Some(path) });
     }
 
-    Err(format!(
-        "“{}” is not a regular file or folder",
-        path.display()
-    ))
+    Err(format!("“{}” is not a regular file or folder", path.display()))
 }
 
 fn local_path(argument: &OsString, current_dir: &Path) -> Option<PathBuf> {
     if let Some(value) = argument.to_str()
         && let Ok(url) = Url::parse(value)
     {
-        return (url.scheme() == "file")
-            .then(|| url.to_file_path().ok())
-            .flatten();
+        return (url.scheme() == "file").then(|| url.to_file_path().ok()).flatten();
     }
 
     let path = PathBuf::from(argument);
-    Some(if path.is_absolute() {
-        path
-    } else {
-        current_dir.join(path)
-    })
+    Some(if path.is_absolute() { path } else { current_dir.join(path) })
 }
 
 #[cfg(test)]
@@ -117,10 +95,7 @@ mod tests {
 
     #[test]
     fn no_arguments_starts_in_the_process_directory() {
-        assert_eq!(
-            start_path([], PathBuf::from("/home/test")),
-            PathBuf::from("/home/test")
-        );
+        assert_eq!(start_path([], PathBuf::from("/home/test")), PathBuf::from("/home/test"));
     }
 
     #[test]
@@ -134,10 +109,7 @@ mod tests {
     #[test]
     fn local_file_uris_are_decoded() {
         assert_eq!(
-            start_path(
-                [OsString::from("file:///home/test/My%20Files")],
-                PathBuf::from("/")
-            ),
+            start_path([OsString::from("file:///home/test/My%20Files")], PathBuf::from("/")),
             PathBuf::from("/home/test/My Files")
         );
     }
@@ -165,17 +137,11 @@ mod tests {
 
         assert_eq!(
             resolve_location("~/Documents", temp.path(), Some(&home)).unwrap(),
-            LocationTarget {
-                directory: documents.canonicalize().unwrap(),
-                reveal: None,
-            }
+            LocationTarget { directory: documents.canonicalize().unwrap(), reveal: None }
         );
         assert_eq!(
             resolve_location("home/Documents", temp.path(), Some(&home)).unwrap(),
-            LocationTarget {
-                directory: documents.canonicalize().unwrap(),
-                reveal: None,
-            }
+            LocationTarget { directory: documents.canonicalize().unwrap(), reveal: None }
         );
     }
 

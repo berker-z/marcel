@@ -44,10 +44,9 @@ pub fn path_occupancy(path: &Path) -> io::Result<PathOccupancy> {
 /// taken, not what it points at.
 pub fn ensure_unoccupied(path: &Path) -> Result<()> {
     match path_occupancy(path) {
-        Ok(PathOccupancy::Occupied) => bail!(
-            "“{}” already exists; nothing was overwritten",
-            path.display()
-        ),
+        Ok(PathOccupancy::Occupied) => {
+            bail!("“{}” already exists; nothing was overwritten", path.display())
+        }
         Ok(PathOccupancy::Vacant) => Ok(()),
         Err(error) => Err(error).at("Could not inspect destination", path),
     }
@@ -81,10 +80,7 @@ pub fn sorted_children(path: &Path) -> Result<Vec<fs::DirEntry>> {
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
 
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
 }
 
 /// Open `path` for reading, refusing anything but a regular file.
@@ -165,9 +161,7 @@ pub fn quarantined_name(prefix: &str, sequence: u64, original: &std::ffi::OsStr)
 
     let mut name = format!("{prefix}{sequence}-").into_bytes();
     let original = original.as_bytes();
-    let keep = original
-        .len()
-        .min(MAX_NAME_BYTES.saturating_sub(name.len()));
+    let keep = original.len().min(MAX_NAME_BYTES.saturating_sub(name.len()));
     name.extend_from_slice(&original[..floor_char_boundary(original, keep)]);
     OsString::from_vec(name)
 }
@@ -251,10 +245,7 @@ mod tests {
         symlink("missing", &link).unwrap();
 
         assert_eq!(path_occupancy(&link).unwrap(), PathOccupancy::Occupied);
-        assert_eq!(
-            path_occupancy(&root.path().join("vacant")).unwrap(),
-            PathOccupancy::Vacant
-        );
+        assert_eq!(path_occupancy(&root.path().join("vacant")).unwrap(), PathOccupancy::Vacant);
         assert!(ensure_unoccupied(&link).is_err());
     }
 
@@ -293,13 +284,7 @@ mod tests {
         let original = OsString::from("猫".repeat(120));
         let name = quarantined_name(".marcel-replaced-1-", 7, &original);
         assert!(name.as_bytes().len() <= MAX_NAME_BYTES);
-        assert!(
-            name.to_str().is_some(),
-            "the cut lands on a character boundary"
-        );
-        assert!(
-            name.to_string_lossy()
-                .starts_with(".marcel-replaced-1-7-猫")
-        );
+        assert!(name.to_str().is_some(), "the cut lands on a character boundary");
+        assert!(name.to_string_lossy().starts_with(".marcel-replaced-1-7-猫"));
     }
 }

@@ -46,9 +46,7 @@ pub(super) fn pump<T: Send + 'static>(
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
         while let Ok(update) = receiver.recv().await {
-            let keep_going = this
-                .update(cx, |this, cx| handle(this, update, cx))
-                .unwrap_or(false);
+            let keep_going = this.update(cx, |this, cx| handle(this, update, cx)).unwrap_or(false);
             if !keep_going {
                 break;
             }
@@ -214,10 +212,7 @@ impl Marcel {
         let cancelled = Arc::new(AtomicBool::new(false));
         let watcher_cancelled = cancelled.clone();
         let watched_path = path.clone();
-        unblock(cx, move || {
-            watch_directory(&watched_path, sender, watcher_cancelled)
-        })
-        .detach();
+        unblock(cx, move || watch_directory(&watched_path, sender, watcher_cancelled)).detach();
 
         let task = pump(cx, receiver, move |this, update, cx| {
             if ticket != this.directory.generation || path != this.directory.current_dir {
@@ -229,10 +224,7 @@ impl Marcel {
             let loading = this.directory.loading;
             match update {
                 DirectoryWatcherUpdate::Events(events) if loading => {
-                    if events
-                        .iter()
-                        .any(|event| matches!(event, DirectoryEvent::RescanRequired))
-                    {
+                    if events.iter().any(|event| matches!(event, DirectoryEvent::RescanRequired)) {
                         this.directory.defer_rescan();
                     } else {
                         this.directory.defer_refresh(directory_event_paths(&events));
@@ -320,9 +312,7 @@ impl Marcel {
     /// Put the revealed row on screen, centred, at its current index.
     fn scroll_to_revealed(&mut self, path: &Path) {
         if let Some(row) = self.scroll_row_of(path) {
-            self.ui
-                .directory_scroll
-                .scroll_to_item(row, ScrollStrategy::Center);
+            self.ui.directory_scroll.scroll_to_item(row, ScrollStrategy::Center);
         }
     }
 
@@ -425,20 +415,11 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) {
         match event {
-            OperationEvent::Applied {
-                changes,
-                reveal,
-                origin,
-            } => {
+            OperationEvent::Applied { changes, reveal, origin } => {
                 let here = self.directory.current_dir.as_path();
                 let reveal = origin
                     .is_none_or(|origin| origin == Self::origin(window))
-                    .then(|| {
-                        reveal
-                            .iter()
-                            .find(|path| path.parent() == Some(here))
-                            .cloned()
-                    })
+                    .then(|| reveal.iter().find(|path| path.parent() == Some(here)).cloned())
                     .flatten();
                 self.apply_directory_changes(changes.clone(), reveal, cx);
             }
@@ -529,11 +510,7 @@ impl Marcel {
         for path in &backing_paths {
             self.sidebar.trash_records.remove(path);
         }
-        let events = backing_paths
-            .iter()
-            .cloned()
-            .map(DirectoryEvent::Removed)
-            .collect();
+        let events = backing_paths.iter().cloned().map(DirectoryEvent::Removed).collect();
         self.apply_trash_events(events, cx);
     }
 
@@ -557,9 +534,7 @@ impl Marcel {
                 }
                 let mut events = Vec::with_capacity(entries.len());
                 for (entry, record) in entries {
-                    this.sidebar
-                        .trash_records
-                        .insert(entry.path.clone(), record);
+                    this.sidebar.trash_records.insert(entry.path.clone(), record);
                     events.push(DirectoryEvent::Changed(entry));
                 }
                 this.apply_trash_events(events, cx);
@@ -699,10 +674,8 @@ mod tests {
 
     #[test]
     fn completed_load_warns_about_an_interrupted_delete_quarantine() {
-        let remnant = test_file_entry(
-            &format!("/folder/.marcel-delete-{DEAD_PROCESS}-4-thesis"),
-            false,
-        );
+        let remnant =
+            test_file_entry(&format!("/folder/.marcel-delete-{DEAD_PROCESS}-4-thesis"), false);
         let warning = quarantine_recovery_warning(&[remnant]).unwrap();
 
         assert!(warning.contains("interrupted permanent deletion"));
@@ -717,10 +690,7 @@ mod tests {
     fn completed_load_points_at_an_original_that_could_not_be_put_back() {
         let preserved = test_file_entry("/folder/.marcel-recovered-0-report.txt", false);
         let warning = quarantine_recovery_warning(std::slice::from_ref(&preserved)).unwrap();
-        assert!(
-            warning.contains(".marcel-recovered-0-report.txt"),
-            "{warning}"
-        );
+        assert!(warning.contains(".marcel-recovered-0-report.txt"), "{warning}");
         assert!(warning.contains("could not put back"), "{warning}");
         assert!(
             !crate::fsops::is_internal_working_name(&preserved.name_os),
@@ -728,10 +698,8 @@ mod tests {
         );
 
         // Both kinds of remnant can be present, and both are reported.
-        let interrupted = test_file_entry(
-            &format!("/folder/.marcel-delete-{DEAD_PROCESS}-4-thesis"),
-            false,
-        );
+        let interrupted =
+            test_file_entry(&format!("/folder/.marcel-delete-{DEAD_PROCESS}-4-thesis"), false);
         let warning = quarantine_recovery_warning(&[preserved, interrupted]).unwrap();
         assert!(warning.contains(".marcel-recovered-"), "{warning}");
         assert!(warning.contains(".marcel-delete-"), "{warning}");

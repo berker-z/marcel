@@ -53,10 +53,7 @@ pub fn load(path: &Path) -> Result<LoadedBookmarks> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LoadedBookmarks {
-                bookmarks: Vec::new(),
-                rejected: 0,
-            });
+            return Ok(LoadedBookmarks { bookmarks: Vec::new(), rejected: 0 });
         }
         Err(error) => {
             return Err(error)
@@ -83,20 +80,14 @@ pub fn load(path: &Path) -> Result<LoadedBookmarks> {
             seen.insert(path.clone()).then_some(Bookmark { path })
         })
         .collect();
-    Ok(LoadedBookmarks {
-        bookmarks,
-        rejected,
-    })
+    Ok(LoadedBookmarks { bookmarks, rejected })
 }
 
 pub fn save(path: &Path, bookmarks: &[Bookmark]) -> Result<()> {
     config::write_atomically(path, |file| {
         for bookmark in bookmarks {
             if !bookmark.path.is_absolute() {
-                bail!(
-                    "Cannot save relative bookmark “{}”",
-                    bookmark.path.display()
-                );
+                bail!("Cannot save relative bookmark “{}”", bookmark.path.display());
             }
             let url = Url::from_file_path(&bookmark.path)
                 .map_err(|_| anyhow::anyhow!("Invalid bookmark “{}”", bookmark.path.display()))?;
@@ -112,11 +103,7 @@ pub fn reorder(bookmarks: &mut Vec<Bookmark>, from: usize, insertion: usize) -> 
     if from >= bookmarks.len() || insertion > bookmarks.len() {
         return false;
     }
-    let adjusted = if from < insertion {
-        insertion - 1
-    } else {
-        insertion
-    };
+    let adjusted = if from < insertion { insertion - 1 } else { insertion };
     if adjusted == from {
         return false;
     }
@@ -319,9 +306,7 @@ impl BookmarkStore {
     }
 
     fn still_at(&self, index: usize, expected: &Path) -> bool {
-        self.bookmarks
-            .get(index)
-            .is_some_and(|bookmark| bookmark.path == expected)
+        self.bookmarks.get(index).is_some_and(|bookmark| bookmark.path == expected)
     }
 
     fn changed(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
@@ -344,9 +329,7 @@ impl BookmarkStore {
         let path = self.path.clone();
         let snapshot = self.bookmarks.clone();
         let saved_snapshot = snapshot.clone();
-        let saving = cx
-            .background_executor()
-            .spawn(smol::unblock(move || save(&path, &snapshot)));
+        let saving = cx.background_executor().spawn(smol::unblock(move || save(&path, &snapshot)));
 
         self.save_task = Some(cx.spawn(async move |this, cx| {
             let result = saving.await;
@@ -382,12 +365,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("config/bookmarks");
         let bookmarks = vec![
-            Bookmark {
-                path: root.path().join("Work Notes"),
-            },
-            Bookmark {
-                path: root.path().join("line\nbreak"),
-            },
+            Bookmark { path: root.path().join("Work Notes") },
+            Bookmark { path: root.path().join("line\nbreak") },
         ];
 
         save(&file, &bookmarks).unwrap();
@@ -411,12 +390,7 @@ mod tests {
         .unwrap();
 
         let loaded = load(&file).unwrap();
-        assert_eq!(
-            loaded.bookmarks,
-            vec![Bookmark {
-                path: PathBuf::from("/tmp/photos")
-            }]
-        );
+        assert_eq!(loaded.bookmarks, vec![Bookmark { path: PathBuf::from("/tmp/photos") }]);
         assert_eq!(loaded.rejected, 2);
     }
 
@@ -431,17 +405,12 @@ mod tests {
         fs::write(&target, "").unwrap();
         let link = root.path().join("bookmarks");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let bookmarks = vec![Bookmark {
-            path: PathBuf::from("/tmp/photos"),
-        }];
+        let bookmarks = vec![Bookmark { path: PathBuf::from("/tmp/photos") }];
 
         save(&link, &bookmarks).unwrap();
 
         assert!(
-            fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink(),
+            fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
             "the link must survive the save"
         );
         assert_eq!(load(&target).unwrap().bookmarks, bookmarks);
@@ -451,28 +420,14 @@ mod tests {
     fn reorders_by_insertion_slot() {
         let mut bookmarks = ["a", "b", "c"]
             .into_iter()
-            .map(|name| Bookmark {
-                path: PathBuf::from(format!("/{name}")),
-            })
+            .map(|name| Bookmark { path: PathBuf::from(format!("/{name}")) })
             .collect();
 
         assert!(reorder(&mut bookmarks, 0, 3));
-        assert_eq!(
-            bookmarks.iter().map(Bookmark::label).collect::<Vec<_>>(),
-            ["b", "c", "a"]
-        );
+        assert_eq!(bookmarks.iter().map(Bookmark::label).collect::<Vec<_>>(), ["b", "c", "a"]);
         assert!(reorder(&mut bookmarks, 2, 0));
-        assert_eq!(
-            bookmarks.iter().map(Bookmark::label).collect::<Vec<_>>(),
-            ["a", "b", "c"]
-        );
-        assert!(
-            !reorder(&mut bookmarks, 1, 1),
-            "a no-op slot changes nothing"
-        );
-        assert!(
-            !reorder(&mut bookmarks, 1, 2),
-            "the slot after itself is the same place"
-        );
+        assert_eq!(bookmarks.iter().map(Bookmark::label).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert!(!reorder(&mut bookmarks, 1, 1), "a no-op slot changes nothing");
+        assert!(!reorder(&mut bookmarks, 1, 2), "the slot after itself is the same place");
     }
 }

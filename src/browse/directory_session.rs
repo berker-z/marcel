@@ -110,10 +110,7 @@ impl DirectorySession {
     fn admits(&self, entry: &FileEntry) -> bool {
         !crate::fsops::is_internal_working_name(&entry.name_os)
             && (self.show_hidden || !is_hidden_os_name(&entry.name_os))
-            && self
-                .content_filter
-                .as_ref()
-                .is_none_or(|filter| filter(entry))
+            && self.content_filter.as_ref().is_none_or(|filter| filter(entry))
     }
 
     /// Note paths whose state changed while the load streams, so the finished
@@ -310,8 +307,7 @@ impl DirectorySession {
                 true
             }
         });
-        self.selection
-            .add_all(revealed.iter().map(|entry| entry.path.clone()));
+        self.selection.add_all(revealed.iter().map(|entry| entry.path.clone()));
         revealed
     }
 
@@ -333,17 +329,13 @@ impl DirectorySession {
 
     /// Where `path` sits in the visible listing.
     pub fn visible_position(&self, path: &Path) -> Option<usize> {
-        self.visible_entries.iter().position(|index| {
-            self.entries
-                .get(*index)
-                .is_some_and(|entry| entry.path == path)
-        })
+        self.visible_entries
+            .iter()
+            .position(|index| self.entries.get(*index).is_some_and(|entry| entry.path == path))
     }
 
     pub fn visible_entry(&self, index: usize) -> Option<&FileEntry> {
-        self.visible_entries
-            .get(index)
-            .and_then(|entry_index| self.entries.get(*entry_index))
+        self.visible_entries.get(index).and_then(|entry_index| self.entries.get(*entry_index))
     }
 
     pub fn visible_paths(&self) -> Vec<PathBuf> {
@@ -384,9 +376,7 @@ impl DirectorySession {
             })
             .collect::<Vec<_>>();
         matches.sort_unstable_by(|(left_index, left_score), (right_index, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_index.cmp(right_index))
+            right_score.cmp(left_score).then_with(|| left_index.cmp(right_index))
         });
         self.visible_entries = matches.into_iter().map(|(index, _)| index).collect();
     }
@@ -400,19 +390,15 @@ impl DirectorySession {
             .map(|entry| entry.path.as_path())
             .collect::<HashSet<_>>();
         let ordered = self.visible_paths();
-        self.selection
-            .retain(&ordered, |path| visible.contains(path));
+        self.selection.retain(&ordered, |path| visible.contains(path));
         if let Some(primary) = self.selection.primary().cloned() {
             // `retain` silently promotes a surviving selected item to primary
             // when the old primary left the visible set. The preview must
             // follow, or the pane keeps showing the vanished item while the
             // footer names the new one.
             if previous_primary.as_ref() != Some(&primary)
-                && let Some(entry) = self
-                    .entries
-                    .iter()
-                    .find(|entry| entry.path == primary)
-                    .cloned()
+                && let Some(entry) =
+                    self.entries.iter().find(|entry| entry.path == primary).cloned()
             {
                 return ReconcileSelection::Preview(entry);
             }
@@ -426,9 +412,7 @@ impl DirectorySession {
             .find(|entry| self.selection.is_selected(&entry.path))
             .cloned();
         let entry = selected_entry.clone().or_else(|| {
-            (!self.filter_query.is_empty())
-                .then(|| self.visible_entry(0).cloned())
-                .flatten()
+            (!self.filter_query.is_empty()).then(|| self.visible_entry(0).cloned()).flatten()
         });
         if let Some(entry) = entry {
             if selected_entry.is_some() {
@@ -480,17 +464,12 @@ fn fuzzy_score_folded(candidate: &[char], query: &[char]) -> Option<i64> {
     let mut score = 0i64;
 
     for needle in query {
-        let relative = candidate
-            .get(search_from..)?
-            .iter()
-            .position(|character| character == needle)?;
+        let relative =
+            candidate.get(search_from..)?.iter().position(|character| character == needle)?;
         let position = search_from + relative;
 
-        score += if previous_match.is_some_and(|previous| position == previous + 1) {
-            24
-        } else {
-            4
-        };
+        score +=
+            if previous_match.is_some_and(|previous| position == previous + 1) { 24 } else { 4 };
         if position == 0
             || candidate
                 .get(position.saturating_sub(1))
@@ -529,11 +508,7 @@ mod tests {
             name: name.to_string(),
             name_os: name.into(),
             folded_name: name.to_lowercase().chars().collect(),
-            kind: if navigable {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
-            },
+            kind: if navigable { EntryKind::Directory } else { EntryKind::File },
             navigable,
             size,
             icon_path: None,
@@ -560,19 +535,11 @@ mod tests {
     }
 
     fn names(session: &DirectorySession) -> Vec<(&str, Option<u64>)> {
-        session
-            .entries
-            .iter()
-            .map(|entry| (entry.name.as_str(), entry.size))
-            .collect()
+        session.entries.iter().map(|entry| (entry.name.as_str(), entry.size)).collect()
     }
 
     fn visible_names(session: &DirectorySession) -> Vec<&str> {
-        session
-            .visible_entries
-            .iter()
-            .map(|index| session.entries[*index].name.as_str())
-            .collect()
+        session.visible_entries.iter().map(|index| session.entries[*index].name.as_str()).collect()
     }
 
     fn previews(result: &ReconcileSelection, name: &str) -> bool {
@@ -596,10 +563,7 @@ mod tests {
             dir(".config"),
         ]);
 
-        assert_eq!(
-            visible_names(&session),
-            ["report.txt", ".marcel-delete-1-0-old", ".config"]
-        );
+        assert_eq!(visible_names(&session), ["report.txt", ".marcel-delete-1-0-old", ".config"]);
     }
 
     #[test]
@@ -609,15 +573,9 @@ mod tests {
         session.apply_events(vec![
             DirectoryEvent::Added(dir("z")),
             DirectoryEvent::Changed(entry("b", false, Some(9))),
-            DirectoryEvent::Renamed {
-                from: path("old"),
-                entry: entry("new", false, Some(3)),
-            },
+            DirectoryEvent::Renamed { from: path("old"), entry: entry("new", false, Some(3)) },
         ]);
-        assert_eq!(
-            names(&session),
-            [("z", None), ("b", Some(9)), ("new", Some(3))]
-        );
+        assert_eq!(names(&session), [("z", None), ("b", Some(9)), ("new", Some(3))]);
 
         session.apply_events(vec![DirectoryEvent::Removed(path("z"))]);
         assert_eq!(names(&session), [("b", Some(9)), ("new", Some(3))]);
@@ -686,10 +644,7 @@ mod tests {
         // outlives the stream so the row can be corrected afterwards.
         session.finish_load();
 
-        assert_eq!(
-            session.take_reveal_scroll_target(),
-            Some(path("target.txt"))
-        );
+        assert_eq!(session.take_reveal_scroll_target(), Some(path("target.txt")));
         assert_eq!(session.take_reveal_scroll_target(), None);
     }
 
@@ -771,10 +726,7 @@ mod tests {
                 ..
             })) if name == "selected.txt"
         ));
-        assert_eq!(
-            names(&session),
-            [("folder", None), ("selected.txt", Some(9))]
-        );
+        assert_eq!(names(&session), [("folder", None), ("selected.txt", Some(9))]);
     }
 
     /// The lookup is rebuilt lazily against a revision, so every path that
@@ -795,11 +747,7 @@ mod tests {
         assert_eq!(session.entry(&a).map(|e| e.name.as_str()), Some("a.txt"));
 
         // A change in place must be observed, not served from the old copy.
-        session.apply_events(vec![DirectoryEvent::Changed(entry(
-            "a.txt",
-            false,
-            Some(99),
-        ))]);
+        session.apply_events(vec![DirectoryEvent::Changed(entry("a.txt", false, Some(99)))]);
         assert_eq!(session.entry(&a).map(|e| e.size), Some(Some(99)));
 
         session.apply_events(vec![DirectoryEvent::Removed(a.clone())]);
@@ -860,10 +808,7 @@ mod tests {
 
         let result = session.set_show_hidden(false).unwrap();
 
-        assert!(
-            previews(&result, "notes.txt"),
-            "the promoted primary must be previewed"
-        );
+        assert!(previews(&result, "notes.txt"), "the promoted primary must be previewed");
     }
 
     /// Deferred work belongs to one load: a new load starts from a clean
@@ -898,11 +843,8 @@ mod tests {
 
     #[test]
     fn large_directory_filter_reuses_entry_folded_names() {
-        let mut session = session(
-            (0..50_000)
-                .map(|index| file(&format!("item-{index:05}.txt")))
-                .collect(),
-        );
+        let mut session =
+            session((0..50_000).map(|index| file(&format!("item-{index:05}.txt"))).collect());
 
         let reconcile = session.set_filter_query("ITEM-49999".to_string());
 

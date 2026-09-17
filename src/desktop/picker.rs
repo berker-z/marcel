@@ -77,12 +77,7 @@ impl FileFilter {
                 FilterPattern::Mime(mime) => mimes.push(mime.to_ascii_lowercase()),
             }
         }
-        Self {
-            name,
-            patterns,
-            globs,
-            mimes,
-        }
+        Self { name, patterns, globs, mimes }
     }
 
     /// Whether `entry` stays in a listing this filter applies to.
@@ -101,9 +96,7 @@ impl FileFilter {
         if self.mimes.is_empty() {
             return false;
         }
-        let guessed = mime_guess::from_path(name)
-            .first_raw()
-            .map(str::to_ascii_lowercase);
+        let guessed = mime_guess::from_path(name).first_raw().map(str::to_ascii_lowercase);
         let Some(guessed) = guessed else {
             return false;
         };
@@ -114,9 +107,7 @@ impl FileFilter {
 /// `image/*` accepts every image type; anything else must match exactly.
 fn mime_matches(pattern: &str, mime: &str) -> bool {
     match pattern.strip_suffix("/*") {
-        Some(family) => mime
-            .split_once('/')
-            .is_some_and(|(mime_family, _)| mime_family == family),
+        Some(family) => mime.split_once('/').is_some_and(|(mime_family, _)| mime_family == family),
         None => pattern == mime,
     }
 }
@@ -164,10 +155,7 @@ impl PickerRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerResponse {
     /// The user confirmed these paths, with this filter active.
-    Chosen {
-        paths: Vec<PathBuf>,
-        filter: Option<usize>,
-    },
+    Chosen { paths: Vec<PathBuf>, filter: Option<usize> },
     /// The user dismissed the window.
     Cancelled,
     /// The caller withdrew the request before the user answered.
@@ -203,11 +191,7 @@ mod tests {
             name: name.to_string(),
             name_os: OsString::from(name),
             folded_name: Arc::from(name.to_lowercase().chars().collect::<Vec<_>>()),
-            kind: if navigable {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
-            },
+            kind: if navigable { EntryKind::Directory } else { EntryKind::File },
             navigable,
             size: None,
             icon_path: None,
@@ -254,10 +238,8 @@ mod tests {
 
     #[test]
     fn a_malformed_glob_is_taken_literally_instead_of_dropping_the_filter() {
-        let filter = FileFilter::new(
-            "Odd".to_string(),
-            vec![FilterPattern::Glob("report[".to_string())],
-        );
+        let filter =
+            FileFilter::new("Odd".to_string(), vec![FilterPattern::Glob("report[".to_string())]);
         assert!(filter.matches(&entry("report[", false)));
         assert!(!filter.matches(&entry("report", false)));
     }
@@ -287,16 +269,10 @@ mod tests {
             reply,
             closed,
         };
-        assert_eq!(
-            request.initial_directory(Path::new("/home/x")),
-            PathBuf::from("/home/x")
-        );
+        assert_eq!(request.initial_directory(Path::new("/home/x")), PathBuf::from("/home/x"));
         request.start_directory = Some(temp.path().to_path_buf());
         assert_eq!(request.initial_directory(Path::new("/home/x")), temp.path());
         request.start_directory = Some(PathBuf::from("relative"));
-        assert_eq!(
-            request.initial_directory(Path::new("/home/x")),
-            PathBuf::from("/home/x")
-        );
+        assert_eq!(request.initial_directory(Path::new("/home/x")), PathBuf::from("/home/x"));
     }
 }

@@ -193,9 +193,7 @@ impl Marcel {
             CopySelection | CutSelection => !trash && self.has_selection(),
             PasteFiles => {
                 self.can_mutate_here(cx)
-                    && operations
-                        .clipboard()
-                        .is_some_and(|clipboard| !clipboard.paths.is_empty())
+                    && operations.clipboard().is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
             NewFolder => self.can_mutate_here(cx),
             OpenTerminal => {
@@ -349,15 +347,11 @@ impl Marcel {
         };
         if extend {
             let ordered = self.directory.visible_paths();
-            self.directory
-                .selection
-                .select_range(entry.path.clone(), &ordered, false);
+            self.directory.selection.select_range(entry.path.clone(), &ordered, false);
         } else {
             self.directory.selection.select_only(entry.path.clone());
         }
-        self.ui
-            .directory_scroll
-            .scroll_to_item(target / columns.max(1), ScrollStrategy::Center);
+        self.ui.directory_scroll.scroll_to_item(target / columns.max(1), ScrollStrategy::Center);
         self.start_preview(entry, cx);
         cx.notify();
     }
@@ -560,9 +554,7 @@ impl Marcel {
     }
 
     pub(super) fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ui
-            .search_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.ui.search_input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn replace_search_text(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -571,9 +563,7 @@ impl Marcel {
         // a render triggered by moving focus cannot restore the old query and
         // discard the first type-to-filter character.
         self.set_filter_query(value.clone(), cx);
-        self.ui
-            .search_input
-            .update(cx, |input, cx| input.set_value(value, window, cx));
+        self.ui.search_input.update(cx, |input, cx| input.set_value(value, window, cx));
     }
 
     pub(super) fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -710,10 +700,7 @@ mod tests {
             BrowserCommand::ExtendPageDown.motion(),
             Some((SelectionMotion::PageDown, true))
         );
-        assert_eq!(
-            BrowserCommand::MoveLeft.motion(),
-            Some((SelectionMotion::Left, false))
-        );
+        assert_eq!(BrowserCommand::MoveLeft.motion(), Some((SelectionMotion::Left, false)));
         assert_eq!(BrowserCommand::PasteFiles.motion(), None);
     }
 }

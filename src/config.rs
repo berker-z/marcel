@@ -40,21 +40,13 @@ pub fn write_atomically(
     write: impl FnOnce(&mut fs::File) -> Result<()>,
 ) -> Result<()> {
     let path = &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let parent = path
-        .parent()
-        .context("Configuration file has no parent directory")?;
+    let parent = path.parent().context("Configuration file has no parent directory")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("Could not create “{}”", parent.display()))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).with_context(|| {
-        format!(
-            "Could not create a temporary file in “{}”",
-            parent.display()
-        )
-    })?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("Could not create a temporary file in “{}”", parent.display()))?;
     write(file.as_file_mut())?;
-    file.as_file()
-        .sync_all()
-        .with_context(|| format!("Could not flush “{}”", path.display()))?;
+    file.as_file().sync_all().with_context(|| format!("Could not flush “{}”", path.display()))?;
     file.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("Could not update “{}”", path.display()))?;
@@ -81,10 +73,7 @@ pub struct BrowserState {
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self {
-            view: BrowserView::Grid,
-            show_hidden: true,
-        }
+        Self { view: BrowserView::Grid, show_hidden: true }
     }
 }
 
@@ -127,9 +116,8 @@ fn parse(contents: &str) -> Result<BrowserState> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (key, value) = line
-            .split_once('=')
-            .with_context(|| format!("State line has no '=': {line:?}"))?;
+        let (key, value) =
+            line.split_once('=').with_context(|| format!("State line has no '=': {line:?}"))?;
         match key.trim() {
             "version" => version = value.trim().parse::<u32>().ok(),
             "view" => {
@@ -160,26 +148,17 @@ mod tests {
     #[test]
     fn missing_state_uses_grid_with_hidden_files_visible() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(
-            load(&root.path().join("missing")).unwrap(),
-            BrowserState::default()
-        );
+        assert_eq!(load(&root.path().join("missing")).unwrap(), BrowserState::default());
     }
 
     #[test]
     fn state_round_trips_atomically() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config/marcel/state.conf");
-        let state = BrowserState {
-            view: BrowserView::List,
-            show_hidden: false,
-        };
+        let state = BrowserState { view: BrowserView::List, show_hidden: false };
         save(&path, state).unwrap();
         assert_eq!(load(&path).unwrap(), state);
-        assert_eq!(
-            fs::read_to_string(path).unwrap(),
-            "version=1\nview=list\nshow_hidden=false\n"
-        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "version=1\nview=list\nshow_hidden=false\n");
     }
 
     #[test]

@@ -39,9 +39,8 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "wim", "xar", "xz", "zip", "zst",
 ];
 const RAR_EXTENSIONS: &[&str] = &["rar", "cbr"];
-const COMPOUND_TAR_EXTENSIONS: &[&str] = &[
-    ".tar.bz2", ".tar.gz", ".tar.xz", ".tar.zst", ".tbz", ".tbz2", ".tgz", ".txz",
-];
+const COMPOUND_TAR_EXTENSIONS: &[&str] =
+    &[".tar.bz2", ".tar.gz", ".tar.xz", ".tar.zst", ".tbz", ".tbz2", ".tgz", ".txz"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveEntry {
@@ -110,17 +109,9 @@ impl SevenZipBackend {
             command.current_dir(current_dir);
         }
 
-        let mut child = command
-            .spawn()
-            .at("Could not start archive backend", &self.program)?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("Archive backend has no stdout")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("Archive backend has no stderr")?;
+        let mut child = command.spawn().at("Could not start archive backend", &self.program)?;
+        let stdout = child.stdout.take().context("Archive backend has no stdout")?;
+        let stderr = child.stderr.take().context("Archive backend has no stderr")?;
         let stdout_thread = thread::spawn(move || read_bounded(stdout, stdout_limit));
         let stderr_thread = thread::spawn(move || read_bounded(stderr, MAX_SUBPROCESS_OUTPUT));
         let pid =
@@ -143,13 +134,10 @@ impl SevenZipBackend {
             }
             if stopped_by.is_some() {
                 let _ = kill_process_group(pid, Signal::KILL);
-                break child
-                    .wait()
-                    .context("Could not reap stopped archive backend")?;
+                break child.wait().context("Could not reap stopped archive backend")?;
             }
-            if let Some(status) = child
-                .try_wait()
-                .context("Could not inspect archive backend status")?
+            if let Some(status) =
+                child.try_wait().context("Could not inspect archive backend status")?
             {
                 break status;
             }
@@ -216,13 +204,8 @@ impl ArchiveBackend for SevenZipBackend {
             OsString::from("--"),
             archive.as_os_str().to_owned(),
         ];
-        let output = self.run(
-            arguments,
-            None,
-            Some(destination),
-            MAX_SUBPROCESS_OUTPUT,
-            cancelled,
-        )?;
+        let output =
+            self.run(arguments, None, Some(destination), MAX_SUBPROCESS_OUTPUT, cancelled)?;
         output.require_success("extract", archive)
     }
 
@@ -243,20 +226,10 @@ impl ArchiveBackend for SevenZipBackend {
             OsString::from("--"),
         ];
         for source in sources {
-            arguments.push(
-                source
-                    .file_name()
-                    .context("Compression source has no filename")?
-                    .to_owned(),
-            );
+            arguments
+                .push(source.file_name().context("Compression source has no filename")?.to_owned());
         }
-        let output = self.run(
-            arguments,
-            Some(parent),
-            None,
-            MAX_SUBPROCESS_OUTPUT,
-            cancelled,
-        )?;
+        let output = self.run(arguments, Some(parent), None, MAX_SUBPROCESS_OUTPUT, cancelled)?;
         output.require_success("compress", destination)
     }
 }
@@ -284,12 +257,7 @@ pub fn create_zip_archive(
     destination: &Path,
     cancelled: Arc<AtomicBool>,
 ) -> Result<ArchiveOutcome> {
-    create_zip_archive_with(
-        &SevenZipBackend::discover()?,
-        sources,
-        destination,
-        cancelled,
-    )
+    create_zip_archive_with(&SevenZipBackend::discover()?, sources, destination, cancelled)
 }
 
 fn extract_archive_with<B: ArchiveBackend>(
@@ -297,9 +265,7 @@ fn extract_archive_with<B: ArchiveBackend>(
     archive: &Path,
     cancelled: Arc<AtomicBool>,
 ) -> Result<ArchiveOutcome> {
-    let parent = archive
-        .parent()
-        .context("Archive has no containing directory")?;
+    let parent = archive.parent().context("Archive has no containing directory")?;
     let extract_to_staging = |archive: &Path| -> Result<(tempfile::TempDir, Vec<StagedEntry>)> {
         validate_preflight(&backend.list(archive, cancelled.clone())?)?;
         let staging = archive_staging(parent)?;
@@ -313,10 +279,7 @@ fn extract_archive_with<B: ArchiveBackend>(
     // A `.tar.gz` unwraps to one `.tar`; the user wants what is inside that.
     if let [only] = staged.as_slice()
         && only.is_file
-        && only
-            .path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("tar"))
+        && only.path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("tar"))
         && is_compound_tar_archive(archive)
     {
         staging = extract_to_staging(&only.path)?.0;
@@ -325,19 +288,14 @@ fn extract_archive_with<B: ArchiveBackend>(
     let top_level = fs::read_dir(staging.path())
         .at("Could not inspect archive staging", staging.path())?
         .map(|entry| {
-            entry
-                .map(|entry| entry.path())
-                .context("Could not read archive staging entry")
+            entry.map(|entry| entry.path()).context("Could not read archive staging entry")
         })
         .collect::<Result<Vec<_>>>()?;
     let published = match top_level.as_slice() {
         [] => bail!("Archive contains no extractable entries"),
         [source] => {
-            let destination = parent.join(
-                source
-                    .file_name()
-                    .context("Extracted item has no filename")?,
-            );
+            let destination =
+                parent.join(source.file_name().context("Extracted item has no filename")?);
             ensure_unoccupied(&destination)?;
             rename_no_replace(source, &destination)
                 .at("Could not publish extracted item", &destination)?;
@@ -380,9 +338,7 @@ fn create_zip_archive_with<B: ArchiveBackend>(
     }
     ensure_unoccupied(destination)?;
     validate_compression_sources(sources, &cancelled)?;
-    let parent = destination
-        .parent()
-        .context("Archive destination has no containing directory")?;
+    let parent = destination.parent().context("Archive destination has no containing directory")?;
     let staging = archive_staging(parent)?;
     let staged_archive = staging.path().join("archive.zip");
     backend.create_zip(sources, &staged_archive, cancelled.clone())?;
@@ -393,9 +349,7 @@ fn create_zip_archive_with<B: ArchiveBackend>(
     validate_preflight(&backend.list(&staged_archive, cancelled)?)?;
     ensure_unoccupied(destination)?;
     rename_no_replace(&staged_archive, destination).at("Could not publish ZIP", destination)?;
-    Ok(ArchiveOutcome {
-        published: destination.to_path_buf(),
-    })
+    Ok(ArchiveOutcome { published: destination.to_path_buf() })
 }
 
 fn archive_staging(parent: &Path) -> Result<tempfile::TempDir> {
@@ -423,32 +377,18 @@ struct Budget {
 
 impl Budget {
     fn listing() -> Self {
-        Self {
-            entries: 0,
-            bytes: 0,
-            listed: true,
-        }
+        Self { entries: 0, bytes: 0, listed: true }
     }
 
     fn staged() -> Self {
-        Self {
-            entries: 0,
-            bytes: 0,
-            listed: false,
-        }
+        Self { entries: 0, bytes: 0, listed: false }
     }
 
     fn add(&mut self, bytes: u64) -> Result<()> {
-        let (entries_verb, bytes_verb) = if self.listed {
-            ("contains", "expands")
-        } else {
-            ("extracted", "extracted")
-        };
+        let (entries_verb, bytes_verb) =
+            if self.listed { ("contains", "expands") } else { ("extracted", "extracted") };
         self.entries += 1;
-        self.bytes = self
-            .bytes
-            .checked_add(bytes)
-            .context("Archive size overflowed")?;
+        self.bytes = self.bytes.checked_add(bytes).context("Archive size overflowed")?;
         if self.entries > MAX_ARCHIVE_ENTRIES {
             bail!("Archive {entries_verb} more than {MAX_ARCHIVE_ENTRIES} entries");
         }
@@ -521,19 +461,13 @@ fn walk_staged(
             };
             let file_type = metadata.file_type();
             if file_type.is_symlink() {
-                bail!(
-                    "Archive extracted an unsupported symbolic link “{}”",
-                    path.display()
-                );
+                bail!("Archive extracted an unsupported symbolic link “{}”", path.display());
             }
             let is_file = file_type.is_file();
             if file_type.is_dir() {
                 pending.push(path.clone());
             } else if !is_file {
-                bail!(
-                    "Archive extracted unsupported special entry “{}”",
-                    path.display()
-                );
+                bail!("Archive extracted unsupported special entry “{}”", path.display());
             }
             budget.add(if is_file { metadata.len() } else { 0 })?;
             entries.push(StagedEntry { path, is_file });
@@ -577,16 +511,12 @@ fn validate_compression_sources(sources: &[PathBuf], cancelled: &AtomicBool) -> 
 }
 
 fn lowercase_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default()
+    path.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
 }
 
 fn is_compound_tar_archive(path: &Path) -> bool {
     let name = lowercase_name(path);
-    COMPOUND_TAR_EXTENSIONS
-        .iter()
-        .any(|extension| name.ends_with(extension))
+    COMPOUND_TAR_EXTENSIONS.iter().any(|extension| name.ends_with(extension))
 }
 
 struct CommandOutput {
@@ -601,11 +531,7 @@ impl CommandOutput {
         if self.status.success() {
             return Ok(());
         }
-        let bytes = if self.stderr.is_empty() {
-            &self.stdout
-        } else {
-            &self.stderr
-        };
+        let bytes = if self.stderr.is_empty() { &self.stdout } else { &self.stderr };
         let text = String::from_utf8_lossy(bytes);
         let diagnostics = match text.trim() {
             "" => "no diagnostics",
@@ -637,10 +563,7 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<CapturedOutpu
         retained.extend_from_slice(&buffer[..read.min(remaining)]);
         truncated |= read > remaining;
     }
-    Ok(CapturedOutput {
-        bytes: retained,
-        truncated,
-    })
+    Ok(CapturedOutput { bytes: retained, truncated })
 }
 
 fn discover_with(
@@ -701,22 +624,15 @@ fn is_supported_archive_with(path: &Path, rar_supported: bool) -> bool {
 
 fn rar_support_enabled() -> bool {
     env::var("MARCEL_ENABLE_RAR").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
     })
 }
 
 pub fn default_zip_name(sources: &[PathBuf], single_is_directory: bool) -> String {
     if let [source] = sources {
-        let stem = if single_is_directory {
-            source.file_name()
-        } else {
-            source.file_stem()
-        }
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_default();
+        let stem = if single_is_directory { source.file_name() } else { source.file_stem() }
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
         format!("{stem}.zip")
     } else {
         "Archive.zip".to_string()
@@ -726,10 +642,8 @@ pub fn default_zip_name(sources: &[PathBuf], single_is_directory: bool) -> Strin
 /// The archive's name with every archive extension peeled off, so
 /// `backup.tar.gz` extracts into `backup`.
 pub fn archive_stem(path: &Path) -> String {
-    let mut name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let mut name =
+        path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     while let Some((stem, extension)) = name.rsplit_once('.') {
         let known = SUPPORTED_EXTENSIONS
             .iter()
@@ -740,11 +654,7 @@ pub fn archive_stem(path: &Path) -> String {
         }
         name.truncate(stem.len());
     }
-    if name.is_empty() {
-        "Archive".to_string()
-    } else {
-        name
-    }
+    if name.is_empty() { "Archive".to_string() } else { name }
 }
 
 fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
@@ -790,11 +700,7 @@ fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
             bail!("Password-protected archives are not supported yet");
         }
         budget.add(size)?;
-        entries.push(ArchiveEntry {
-            path: PathBuf::from(path),
-            size,
-            is_dir,
-        });
+        entries.push(ArchiveEntry { path: PathBuf::from(path), size, is_dir });
     }
     if entries.is_empty() {
         bail!("Archive contains no extractable entries");
@@ -836,11 +742,7 @@ mod tests {
 
     impl ArchiveBackend for Fake {
         fn list(&self, _archive: &Path, _cancelled: Arc<AtomicBool>) -> Result<Vec<ArchiveEntry>> {
-            Ok(vec![ArchiveEntry {
-                path: PathBuf::from("file.txt"),
-                size: 4,
-                is_dir: false,
-            }])
+            Ok(vec![ArchiveEntry { path: PathBuf::from("file.txt"), size: 4, is_dir: false }])
         }
 
         fn extract(
@@ -948,16 +850,8 @@ Folder = -
         assert_eq!(
             parse_listing(listing).unwrap(),
             vec![
-                ArchiveEntry {
-                    path: PathBuf::from("folder"),
-                    size: 0,
-                    is_dir: true,
-                },
-                ArchiveEntry {
-                    path: PathBuf::from("folder/file.txt"),
-                    size: 12,
-                    is_dir: false,
-                },
+                ArchiveEntry { path: PathBuf::from("folder"), size: 0, is_dir: true },
+                ArchiveEntry { path: PathBuf::from("folder/file.txt"), size: 12, is_dir: false },
             ]
         );
 
@@ -986,10 +880,7 @@ Folder = -
     fn archive_names_cover_compound_extensions() {
         assert_eq!(archive_stem(Path::new("backup.tar.gz")), "backup");
         assert_eq!(archive_stem(Path::new("photos.zip")), "photos");
-        assert_eq!(
-            default_zip_name(&[PathBuf::from("/tmp/report.pdf")], false),
-            "report.zip"
-        );
+        assert_eq!(default_zip_name(&[PathBuf::from("/tmp/report.pdf")], false), "report.zip");
         assert_eq!(
             default_zip_name(&[PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")], false),
             "Archive.zip"
@@ -1050,19 +941,12 @@ Folder = -
         for fake in [Fake::Empty, Fake::OversizedSparse] {
             assert!(extract(fake, &archive).is_err());
         }
-        assert_eq!(
-            sandbox.names(""),
-            ["unsafe.zip"],
-            "staging must be cleaned up"
-        );
+        assert_eq!(sandbox.names(""), ["unsafe.zip"], "staging must be cleaned up");
     }
 
     #[test]
     fn listing_limits_entry_count_and_declared_expanded_size() {
-        let oversized = format!(
-            "Path = huge.bin\nSize = {}\nFolder = -\n",
-            MAX_EXPANDED_BYTES + 1
-        );
+        let oversized = format!("Path = huge.bin\nSize = {}\nFolder = -\n", MAX_EXPANDED_BYTES + 1);
         assert!(parse_listing(&oversized).is_err());
 
         let mut too_many = String::new();
@@ -1107,9 +991,7 @@ Folder = -
             cancel_for_thread.store(true, Ordering::Release);
         });
 
-        let error = backend
-            .list(Path::new("unused.zip"), cancelled)
-            .unwrap_err();
+        let error = backend.list(Path::new("unused.zip"), cancelled).unwrap_err();
         trigger.join().unwrap();
         assert!(error.to_string().contains("cancelled"));
     }
@@ -1123,13 +1005,8 @@ Folder = -
         let source = sandbox.file("report.txt", b"round trip");
         let archive = sandbox.path("report.zip");
 
-        create_zip_archive_with(
-            &backend,
-            std::slice::from_ref(&source),
-            &archive,
-            no_cancel(),
-        )
-        .unwrap();
+        create_zip_archive_with(&backend, std::slice::from_ref(&source), &archive, no_cancel())
+            .unwrap();
         fs::remove_file(&source).unwrap();
         let outcome = extract_archive_with(&backend, &archive, no_cancel()).unwrap();
 
@@ -1175,10 +1052,7 @@ Folder = -
         create_zip_archive_with(&backend, &sources, &archive, no_cancel()).unwrap();
         let entries = backend.list(&archive, no_cancel()).unwrap();
         for member in ["folder/nested.txt", "loose.txt"] {
-            assert!(
-                entries.iter().any(|entry| entry.path == Path::new(member)),
-                "{member}"
-            );
+            assert!(entries.iter().any(|entry| entry.path == Path::new(member)), "{member}");
         }
     }
 }

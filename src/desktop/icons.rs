@@ -27,10 +27,8 @@ impl IconProvider {
     }
 
     pub fn icon_for_place(&mut self, label: &str) -> Option<PathBuf> {
-        let candidates = place_icon_candidates(label)
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect::<Vec<_>>();
+        let candidates =
+            place_icon_candidates(label).iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
         self.lookup(&candidates)
     }
 
@@ -53,17 +51,13 @@ impl IconProvider {
         }
         layers.push(Layer::Theme(&self.ambient_theme));
 
-        let icon = resolve_layered(candidates, layers.len(), |layer, name| {
-            match layers[layer] {
-                Layer::Theme(theme) => freedesktop_icons::lookup(name)
-                    .with_theme(theme)
-                    .with_size(32)
-                    .with_cache()
-                    .find(),
-                Layer::Bundled(directory) => {
-                    let path = directory.join(format!("{name}.svg"));
-                    path.is_file().then_some(path)
-                }
+        let icon = resolve_layered(candidates, layers.len(), |layer, name| match layers[layer] {
+            Layer::Theme(theme) => {
+                freedesktop_icons::lookup(name).with_theme(theme).with_size(32).with_cache().find()
+            }
+            Layer::Bundled(directory) => {
+                let path = directory.join(format!("{name}.svg"));
+                path.is_file().then_some(path)
             }
         });
 
@@ -77,11 +71,8 @@ fn resolve_layered<T>(
     layer_count: usize,
     mut lookup: impl FnMut(usize, &str) -> Option<T>,
 ) -> Option<T> {
-    (0..layer_count).find_map(|layer| {
-        candidates
-            .iter()
-            .find_map(|candidate| lookup(layer, candidate))
-    })
+    (0..layer_count)
+        .find_map(|layer| candidates.iter().find_map(|candidate| lookup(layer, candidate)))
 }
 
 fn discover_bundled_icon_dir() -> Option<PathBuf> {
@@ -146,10 +137,7 @@ fn icon_candidates(path: &Path, directory: bool) -> Vec<String> {
         value if value.starts_with("video/") => "video-x-generic",
         _ => "application-x-generic",
     };
-    if candidates
-        .first()
-        .is_none_or(|specific| specific != generic)
-    {
+    if candidates.first().is_none_or(|specific| specific != generic) {
         candidates.push(generic.to_string());
     }
     candidates.push("unknown".to_string());
@@ -174,17 +162,15 @@ fn read_gtk_icon_theme() -> Option<String> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
 
-    ["gtk-4.0/settings.ini", "gtk-3.0/settings.ini"]
-        .into_iter()
-        .find_map(|relative| {
-            let contents = std::fs::read_to_string(config_home.join(relative)).ok()?;
-            contents.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "gtk-icon-theme-name")
-                    .then(|| value.trim().trim_matches(['\'', '"']).to_string())
-                    .filter(|value| !value.is_empty())
-            })
+    ["gtk-4.0/settings.ini", "gtk-3.0/settings.ini"].into_iter().find_map(|relative| {
+        let contents = std::fs::read_to_string(config_home.join(relative)).ok()?;
+        contents.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "gtk-icon-theme-name")
+                .then(|| value.trim().trim_matches(['\'', '"']).to_string())
+                .filter(|value| !value.is_empty())
         })
+    })
 }
 
 #[cfg(test)]
@@ -216,31 +202,24 @@ mod tests {
 
     #[test]
     fn places_use_freedesktop_semantic_icon_names() {
-        assert_eq!(
-            place_icon_candidates("Home"),
-            ["user-home", "folder-home", "folder"]
-        );
+        assert_eq!(place_icon_candidates("Home"), ["user-home", "folder-home", "folder"]);
         assert_eq!(
             place_icon_candidates("Pictures"),
             ["folder-pictures", "folder-images", "folder"]
         );
-        assert_eq!(
-            place_icon_candidates("Trash"),
-            ["user-trash", "user-trash-full", "folder"]
-        );
+        assert_eq!(place_icon_candidates("Trash"), ["user-trash", "user-trash-full", "folder"]);
         assert_eq!(place_icon_candidates("Other"), ["folder"]);
     }
 
     #[test]
     fn icon_layers_take_priority_over_more_specific_lower_layer_names() {
         let candidates = ["image-png".to_string(), "image-x-generic".to_string()];
-        let resolved = resolve_layered(&candidates, 3, |layer, candidate| {
-            match (layer, candidate) {
+        let resolved =
+            resolve_layered(&candidates, 3, |layer, candidate| match (layer, candidate) {
                 (1, "image-x-generic") => Some("bundled generic"),
                 (2, "image-png") => Some("ambient specific"),
                 _ => None,
-            }
-        });
+            });
         assert_eq!(resolved, Some("bundled generic"));
     }
 

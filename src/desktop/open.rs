@@ -37,17 +37,12 @@ async fn open_through_portal(path: PathBuf, ask: bool) -> Result<()> {
             .send_file(&file.as_fd())
             .await
             .context("sending the file to the desktop portal")?;
-        request
-            .response()
-            .context("the desktop portal rejected the open request")
+        request.response().context("the desktop portal rejected the open request")
     }
     .await;
 
     portal_result.map_err(|error| {
-        anyhow!(
-            "could not open {} through the desktop portal: {error}",
-            path.display()
-        )
+        anyhow!("could not open {} through the desktop portal: {error}", path.display())
     })
 }
 

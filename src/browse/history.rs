@@ -10,10 +10,7 @@ pub struct NavigationHistory {
 
 impl NavigationHistory {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            cursor: 0,
-            stack: vec![path],
-        }
+        Self { cursor: 0, stack: vec![path] }
     }
 
     pub fn push(&mut self, path: &Path) {

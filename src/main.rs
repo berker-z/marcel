@@ -112,9 +112,7 @@ fn handle_desktop_request(request: DesktopRequest, fallback_path: &std::path::Pa
             cx.activate(true);
             match registry.read(cx).current(cx) {
                 Some(current) => {
-                    let _ = current
-                        .handle
-                        .update(cx, |_, window, _| window.activate_window());
+                    let _ = current.handle.update(cx, |_, window, _| window.activate_window());
                 }
                 // A cold bus activation deferred its initial window; with
                 // nothing to raise, "show me the Marcel I have" means opening
@@ -130,10 +128,7 @@ fn handle_desktop_request(request: DesktopRequest, fallback_path: &std::path::Pa
         DesktopRequest::ShowFolders(folders) => show_locations(
             folders
                 .into_iter()
-                .map(|directory| RevealedLocation {
-                    directory,
-                    items: Vec::new(),
-                })
+                .map(|directory| RevealedLocation { directory, items: Vec::new() })
                 .collect(),
             may_reuse,
             cx,

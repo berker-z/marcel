@@ -140,10 +140,7 @@ impl UiState {
 
     /// The row being renamed, if `path` is it.
     pub fn rename_input_for(&self, path: &Path) -> Option<Entity<InputState>> {
-        self.rename
-            .as_ref()
-            .filter(|edit| edit.path == path)
-            .map(|edit| edit.input.clone())
+        self.rename.as_ref().filter(|edit| edit.path == path).map(|edit| edit.input.clone())
     }
 }
 
@@ -308,10 +305,7 @@ impl PickerState {
             filters: request.filters,
             name_input,
             filter_select,
-            _subscriptions: name_subscription
-                .into_iter()
-                .chain(filter_subscription)
-                .collect(),
+            _subscriptions: name_subscription.into_iter().chain(filter_subscription).collect(),
             confirming: false,
             reply: Some(request.reply),
         }

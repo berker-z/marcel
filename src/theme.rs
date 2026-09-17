@@ -120,18 +120,8 @@ const PALETTES: [(Palette, &str, &[&str], Option<Swatches>); 12] = [
             0x98bb6c, 0x7e9cd8, 0x7e9cd8, 0xe46876, 0xffa066, 0xe6c384, 0x98bb6c, 0x957fb8,
         ]),
     ),
-    (
-        Palette::SystemDark,
-        "System Dark",
-        &["dark", "default-dark", "system-dark"],
-        None,
-    ),
-    (
-        Palette::SystemLight,
-        "System Light",
-        &["light", "default-light", "system-light"],
-        None,
-    ),
+    (Palette::SystemDark, "System Dark", &["dark", "default-dark", "system-dark"], None),
+    (Palette::SystemLight, "System Light", &["light", "default-light", "system-light"], None),
 ];
 
 impl Palette {
@@ -145,14 +135,7 @@ impl Palette {
         all
     };
 
-    fn row(
-        self,
-    ) -> &'static (
-        Palette,
-        &'static str,
-        &'static [&'static str],
-        Option<Swatches>,
-    ) {
+    fn row(self) -> &'static (Palette, &'static str, &'static [&'static str], Option<Swatches>) {
         &PALETTES[self as usize]
     }
 
@@ -169,11 +152,7 @@ impl Palette {
     }
 
     fn from_environment() -> Self {
-        std::env::var("MARCEL_THEME")
-            .ok()
-            .as_deref()
-            .and_then(Self::from_name)
-            .unwrap_or_default()
+        std::env::var("MARCEL_THEME").ok().as_deref().and_then(Self::from_name).unwrap_or_default()
     }
 }
 
@@ -199,11 +178,7 @@ pub fn apply(palette: Palette, cx: &mut App) {
             theme.radius_lg,
         )
     };
-    let mode = if palette == Palette::SystemLight {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
-    };
+    let mode = if palette == Palette::SystemLight { ThemeMode::Light } else { ThemeMode::Dark };
     Theme::change(mode, None, cx);
 
     let theme = Theme::global_mut(cx);
@@ -400,28 +375,16 @@ mod tests {
     #[test]
     fn parses_supported_palette_names() {
         assert_eq!(Palette::from_name("nord"), Some(Palette::Nord));
-        assert_eq!(
-            Palette::from_name("GRUVBOX-DARK"),
-            Some(Palette::GruvboxDark)
-        );
-        assert_eq!(
-            Palette::from_name("catppuccin"),
-            Some(Palette::CatppuccinMocha)
-        );
-        assert_eq!(
-            Palette::from_name("default-dark"),
-            Some(Palette::SystemDark)
-        );
+        assert_eq!(Palette::from_name("GRUVBOX-DARK"), Some(Palette::GruvboxDark));
+        assert_eq!(Palette::from_name("catppuccin"), Some(Palette::CatppuccinMocha));
+        assert_eq!(Palette::from_name("default-dark"), Some(Palette::SystemDark));
         assert_eq!(Palette::from_name("light"), Some(Palette::SystemLight));
         assert_eq!(Palette::from_name("unknown"), None);
     }
 
     #[test]
     fn palette_labels_round_trip_and_are_unique() {
-        let mut labels = Palette::ALL
-            .iter()
-            .map(|palette| palette.label())
-            .collect::<Vec<_>>();
+        let mut labels = Palette::ALL.iter().map(|palette| palette.label()).collect::<Vec<_>>();
         labels.sort_unstable();
         labels.dedup();
         assert_eq!(labels.len(), Palette::ALL.len());

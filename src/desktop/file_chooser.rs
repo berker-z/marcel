@@ -179,8 +179,7 @@ impl FileChooserService {
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
-        self.run(connection, handle, Method::OpenFile, title, options)
-            .await
+        self.run(connection, handle, Method::OpenFile, title, options).await
     }
 
     async fn save_file(
@@ -192,8 +191,7 @@ impl FileChooserService {
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
-        self.run(connection, handle, Method::SaveFile, title, options)
-            .await
+        self.run(connection, handle, Method::SaveFile, title, options).await
     }
 
     async fn save_files(
@@ -205,8 +203,7 @@ impl FileChooserService {
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
-        self.run(connection, handle, Method::SaveFiles, title, options)
-            .await
+        self.run(connection, handle, Method::SaveFiles, title, options).await
     }
 }
 
@@ -248,10 +245,7 @@ pub(crate) async fn serve(
 
     connection
         .object_server()
-        .at(
-            PORTAL_OBJECT_PATH,
-            FileChooserService::new(requests, tracker),
-        )
+        .at(PORTAL_OBJECT_PATH, FileChooserService::new(requests, tracker))
         .await?;
     match connection
         .request_name_with_flags(FILE_CHOOSER_BUS_NAME, RequestNameFlags::DoNotQueue.into())
@@ -282,29 +276,22 @@ fn decode_request(
         Method::OpenFile if directory => PickerMode::OpenDirectories,
         Method::OpenFile => PickerMode::OpenFiles,
         Method::SaveFile => PickerMode::SaveFile,
-        Method::SaveFiles => PickerMode::SaveFiles {
-            names: save_file_names(options)?,
-        },
+        Method::SaveFiles => PickerMode::SaveFiles { names: save_file_names(options)? },
     };
 
     let current_file = bytes_option(options, "current_file")?.map(PathBuf::from);
     let start_directory = bytes_option(options, "current_folder")?
         .map(PathBuf::from)
-        .or_else(|| {
-            current_file
-                .as_deref()
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-        });
+        .or_else(|| current_file.as_deref().and_then(Path::parent).map(Path::to_path_buf));
     let current_name = match method {
-        Method::SaveFile => string_option(options, "current_name")?
-            .filter(|name| !name.is_empty())
-            .or_else(|| {
+        Method::SaveFile => {
+            string_option(options, "current_name")?.filter(|name| !name.is_empty()).or_else(|| {
                 current_file
                     .as_deref()
                     .and_then(Path::file_name)
                     .map(|name| name.to_string_lossy().into_owned())
-            }),
+            })
+        }
         Method::OpenFile | Method::SaveFiles => None,
     };
 
@@ -349,9 +336,7 @@ fn string_option(
 
 fn bounded_string(value: &str, key: &str) -> Result<String, String> {
     if value.len() > MAX_STRING_BYTES {
-        return Err(format!(
-            "option {key} is longer than {MAX_STRING_BYTES} bytes"
-        ));
+        return Err(format!("option {key} is longer than {MAX_STRING_BYTES} bytes"));
     }
     Ok(value.to_string())
 }
@@ -367,9 +352,7 @@ fn bytes_option(
     let bytes = Vec::<u8>::try_from(value.clone())
         .map_err(|_| format!("option {key} must be a byte string"))?;
     if bytes.len() > MAX_STRING_BYTES {
-        return Err(format!(
-            "option {key} is longer than {MAX_STRING_BYTES} bytes"
-        ));
+        return Err(format!("option {key} is longer than {MAX_STRING_BYTES} bytes"));
     }
     Ok(bytestring_to_os(bytes).filter(|value| !value.is_empty()))
 }
@@ -391,17 +374,13 @@ fn save_file_names(options: &HashMap<String, OwnedValue>) -> Result<Vec<OsString
         return Err("SaveFiles needs at least one file name".to_string());
     }
     if files.len() > MAX_SAVE_FILES {
-        return Err(format!(
-            "SaveFiles accepts at most {MAX_SAVE_FILES} file names"
-        ));
+        return Err(format!("SaveFiles accepts at most {MAX_SAVE_FILES} file names"));
     }
     files
         .into_iter()
         .map(|bytes| {
             if bytes.len() > MAX_STRING_BYTES {
-                return Err(format!(
-                    "a file name is longer than {MAX_STRING_BYTES} bytes"
-                ));
+                return Err(format!("a file name is longer than {MAX_STRING_BYTES} bytes"));
             }
             // The caller asks for a folder and hands over names to put in
             // it. A name carrying a directory is either a mistake or an
@@ -427,9 +406,7 @@ fn filters_option(options: &HashMap<String, OwnedValue>) -> Result<Vec<FileFilte
 
 fn decode_filter((name, patterns): (String, Vec<(u32, String)>)) -> Result<FileFilter, String> {
     if patterns.len() > MAX_PATTERNS_PER_FILTER {
-        return Err(format!(
-            "a filter has more than {MAX_PATTERNS_PER_FILTER} patterns"
-        ));
+        return Err(format!("a filter has more than {MAX_PATTERNS_PER_FILTER} patterns"));
     }
     let name = bounded_string(&name, "filters")?;
     let patterns = patterns
@@ -541,10 +518,7 @@ mod tests {
         let filters = vec![
             (
                 "Images".to_string(),
-                vec![
-                    (0u32, "*.png".to_string()),
-                    (1u32, "image/jpeg".to_string()),
-                ],
+                vec![(0u32, "*.png".to_string()), (1u32, "image/jpeg".to_string())],
             ),
             ("All".to_string(), vec![(0u32, "*".to_string())]),
         ];
@@ -600,16 +574,12 @@ mod tests {
         let request = decode(Method::SaveFiles, &options).unwrap();
         assert_eq!(
             request.mode,
-            PickerMode::SaveFiles {
-                names: vec![OsString::from("a.txt"), OsString::from("b.txt")]
-            }
+            PickerMode::SaveFiles { names: vec![OsString::from("a.txt"), OsString::from("b.txt")] }
         );
 
         assert!(decode(Method::SaveFiles, &HashMap::new()).is_err());
-        let traversal = self::options(vec![(
-            "files",
-            Value::from(vec![b"../escape.txt\0".to_vec()]),
-        )]);
+        let traversal =
+            self::options(vec![("files", Value::from(vec![b"../escape.txt\0".to_vec()]))]);
         assert!(decode(Method::SaveFiles, &traversal).is_err());
         let empty = self::options(vec![("files", Value::from(Vec::<Vec<u8>>::new()))]);
         assert!(decode(Method::SaveFiles, &empty).is_err());
@@ -619,10 +589,7 @@ mod tests {
     fn wrongly_typed_options_are_rejected_rather_than_ignored() {
         let options = self::options(vec![("multiple", Value::from("yes"))]);
         assert!(decode(Method::OpenFile, &options).is_err());
-        let options = self::options(vec![(
-            "filters",
-            Value::from(vec![(2u32, "x".to_string())]),
-        )]);
+        let options = self::options(vec![("filters", Value::from(vec![(2u32, "x".to_string())]))]);
         assert!(decode(Method::OpenFile, &options).is_err());
         let options = self::options(vec![(
             "filters",

@@ -81,9 +81,7 @@ fn budgeted(
 ) -> TransferOutcome {
     Transfer::new(sources, destination, mode, no_cancel())
         .with_budget(budget)
-        .run(&mut answering(ConflictDecision::once(
-            ConflictResponse::Replace,
-        )))
+        .run(&mut answering(ConflictDecision::once(ConflictResponse::Replace)))
 }
 
 fn assert_clean(outcome: &TransferOutcome) {
@@ -94,9 +92,7 @@ fn assert_clean(outcome: &TransferOutcome) {
 /// undo. Failing here means bookkeeping was lost, not that the mutation
 /// failed.
 fn recorded(committed: CommittedOperation) -> OperationRecord {
-    committed
-        .into_record()
-        .expect("operation should have retained an undo record")
+    committed.into_record().expect("operation should have retained an undo record")
 }
 
 fn no_replacement_quarantines(directory: &Path) -> bool {
@@ -122,11 +118,7 @@ fn copy_refuses_a_destination_that_resolves_inside_the_source() {
     let outcome = copy(std::slice::from_ref(&source), &alias);
 
     assert_eq!(outcome.failures.len(), 1);
-    assert!(
-        outcome.failures[0].message.contains("into itself"),
-        "{:?}",
-        outcome.failures
-    );
+    assert!(outcome.failures[0].message.contains("into itself"), "{:?}", outcome.failures);
     assert!(outcome.operation.is_none());
     assert_eq!(tree_size(&source), before, "the copy amplified the source");
 }
@@ -160,10 +152,7 @@ fn a_moved_tree_holding_a_socket_is_reported_undoable_and_redoable() {
     let outcome = mv(std::slice::from_ref(&project), &destination);
 
     assert_clean(&outcome);
-    assert_eq!(
-        outcome.completed_destinations(),
-        [destination.join("project")]
-    );
+    assert_eq!(outcome.completed_destinations(), [destination.join("project")]);
     assert!(!project.exists());
     assert_eq!(read(destination.join("project/notes.txt")), b"important");
     // A rename never inspects what the tree holds, so the socket costs
@@ -172,10 +161,7 @@ fn a_moved_tree_holding_a_socket_is_reported_undoable_and_redoable() {
     let operation = outcome.operation.expect("a moved socket tree retains undo");
 
     let redo_record = recorded(undo_operation(&operation).unwrap());
-    assert!(
-        project.join("daemon.sock").exists(),
-        "undo restored the tree"
-    );
+    assert!(project.join("daemon.sock").exists(), "undo restored the tree");
     assert_eq!(read(project.join("notes.txt")), b"important");
     assert!(!destination.join("project").exists());
 
@@ -218,14 +204,8 @@ fn a_rolled_back_undo_discards_the_record_it_invalidated() {
     let result = undo_operation(&operation);
     seal(&blocked, false);
 
-    assert!(
-        !result.keeps_history(),
-        "a rolled-back undo must discard its record, got {result:?}"
-    );
-    assert!(
-        matches!(result, MutationOutcome::Discarded { .. }),
-        "{result:?}"
-    );
+    assert!(!result.keeps_history(), "a rolled-back undo must discard its record, got {result:?}");
+    assert!(matches!(result, MutationOutcome::Discarded { .. }), "{result:?}");
     // Compensation returned "second" to the destination, so the disk is
     // whole even though the record is gone.
     assert!(destination.join("first/data.txt").exists());
@@ -249,10 +229,7 @@ fn an_undo_that_never_commits_keeps_its_record() {
 
     let result = undo_operation(&operation);
 
-    assert!(
-        result.keeps_history(),
-        "a pre-commit refusal must stay retryable, got {result:?}"
-    );
+    assert!(result.keeps_history(), "a pre-commit refusal must stay retryable, got {result:?}");
     assert!(destination.join("only/data.txt").exists());
 
     // Clearing the obstacle makes the retained record work.
@@ -365,17 +342,11 @@ fn rename_is_no_replace_and_supports_undo_redo() {
     assert_eq!(read(&destination), b"contents");
     assert_eq!(
         operation.forward_directory_changes(),
-        DirectoryChanges {
-            removed: vec![source.clone()],
-            upserted: vec![destination.clone()]
-        }
+        DirectoryChanges { removed: vec![source.clone()], upserted: vec![destination.clone()] }
     );
     assert_eq!(
         operation.reverse_directory_changes(),
-        DirectoryChanges {
-            removed: vec![destination.clone()],
-            upserted: vec![source.clone()]
-        }
+        DirectoryChanges { removed: vec![destination.clone()], upserted: vec![source.clone()] }
     );
 
     let redo_record = recorded(undo_operation(&operation).unwrap());
@@ -518,10 +489,8 @@ fn copy_never_overwrites_an_occupied_destination() {
 /// Two sources, one of which collides at the destination.
 fn occupied_transfer_fixture() -> (Sandbox, Vec<PathBuf>, PathBuf) {
     let sandbox = Sandbox::new();
-    let sources = vec![
-        sandbox.file("source/taken.txt", b"new"),
-        sandbox.file("source/free.txt", b"free"),
-    ];
+    let sources =
+        vec![sandbox.file("source/taken.txt", b"new"), sandbox.file("source/free.txt", b"free")];
     sandbox.file("destination/taken.txt", b"keep");
     let destination = sandbox.path("destination");
     (sandbox, sources, destination)
@@ -591,11 +560,7 @@ fn a_rename_response_cannot_escape_the_destination_directory() {
     let outcome = transfer_deciding(&sources, &destination, TransferMode::Copy, rename);
 
     assert_eq!(outcome.failures.len(), 1);
-    assert!(
-        outcome.failures[0].message.contains("cannot contain"),
-        "{:?}",
-        outcome.failures
-    );
+    assert!(outcome.failures[0].message.contains("cannot contain"), "{:?}", outcome.failures);
     assert!(!destination.parent().unwrap().join("escaped.txt").exists());
     assert_eq!(outcome.accounted(), sources.len());
 }
@@ -611,15 +576,10 @@ fn the_abandoned_sweep_reclaims_only_dead_owners_undo_storage() {
     // Process id 0 is never a real process, so it stands in for a Marcel
     // that is gone.
     let abandoned = sandbox.file(".marcel-replaced-0-0-report.txt", b"overwritten");
-    let mine = sandbox.file(
-        &format!(".marcel-replaced-{}-0-report.txt", std::process::id()),
-        b"payload",
-    );
+    let mine =
+        sandbox.file(&format!(".marcel-replaced-{}-0-report.txt", std::process::id()), b"payload");
     let parents = sandbox.file(
-        &format!(
-            ".marcel-replaced-{}-0-report.txt",
-            std::os::unix::process::parent_id()
-        ),
+        &format!(".marcel-replaced-{}-0-report.txt", std::os::unix::process::parent_id()),
         b"payload",
     );
     let preserved = sandbox.file(".marcel-recovered-0-report.txt", b"ORIGINAL");
@@ -627,18 +587,9 @@ fn the_abandoned_sweep_reclaims_only_dead_owners_undo_storage() {
 
     assert_eq!(reclaim_abandoned_quarantines(sandbox.root()), 1);
 
-    assert!(
-        !abandoned.exists(),
-        "a dead owner's undo storage is garbage"
-    );
-    assert!(
-        mine.exists(),
-        "this process can still undo, so its quarantine stays"
-    );
-    assert!(
-        parents.exists(),
-        "liveness is consulted, not equality with this process"
-    );
+    assert!(!abandoned.exists(), "a dead owner's undo storage is garbage");
+    assert!(mine.exists(), "this process can still undo, so its quarantine stays");
+    assert!(parents.exists(), "liveness is consulted, not equality with this process");
     assert_eq!(read(&preserved), b"ORIGINAL");
     assert!(ordinary.exists(), "user data is never touched");
 }
@@ -698,10 +649,7 @@ fn quarantine_deletion_refuses_an_object_it_did_not_record() {
     assert_eq!(read(&quarantine), b"SOMEONE ELSE'S");
 
     // The object it actually recorded is released as before.
-    let recorded = ReplacedItem {
-        identity: FileIdentity::read(&quarantine).unwrap(),
-        ..item
-    };
+    let recorded = ReplacedItem { identity: FileIdentity::read(&quarantine).unwrap(), ..item };
     erase_replacement_quarantine(&recorded);
     assert!(!quarantine.exists());
 }
@@ -726,10 +674,7 @@ fn a_replacement_of_a_name_near_the_length_limit_succeeds() {
     let name = quarantined_name(".marcel-replaced-4194304-", 9, OsStr::new(&"é".repeat(200)));
     use std::os::unix::ffi::OsStrExt as _;
     assert!(name.as_bytes().len() <= MAX_NAME_BYTES, "{name:?}");
-    assert!(
-        name.to_str().is_some(),
-        "truncation stays on a character boundary: {name:?}"
-    );
+    assert!(name.to_str().is_some(), "truncation stays on a character boundary: {name:?}");
 }
 
 /// Refreshing an identity after a commit re-reads a path, and a path is not
@@ -758,20 +703,11 @@ fn an_identity_refresh_refuses_an_object_it_did_not_commit() {
 
 #[test]
 fn marcel_working_names_are_recognized_without_catching_user_data() {
-    for name in [
-        ".marcel-replaced-1-0-report.txt",
-        ".marcel-copy-1-0-abc",
-        ".marcel-archive-abc",
-    ] {
+    for name in [".marcel-replaced-1-0-report.txt", ".marcel-copy-1-0-abc", ".marcel-archive-abc"] {
         assert!(is_internal_working_name(OsStr::new(name)), "{name}");
     }
     // Recovery guidance points the user straight at the first of these.
-    for name in [
-        ".marcel-delete-1-0-report.txt",
-        "report.txt",
-        ".hidden",
-        "marcel-replaced-1-0",
-    ] {
+    for name in [".marcel-delete-1-0-report.txt", "report.txt", ".hidden", "marcel-replaced-1-0"] {
         assert!(!is_internal_working_name(OsStr::new(name)), "{name}");
     }
 }
@@ -860,23 +796,12 @@ fn an_oversized_replacement_succeeds_without_undo() {
     let source = sandbox.file("source/blob.bin", b"replacement");
     let replaced = sandbox.file("destination/blob.bin", vec![0_u8; 4096]);
     let destination = sandbox.path("destination");
-    let budget = TransferBudget {
-        replacement_undo_byte_limit: 1024,
-        ..TransferBudget::default()
-    };
+    let budget = TransferBudget { replacement_undo_byte_limit: 1024, ..TransferBudget::default() };
 
-    let outcome = budgeted(
-        std::slice::from_ref(&source),
-        &destination,
-        TransferMode::Copy,
-        budget,
-    );
+    let outcome = budgeted(std::slice::from_ref(&source), &destination, TransferMode::Copy, budget);
 
     assert_clean(&outcome);
-    assert!(
-        outcome.undo_unavailable,
-        "an oversized replacement cannot be undone"
-    );
+    assert!(outcome.undo_unavailable, "an oversized replacement cannot be undone");
     assert_eq!(read(&replaced), b"replacement");
     assert!(
         no_replacement_quarantines(&destination),
@@ -911,10 +836,7 @@ fn merging_an_empty_directory_keeps_the_destination_intact() {
 #[test]
 fn renaming_all_keeps_every_colliding_source() {
     let sandbox = Sandbox::new();
-    let sources = vec![
-        sandbox.file("source/a.txt", b"new"),
-        sandbox.file("source/b.txt", b"new"),
-    ];
+    let sources = vec![sandbox.file("source/a.txt", b"new"), sandbox.file("source/b.txt", b"new")];
     sandbox.file("destination/a.txt", b"existing");
     sandbox.file("destination/b.txt", b"existing");
     // Already occupied, so "a.txt" has to land past it.
@@ -1011,10 +933,7 @@ fn copy_undo_with_a_merge_refuses_a_modified_output_before_removing_anything() {
     sandbox.file("source/new_item/inside.txt", b"NEW");
     sandbox.file("source/photos/arrived.txt", b"NEW");
     sandbox.dir("destination/photos");
-    let sources = [
-        sandbox.path("source/new_item"),
-        sandbox.path("source/photos"),
-    ];
+    let sources = [sandbox.path("source/new_item"), sandbox.path("source/photos")];
 
     let outcome = replacing(&sources, &sandbox.path("destination"));
     let operation = outcome.operation.expect("the transfer retains undo");
@@ -1045,10 +964,7 @@ fn copy_undo_that_removed_merge_additions_discards_rather_than_claiming_no_effec
         return;
     }
     let sandbox = Sandbox::new();
-    let sources = [
-        sandbox.file("source/new_item.txt", b"NEW"),
-        sandbox.dir("source/photos"),
-    ];
+    let sources = [sandbox.file("source/new_item.txt", b"NEW"), sandbox.dir("source/photos")];
     sandbox.file("source/photos/arrived.txt", b"NEW");
     sandbox.dir("destination/photos");
     let destination = sandbox.path("destination");
@@ -1070,10 +986,7 @@ fn copy_undo_that_removed_merge_additions_discards_rather_than_claiming_no_effec
         changes.removed.contains(&arrived),
         "the removals that committed must be reported: {changes:?}"
     );
-    assert!(
-        !arrived.exists(),
-        "this scenario depends on the merge's additions being removed"
-    );
+    assert!(!arrived.exists(), "this scenario depends on the merge's additions being removed");
     assert_eq!(
         read(destination.join("new_item.txt")),
         b"NEW",
@@ -1106,12 +1019,8 @@ fn a_merge_stopped_by_failure_records_what_it_added() {
 
     // The partial merge is describable, so Undo can take back exactly what
     // arrived and leave what the destination already had.
-    undo_operation(
-        &outcome
-            .operation
-            .expect("a partial merge still records its additions"),
-    )
-    .unwrap();
+    undo_operation(&outcome.operation.expect("a partial merge still records its additions"))
+        .unwrap();
 
     assert!(!merged.join("arrives.txt").exists());
     assert!(!merged.join("album").exists());
@@ -1137,10 +1046,7 @@ fn a_cancelled_merge_is_reported_as_cancellation() {
         &mut answering(ConflictDecision::for_all(ConflictResponse::Replace)),
     );
 
-    assert!(
-        outcome.failures.is_empty(),
-        "cancelling is not a failure: {outcome:?}"
-    );
+    assert!(outcome.failures.is_empty(), "cancelling is not a failure: {outcome:?}");
     assert_eq!(outcome.cancelled, sources, "{outcome:?}");
     assert!(!sandbox.path("destination/photos/arrives.txt").exists());
 }
@@ -1163,23 +1069,12 @@ fn work_past_the_snapshot_budget_succeeds_without_undo() {
     sandbox.file("source/plain/two", b"2");
     sandbox.dir("destination/photos");
     let destination = sandbox.path("destination");
-    let budget = TransferBudget {
-        undo_snapshot_limit: 2,
-        ..TransferBudget::default()
-    };
+    let budget = TransferBudget { undo_snapshot_limit: 2, ..TransferBudget::default() };
 
-    let merged = budgeted(
-        std::slice::from_ref(&photos),
-        &destination,
-        TransferMode::Copy,
-        budget,
-    );
+    let merged = budgeted(std::slice::from_ref(&photos), &destination, TransferMode::Copy, budget);
     assert_clean(&merged);
     assert_eq!(merged.completed.len(), 1, "{merged:?}");
-    assert!(
-        merged.undo_unavailable,
-        "a merge past the budget is not undoable: {merged:?}"
-    );
+    assert!(merged.undo_unavailable, "a merge past the budget is not undoable: {merged:?}");
     for index in 0..4 {
         assert!(
             destination.join(format!("photos/{index}.txt")).exists(),
@@ -1187,28 +1082,15 @@ fn work_past_the_snapshot_budget_succeeds_without_undo() {
         );
     }
 
-    let moved = budgeted(
-        std::slice::from_ref(&album),
-        &destination,
-        TransferMode::Move,
-        budget,
-    );
+    let moved = budgeted(std::slice::from_ref(&album), &destination, TransferMode::Move, budget);
     assert_clean(&moved);
     assert_eq!(moved.completed.len(), 1, "{moved:?}");
-    assert!(
-        moved.undo_unavailable,
-        "a move past the budget is not undoable: {moved:?}"
-    );
+    assert!(moved.undo_unavailable, "a move past the budget is not undoable: {moved:?}");
     assert!(moved.operation.is_none(), "{moved:?}");
     assert!(!album.exists(), "the move still happens");
     assert_eq!(read(destination.join("album/0.txt")), b"payload");
 
-    let copied = budgeted(
-        std::slice::from_ref(&plain),
-        &destination,
-        TransferMode::Copy,
-        budget,
-    );
+    let copied = budgeted(std::slice::from_ref(&plain), &destination, TransferMode::Copy, budget);
     assert_clean(&copied);
     assert!(copied.undo_unavailable);
     assert!(copied.operation.is_none());
@@ -1289,12 +1171,8 @@ fn copying_an_item_into_its_own_folder_duplicates_it_without_asking() {
         "the duplicate lands beside the original"
     );
     // Duplicating again steps past the name it just created.
-    let outcome = transfer_deciding(
-        std::slice::from_ref(&source),
-        &folder,
-        TransferMode::Copy,
-        would_cancel,
-    );
+    let outcome =
+        transfer_deciding(std::slice::from_ref(&source), &folder, TransferMode::Copy, would_cancel);
     assert_clean(&outcome);
     assert!(folder.join("report (3).txt").exists());
 }
@@ -1320,11 +1198,7 @@ fn a_hardlink_to_the_source_is_recognized_as_the_same_object() {
         replace_all.clone(),
     );
     assert_eq!(moved.failures.len(), 1, "{moved:?}");
-    assert!(
-        moved.failures[0].message.contains("over itself"),
-        "{:?}",
-        moved.failures
-    );
+    assert!(moved.failures[0].message.contains("over itself"), "{:?}", moved.failures);
     assert_eq!(read(&source), b"original");
 
     let copied = transfer_deciding(
@@ -1346,12 +1220,8 @@ fn a_hardlink_to_the_source_is_recognized_as_the_same_object() {
 fn a_cancelled_transfer_accounts_for_every_requested_source() {
     let (_sandbox, sources, destination) = occupied_transfer_fixture();
 
-    let outcome = transfer_paths(
-        &sources,
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(true)),
-    );
+    let outcome =
+        transfer_paths(&sources, &destination, TransferMode::Copy, Arc::new(AtomicBool::new(true)));
 
     assert_eq!(outcome.cancelled, sources);
     assert_eq!(outcome.accounted(), sources.len());
@@ -1474,9 +1344,7 @@ fn copy_preserves_file_and_directory_modes_and_times() {
     fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
     let accessed = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
     let modified = UNIX_EPOCH + Duration::from_secs(1_650_000_123);
-    let times = fs::FileTimes::new()
-        .set_accessed(accessed)
-        .set_modified(modified);
+    let times = fs::FileTimes::new().set_accessed(accessed).set_modified(modified);
     fs::File::open(&file).unwrap().set_times(times).unwrap();
     fs::File::open(&tree).unwrap().set_times(times).unwrap();
     let destination = sandbox.dir("destination");
@@ -1504,9 +1372,7 @@ fn copy_preserves_supported_user_xattrs() {
 
     assert_clean(&copy(&[source], &destination));
     assert_eq!(
-        xattr::get(destination.join("source.txt"), "user.marcel-copy-test")
-            .unwrap()
-            .as_deref(),
+        xattr::get(destination.join("source.txt"), "user.marcel-copy-test").unwrap().as_deref(),
         Some(b"kept".as_slice())
     );
 }
@@ -1534,18 +1400,14 @@ fn copy_preserves_posix_access_acl_xattr_when_supported() {
     }
     if let Err(error) = xattr::set(&source, "system.posix_acl_access", &acl) {
         if xattrs_unsupported(&error)
-            || matches!(
-                error.kind(),
-                io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
-            )
+            || matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput)
         {
             return;
         }
         panic!("could not create ACL fixture: {error}");
     }
-    let expected = xattr::get(&source, "system.posix_acl_access")
-        .unwrap()
-        .expect("ACL fixture disappeared");
+    let expected =
+        xattr::get(&source, "system.posix_acl_access").unwrap().expect("ACL fixture disappeared");
 
     assert_clean(&copy(&[source], &destination));
     assert_eq!(
@@ -1569,10 +1431,7 @@ fn copy_preserves_hardlinks_within_a_directory_tree() {
 
     let first = fs::metadata(destination.join("tree/first")).unwrap();
     let second = fs::metadata(destination.join("tree/second")).unwrap();
-    assert_eq!(
-        (first.dev(), first.ino(), first.nlink()),
-        (second.dev(), second.ino(), 2)
-    );
+    assert_eq!((first.dev(), first.ino(), first.nlink()), (second.dev(), second.ino(), 2));
     recorded(undo_operation(&outcome.operation.unwrap()).unwrap());
     assert!(!destination.join("tree").exists());
 }
@@ -1623,11 +1482,7 @@ fn copy_rejects_special_files_without_publishing_them() {
 
 #[test]
 fn xattr_policy_includes_user_and_posix_acl_namespaces_only() {
-    for name in [
-        "user.comment",
-        "system.posix_acl_access",
-        "system.posix_acl_default",
-    ] {
+    for name in ["user.comment", "system.posix_acl_access", "system.posix_acl_default"] {
         assert!(supported_xattr_name(OsStr::new(name)), "{name}");
     }
     for name in ["security.selinux", "trusted.overlay"] {

@@ -36,15 +36,8 @@ const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
 /// A sidebar entry's icon: the themed image, or a marker.
 fn sidebar_icon(icon: Option<PathBuf>, fallback_color: Hsla) -> AnyElement {
     match icon {
-        Some(path) => img(path)
-            .size(px(20.0))
-            .object_fit(ObjectFit::Contain)
-            .into_any_element(),
-        None => div()
-            .w(px(20.0))
-            .text_color(fallback_color)
-            .child("▸")
-            .into_any_element(),
+        Some(path) => img(path).size(px(20.0)).object_fit(ObjectFit::Contain).into_any_element(),
+        None => div().w(px(20.0)).text_color(fallback_color).child("▸").into_any_element(),
     }
 }
 
@@ -98,12 +91,7 @@ impl Marcel {
         let candidates = paths
             .iter()
             .map(|path| {
-                (
-                    path.clone(),
-                    self.directory
-                        .entry(path)
-                        .and_then(|entry| entry.icon_path.clone()),
-                )
+                (path.clone(), self.directory.entry(path).and_then(|entry| entry.icon_path.clone()))
             })
             .collect::<Vec<_>>();
         let origin = Self::origin(window);
@@ -149,9 +137,10 @@ impl Marcel {
     ) {
         self.sidebar.bookmark_menu = None;
         let origin = Self::origin(window);
-        let removed = self.bookmarks.clone().update(cx, |bookmarks, cx| {
-            bookmarks.remove_at(index, expected, origin, cx)
-        });
+        let removed = self
+            .bookmarks
+            .clone()
+            .update(cx, |bookmarks, cx| bookmarks.remove_at(index, expected, origin, cx));
         if let Some(bookmark) = removed {
             window.push_notification(
                 Notification::success(format!("Removed bookmark “{}”", bookmark.label())),
@@ -175,11 +164,8 @@ impl Marcel {
             .bookmarks()
             .get(menu.index)
             .filter(|bookmark| bookmark.path == menu.path)?;
-        let (left, top) = clamp_to_window(
-            menu.position,
-            (BOOKMARK_MENU_WIDTH, BOOKMARK_MENU_HEIGHT),
-            window,
-        );
+        let (left, top) =
+            clamp_to_window(menu.position, (BOOKMARK_MENU_WIDTH, BOOKMARK_MENU_HEIGHT), window);
         let index = menu.index;
         Some(
             popover("bookmark-context-menu", left, top, BOOKMARK_MENU_WIDTH, cx)
@@ -187,13 +173,11 @@ impl Marcel {
                     this.sidebar.bookmark_menu = None;
                     cx.notify();
                 }))
-                .child(
-                    menu_row(("bookmark-menu-remove", 0), "Remove Bookmark", true, cx).on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.remove_bookmark(index, &menu.path, window, cx);
-                        }),
-                    ),
-                )
+                .child(menu_row(("bookmark-menu-remove", 0), "Remove Bookmark", true, cx).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        this.remove_bookmark(index, &menu.path, window, cx);
+                    }),
+                ))
                 .into_any_element(),
         )
     }
@@ -225,8 +209,7 @@ impl Marcel {
                     .text_color(colors.sidebar_accent_foreground)
             })
             .when(active, |this| {
-                this.bg(colors.sidebar_accent)
-                    .text_color(colors.sidebar_accent_foreground)
+                this.bg(colors.sidebar_accent).text_color(colors.sidebar_accent_foreground)
             });
         if !droppable {
             return row;
@@ -235,12 +218,7 @@ impl Marcel {
             row,
             path,
             busy,
-            move |style| {
-                style
-                    .bg(colors.sidebar_accent)
-                    .border_1()
-                    .border_color(colors.primary)
-            },
+            move |style| style.bg(colors.sidebar_accent).border_1().border_color(colors.primary),
             cx,
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
@@ -262,10 +240,7 @@ impl Marcel {
         } else {
             !self.sidebar.browsing_trash && self.directory.current_dir == place.path
         };
-        let icon = sidebar_icon(
-            self.sidebar.place_icons.get(&place.path).cloned(),
-            colors.primary,
-        );
+        let icon = sidebar_icon(self.sidebar.place_icons.get(&place.path).cloned(), colors.primary);
         let place_drop_bounds = self.sidebar.place_drop_bounds.clone();
         let bounds_path = place.path.clone();
         self.sidebar_row(("place", index), &place.path, active, !is_trash, cx)
@@ -276,9 +251,7 @@ impl Marcel {
             .child(div().flex_none().text_base().child(place.label))
             .when(!is_trash, |this| {
                 this.child(painted_bounds(move |bounds| {
-                    place_drop_bounds
-                        .borrow_mut()
-                        .insert(bounds_path.clone(), bounds);
+                    place_drop_bounds.borrow_mut().insert(bounds_path.clone(), bounds);
                 }))
             })
             .into_any_element()
@@ -293,26 +266,17 @@ impl Marcel {
         let colors = cx.theme().colors;
         let active = self.directory.current_dir == bookmark.path;
         let icon = sidebar_icon(
-            self.bookmarks
-                .read(cx)
-                .icon(&bookmark.path)
-                .map(Path::to_path_buf),
+            self.bookmarks.read(cx).icon(&bookmark.path).map(Path::to_path_buf),
             colors.primary,
         );
-        let drag = BookmarkDrag {
-            index,
-            path: bookmark.path.clone(),
-        };
+        let drag = BookmarkDrag { index, path: bookmark.path.clone() };
         let menu_path = bookmark.path.clone();
         let bookmark_row_bounds = self.sidebar.bookmark_row_bounds.clone();
         div()
             .flex()
             .flex_col()
             .w_full()
-            .child(insertion_marker(
-                self.sidebar.bookmark_insertion == Some(index),
-                &colors,
-            ))
+            .child(insertion_marker(self.sidebar.bookmark_insertion == Some(index), &colors))
             .child(
                 self.sidebar_row(("bookmark", index), &bookmark.path, active, true, cx)
                     .on_drag(drag, |drag, _, _, cx| drag.preview(cx))
@@ -385,12 +349,7 @@ impl Marcel {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
         let muted = |text: &'static str| {
-            div()
-                .px_3()
-                .py_1()
-                .text_xs()
-                .text_color(colors.muted_foreground)
-                .child(text)
+            div().px_3().py_1().text_xs().text_color(colors.muted_foreground).child(text)
         };
         // A picker chooses from the filesystem; the Trash is where things
         // are not. Hiding the place is simpler than refusing at confirm.
@@ -447,11 +406,7 @@ impl Marcel {
                     .tooltip("Switch between list and icon views")
                     .on_click(cx.listener(|this, checked, _, cx| {
                         this.set_view_mode(
-                            if *checked {
-                                ViewMode::Grid
-                            } else {
-                                ViewMode::List
-                            },
+                            if *checked { ViewMode::Grid } else { ViewMode::List },
                             cx,
                         );
                     })),
@@ -472,16 +427,9 @@ impl Marcel {
             .border_r_1()
             .border_color(colors.sidebar_border)
             .text_color(colors.sidebar_foreground)
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child("Places"),
-            )
+            .child(div().text_sm().text_color(colors.muted_foreground).child("Places"))
             .children(places)
-            .when(self.sidebar.places_loading, |this| {
-                this.child(muted("Finding places…"))
-            })
+            .when(self.sidebar.places_loading, |this| this.child(muted("Finding places…")))
             .child(div().h(px(1.0)).my_1().bg(colors.sidebar_border))
             .child(
                 div()
@@ -538,27 +486,17 @@ impl Marcel {
                             .child("Bookmarks"),
                     )
                     .children(bookmark_rows)
-                    .when(bookmarks_loading, |this| {
-                        this.child(muted("Loading bookmarks…"))
-                    })
+                    .when(bookmarks_loading, |this| this.child(muted("Loading bookmarks…")))
                     .when(!bookmarks_loading && bookmarks.is_empty(), |this| {
                         this.child(muted("Drag folders here"))
                     })
                     .child(insertion_marker(final_insertion, &colors))
                     .child(div().flex_1())
-                    .child(painted_bounds(move |bounds| {
-                        bookmark_region_bounds.set(Some(bounds))
-                    })),
+                    .child(painted_bounds(move |bounds| bookmark_region_bounds.set(Some(bounds)))),
             )
-            .child(
-                div().flex().flex_col().gap_3().child(hidden_switch).child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .child(view_switch)
-                        .child(settings_button),
-                ),
-            )
+            .child(div().flex().flex_col().gap_3().child(hidden_switch).child(
+                h_flex().w_full().justify_between().child(view_switch).child(settings_button),
+            ))
             .into_any_element()
     }
 }

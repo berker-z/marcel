@@ -248,9 +248,7 @@ impl OperationCoordinator {
     }
 
     pub fn is_cancelling(&self) -> bool {
-        self.cancel
-            .as_ref()
-            .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+        self.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire))
     }
 
     /// Whether a cancellation *shortcut* pressed in `window` may cancel the
@@ -304,19 +302,15 @@ impl OperationCoordinator {
         clipboard: FileClipboard,
         completed: &[CompletedTransfer],
     ) {
-        let completed_sources = completed
-            .iter()
-            .map(|transfer| transfer.source.as_path())
-            .collect::<HashSet<_>>();
+        let completed_sources =
+            completed.iter().map(|transfer| transfer.source.as_path()).collect::<HashSet<_>>();
         let remaining = clipboard
             .paths
             .into_iter()
             .filter(|path| !completed_sources.contains(path.as_path()))
             .collect::<Vec<_>>();
-        self.clipboard = (!remaining.is_empty()).then_some(FileClipboard {
-            mode: clipboard.mode,
-            paths: remaining,
-        });
+        self.clipboard = (!remaining.is_empty())
+            .then_some(FileClipboard { mode: clipboard.mode, paths: remaining });
     }
 
     /// Take the one busy lock.
@@ -407,9 +401,7 @@ impl OperationCoordinator {
     fn start_progress_refresh(&mut self, cx: &mut Context<Self>) {
         self.progress_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(PROGRESS_REFRESH_INTERVAL)
-                    .await;
+                cx.background_executor().timer(PROGRESS_REFRESH_INTERVAL).await;
                 let keep_running = this
                     .update(cx, |this, cx| {
                         let keep_running = this.progress.is_some();
@@ -434,11 +426,7 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        cx.emit(OperationEvent::Applied {
-            changes,
-            reveal,
-            origin: Some(origin),
-        });
+        cx.emit(OperationEvent::Applied { changes, reveal, origin: Some(origin) });
     }
 
     /// Publish a mutation that has already committed to the filesystem.
@@ -471,10 +459,8 @@ impl OperationCoordinator {
         cx: &mut Context<Self>,
     ) -> Report {
         let path = committed.path().to_path_buf();
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name =
+            path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let undoable = self.apply_committed(committed, vec![path], origin, cx);
         Report::Success(format!(
             "{verb} “{name}”{}",
@@ -492,10 +478,8 @@ impl OperationCoordinator {
         if self.begin(None).is_none() {
             return;
         }
-        let attempted_destination = source
-            .parent()
-            .map(|parent| parent.join(&name))
-            .unwrap_or_else(|| source.clone());
+        let attempted_destination =
+            source.parent().map(|parent| parent.join(&name)).unwrap_or_else(|| source.clone());
         let task_source = source.clone();
         self.run(
             origin,
@@ -531,9 +515,7 @@ impl OperationCoordinator {
         if self.begin(None).is_none() {
             return;
         }
-        self.run_committing(origin, cx, "Created folder", move || {
-            create_directory(&parent, &name)
-        });
+        self.run_committing(origin, cx, "Created folder", move || create_directory(&parent, &name));
     }
 
     pub fn start_compress(
@@ -740,10 +722,7 @@ impl OperationCoordinator {
                     cx,
                 );
                 Some(if outcome.failures.is_empty() {
-                    Report::Success(format!(
-                        "Moved {} item(s) to Trash",
-                        outcome.completed.len()
-                    ))
+                    Report::Success(format!("Moved {} item(s) to Trash", outcome.completed.len()))
                 } else {
                     let mut message = outcome.summarize_failures();
                     if outcome.undo_unavailable {
@@ -766,10 +745,8 @@ impl OperationCoordinator {
         }
         let count = records.len();
         let backing = backing_paths(&records);
-        let restored_paths = records
-            .iter()
-            .map(|record| record.original_path().to_path_buf())
-            .collect::<Vec<_>>();
+        let restored_paths =
+            records.iter().map(|record| record.original_path().to_path_buf()).collect::<Vec<_>>();
         self.run(
             origin,
             cx,
@@ -781,9 +758,7 @@ impl OperationCoordinator {
                         // only costs Undo; the Trash view must still update.
                         let undoable = restored.undoable;
                         if undoable {
-                            this.record(OperationRecord::Restore {
-                                records: restored.records,
-                            });
+                            this.record(OperationRecord::Restore { records: restored.records });
                         }
                         cx.emit(OperationEvent::TrashRemoved(backing));
                         this.applied(
@@ -819,9 +794,7 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let source_count = trash_records
-            .as_ref()
-            .map_or(paths.len(), |records| records.len());
+        let source_count = trash_records.as_ref().map_or(paths.len(), |records| records.len());
         let card = ProgressCard {
             kind,
             source_count,
@@ -863,16 +836,14 @@ impl OperationCoordinator {
                         // records. Matching by original path removed a
                         // surviving twin entry — the same file trashed twice —
                         // from the listing when only one purge succeeded.
-                        cx.emit(OperationEvent::TrashRemoved(backing_paths(
-                            &outcome.records,
-                        )));
+                        cx.emit(OperationEvent::TrashRemoved(backing_paths(&outcome.records)));
                         (outcome.completed.len(), failure)
                     }
                 };
                 Some(match failure {
-                    Some(failure) if completed > 0 => Report::Error(format!(
-                        "Permanently deleted {completed} item(s); {failure}"
-                    )),
+                    Some(failure) if completed > 0 => {
+                        Report::Error(format!("Permanently deleted {completed} item(s); {failure}"))
+                    }
                     Some(failure) => Report::Error(failure),
                     None => Report::Success(match kind {
                         OperationProgressKind::EmptyTrash => "Trash emptied".to_string(),
@@ -997,10 +968,7 @@ enum PermanentDeleteResult {
 }
 
 fn backing_paths(records: &[TrashRecord]) -> Vec<PathBuf> {
-    records
-        .iter()
-        .map(|record| record.backing_path().to_path_buf())
-        .collect()
+    records.iter().map(|record| record.backing_path().to_path_buf()).collect()
 }
 
 /// Ask the user about one destination conflict.
@@ -1016,21 +984,13 @@ fn ask_about_conflict(
     cx: &mut App,
 ) {
     let request = pending.request().clone();
-    let name = request
-        .destination
-        .file_name()
-        .map(display_filename)
-        .unwrap_or_default();
+    let name = request.destination.file_name().map(display_filename).unwrap_or_default();
     let folder = request
         .destination
         .parent()
         .map(|parent| display_filename(parent.as_os_str()))
         .unwrap_or_default();
-    let kind = if request.destination_is_directory {
-        "folder"
-    } else {
-        "file"
-    };
+    let kind = if request.destination_is_directory { "folder" } else { "file" };
     let suggestion = request
         .destination
         .file_name()
@@ -1064,10 +1024,7 @@ fn ask_about_conflict(
             let pending = pending.clone();
             move |response: ConflictResponse| {
                 if let Some(pending) = pending.borrow_mut().take() {
-                    pending.answer(ConflictDecision {
-                        response,
-                        apply_to_all: applies_to_all,
-                    });
+                    pending.answer(ConflictDecision { response, apply_to_all: applies_to_all });
                 }
             }
         };
@@ -1081,13 +1038,10 @@ fn ask_about_conflict(
              label: &'static str,
              respond: Box<dyn Fn(&App) -> ConflictResponse>| {
                 let answer = answer.clone();
-                Button::new(id)
-                    .label(label)
-                    .outline()
-                    .on_click(move |_, window, cx| {
-                        answer(respond(cx));
-                        window.close_dialog(cx);
-                    })
+                Button::new(id).label(label).outline().on_click(move |_, window, cx| {
+                    answer(respond(cx));
+                    window.close_dialog(cx);
+                })
             };
         let fixed = |response: ConflictResponse| -> Box<dyn Fn(&App) -> ConflictResponse> {
             Box::new(move |_| response.clone())
@@ -1107,9 +1061,7 @@ fn ask_about_conflict(
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(format!(
-                        "A {kind} named “{name}” already exists in “{folder}”."
-                    ))
+                    .child(format!("A {kind} named “{name}” already exists in “{folder}”."))
                     .child(
                         div()
                             .flex()
@@ -1142,11 +1094,7 @@ fn ask_about_conflict(
                         "Cancel",
                         fixed(ConflictResponse::Cancel),
                     ))
-                    .child(answer_button(
-                        "conflict-skip",
-                        "Skip",
-                        fixed(ConflictResponse::Skip),
-                    ))
+                    .child(answer_button("conflict-skip", "Skip", fixed(ConflictResponse::Skip)))
                     .child(answer_button(
                         "conflict-rename",
                         "Rename",
@@ -1180,11 +1128,7 @@ fn ask_about_conflict(
 }
 
 fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> String {
-    let name = operation
-        .path()
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_default();
+    let name = operation.path().file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
     let redo = direction == HistoryDirection::Redo;
     match (operation, redo) {
         (OperationRecord::CreateDirectory { .. }, false) => {
@@ -1202,10 +1146,8 @@ fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> 
         }
         (OperationRecord::Restore { .. }, true) => "Restored item(s) again".to_string(),
         (OperationRecord::Rename { source, .. }, false) => {
-            let original = source
-                .file_name()
-                .map(|name| name.to_string_lossy())
-                .unwrap_or_default();
+            let original =
+                source.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
             format!("Restored name “{original}”")
         }
         (OperationRecord::Rename { .. }, true) => format!("Renamed to “{name}” again"),
@@ -1293,18 +1235,10 @@ mod tests {
         // History belongs to the application. Whatever surface asked for it
         // has gone; nothing about the coordinator changes.
         assert!(coordinator.can_undo());
-        assert_eq!(
-            coordinator.journal.begin(HistoryDirection::Undo),
-            Some(operation.clone())
-        );
+        assert_eq!(coordinator.journal.begin(HistoryDirection::Undo), Some(operation.clone()));
         assert!(!coordinator.can_undo());
-        coordinator
-            .journal
-            .finish(HistoryDirection::Undo, operation.clone());
-        assert_eq!(
-            coordinator.journal.begin(HistoryDirection::Redo),
-            Some(operation)
-        );
+        coordinator.journal.finish(HistoryDirection::Undo, operation.clone());
+        assert_eq!(coordinator.journal.begin(HistoryDirection::Redo), Some(operation));
     }
 
     #[test]
@@ -1324,9 +1258,7 @@ mod tests {
         );
 
         assert_eq!(
-            coordinator
-                .clipboard()
-                .map(|clipboard| clipboard.paths.clone()),
+            coordinator.clipboard().map(|clipboard| clipboard.paths.clone()),
             Some(vec![PathBuf::from("/source/b")])
         );
     }
@@ -1339,10 +1271,7 @@ mod tests {
         let mut coordinator = OperationCoordinator::default();
         let clipboard = FileClipboard {
             mode: TransferMode::Move,
-            paths: vec![
-                PathBuf::from("/a/report.pdf"),
-                PathBuf::from("/b/report.pdf"),
-            ],
+            paths: vec![PathBuf::from("/a/report.pdf"), PathBuf::from("/b/report.pdf")],
         };
 
         coordinator.retain_uncompleted_move(
@@ -1354,9 +1283,7 @@ mod tests {
         );
 
         assert_eq!(
-            coordinator
-                .clipboard()
-                .map(|clipboard| clipboard.paths.clone()),
+            coordinator.clipboard().map(|clipboard| clipboard.paths.clone()),
             Some(vec![PathBuf::from("/b/report.pdf")])
         );
     }

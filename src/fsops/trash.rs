@@ -69,8 +69,7 @@ impl TrashRecord {
     /// Both halves of the entry are still what the record describes.
     fn validate(&self) -> Result<()> {
         self.info_identity.validate(&self.info_path, "continue")?;
-        self.payload_identity
-            .validate(&self.backing_path, "continue")
+        self.payload_identity.validate(&self.backing_path, "continue")
     }
 
     /// Remove the `.trashinfo` half, but only the one this record describes:
@@ -100,28 +99,20 @@ impl TrashOutcome {
         Self {
             records: Vec::new(),
             completed: Vec::new(),
-            failures: paths
-                .iter()
-                .map(|path| PathFailure::new(path, message()))
-                .collect(),
+            failures: paths.iter().map(|path| PathFailure::new(path, message())).collect(),
             undo_unavailable: false,
         }
     }
 
     pub fn summarize_failures(&self) -> String {
-        PathFailure::summarize(
-            &self.failures,
-            "Trash operation could not be recorded safely",
-        )
+        PathFailure::summarize(&self.failures, "Trash operation could not be recorded safely")
     }
 }
 
 pub fn path_overlaps_system_trash(path: &Path) -> Result<bool> {
     ensure_home_trash();
     let roots = trash::os_limited::trash_folders().context("Could not resolve the system Trash")?;
-    Ok(roots
-        .iter()
-        .any(|root| paths_overlap_trash_root(path, root)))
+    Ok(roots.iter().any(|root| paths_overlap_trash_root(path, root)))
 }
 
 /// What one enumeration of the system Trash found.
@@ -210,12 +201,7 @@ pub fn purge_trash_records(
         }
     }
 
-    TrashOutcome {
-        records: purged,
-        completed,
-        failures,
-        undo_unavailable: false,
-    }
+    TrashOutcome { records: purged, completed, failures, undo_unavailable: false }
 }
 
 /// The home Trash directory, from the same rules the `trash` crate resolves by.
@@ -263,10 +249,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         }
     };
     let existing_ids = match trash::os_limited::list() {
-        Ok(items) => items
-            .into_iter()
-            .map(|item| item.id)
-            .collect::<HashSet<_>>(),
+        Ok(items) => items.into_iter().map(|item| item.id).collect::<HashSet<_>>(),
         Err(error) => {
             return TrashOutcome::all_failed(paths, || {
                 format!("Could not inspect the system Trash: {error}")
@@ -277,10 +260,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
     let mut successful = Vec::new();
     let mut failures = Vec::new();
     for path in paths {
-        if trash_roots
-            .iter()
-            .any(|root| paths_overlap_trash_root(path, root))
-        {
+        if trash_roots.iter().any(|root| paths_overlap_trash_root(path, root)) {
             failures.push(PathFailure::new(
                 path,
                 format!(
@@ -309,24 +289,15 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         }
     }
 
-    let completed = successful
-        .iter()
-        .map(|(path, _)| path.clone())
-        .collect::<Vec<_>>();
+    let completed = successful.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
     if successful.is_empty() {
-        return TrashOutcome {
-            records: Vec::new(),
-            completed,
-            failures,
-            undo_unavailable: false,
-        };
+        return TrashOutcome { records: Vec::new(), completed, failures, undo_unavailable: false };
     }
 
     let mut new_items = match trash::os_limited::list() {
-        Ok(items) => items
-            .into_iter()
-            .filter(|item| !existing_ids.contains(&item.id))
-            .collect::<Vec<_>>(),
+        Ok(items) => {
+            items.into_iter().filter(|item| !existing_ids.contains(&item.id)).collect::<Vec<_>>()
+        }
         Err(error) => {
             failures.push(PathFailure::new(
                 &successful[0].0,
@@ -441,17 +412,11 @@ pub struct TrashMutationFailure {
 
 impl TrashMutationFailure {
     fn unchanged(error: impl Into<anyhow::Error>) -> Self {
-        Self {
-            error: error.into(),
-            committed: false,
-        }
+        Self { error: error.into(), committed: false }
     }
 
     fn committed(error: impl Into<anyhow::Error>) -> Self {
-        Self {
-            error: error.into(),
-            committed: true,
-        }
+        Self { error: error.into(), committed: true }
     }
 }
 
@@ -477,10 +442,7 @@ pub fn restore_trash_records(
             }
             match path_occupancy(original) {
                 Ok(PathOccupancy::Occupied) => {
-                    bail!(
-                        "Cannot restore: “{}” is already occupied",
-                        original.display()
-                    )
+                    bail!("Cannot restore: “{}” is already occupied", original.display())
                 }
                 Ok(PathOccupancy::Vacant) => Ok(()),
                 Err(error) => Err(error).at("Could not inspect restore target", original),
@@ -496,16 +458,11 @@ pub fn restore_trash_records(
         let original = record.original_path();
         // Commit.
         if let Err(error) = rename_no_replace(&record.backing_path, original) {
-            let message = format!(
-                "Could not restore “{}” from Trash: {error}",
-                original.display()
-            );
+            let message = format!("Could not restore “{}” from Trash: {error}", original.display());
             if restored.is_empty() {
                 // The first rename failed, so the Trash is untouched and the
                 // record still describes it exactly.
-                return Err(TrashMutationFailure::unchanged(anyhow::anyhow!(
-                    "{message}"
-                )));
+                return Err(TrashMutationFailure::unchanged(anyhow::anyhow!("{message}")));
             }
             return Err(match rollback_restored(&restored) {
                 Ok(()) => TrashMutationFailure::committed(anyhow::anyhow!(
@@ -535,26 +492,18 @@ pub fn restore_trash_records(
             Err(_) => undoable = false,
         }
     }
-    Ok(TrashRestore {
-        records: result,
-        undoable,
-    })
+    Ok(TrashRestore { records: result, undoable })
 }
 
 pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>, TrashMutationFailure> {
     // Prepare.
     for record in records {
-        if let Err(error) = record
-            .payload_identity
-            .validate(record.original_path(), "continue")
-        {
+        if let Err(error) = record.payload_identity.validate(record.original_path(), "continue") {
             return Err(TrashMutationFailure::unchanged(error));
         }
     }
-    let originals = records
-        .iter()
-        .map(|record| record.original_path().to_path_buf())
-        .collect::<Vec<_>>();
+    let originals =
+        records.iter().map(|record| record.original_path().to_path_buf()).collect::<Vec<_>>();
     // Commit: `trash_paths` places items one at a time.
     let outcome = trash_paths(&originals);
     if outcome.failures.is_empty()
@@ -567,9 +516,7 @@ pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>, Tras
     let failure = outcome.summarize_failures();
     if outcome.completed.is_empty() {
         // Nothing reached the Trash, so the record is still accurate.
-        return Err(TrashMutationFailure::unchanged(anyhow::anyhow!(
-            "{failure}"
-        )));
+        return Err(TrashMutationFailure::unchanged(anyhow::anyhow!("{failure}")));
     }
     if outcome.records.is_empty() {
         // Items were trashed but none could be identified, so Marcel cannot
@@ -599,9 +546,7 @@ fn backing_path_from_info(info_path: &Path) -> Result<PathBuf> {
         .parent()
         .filter(|parent| parent.file_name() == Some(OsStr::new("info")))
         .context("Invalid freedesktop Trash metadata directory")?;
-    let trash_root = info_dir
-        .parent()
-        .context("Invalid freedesktop Trash root")?;
+    let trash_root = info_dir.parent().context("Invalid freedesktop Trash root")?;
     let name = info_path
         .file_stem()
         .filter(|name| !name.is_empty())
@@ -612,10 +557,7 @@ fn backing_path_from_info(info_path: &Path) -> Result<PathBuf> {
 fn rollback_restored(restored: &[&TrashRecord]) -> Result<()> {
     for record in restored.iter().rev() {
         rename_no_replace(record.original_path(), &record.backing_path).with_context(|| {
-            format!(
-                "Could not return “{}” to Trash",
-                record.original_path().display()
-            )
+            format!("Could not return “{}” to Trash", record.original_path().display())
         })?;
     }
     Ok(())
@@ -638,9 +580,7 @@ fn paths_overlap_trash_root(path: &Path, trash_root: &Path) -> bool {
         return true;
     }
     let path = resolve_parent_of(path);
-    let root = trash_root
-        .canonicalize()
-        .unwrap_or_else(|_| trash_root.to_path_buf());
+    let root = trash_root.canonicalize().unwrap_or_else(|_| trash_root.to_path_buf());
     path.starts_with(&root) || root.starts_with(&path)
 }
 
@@ -756,10 +696,7 @@ mod tests {
             root
         ));
         assert!(paths_overlap_trash_root(Path::new("/home/test"), root));
-        assert!(!paths_overlap_trash_root(
-            Path::new("/home/test/Documents"),
-            root
-        ));
+        assert!(!paths_overlap_trash_root(Path::new("/home/test/Documents"), root));
     }
 
     /// A symbolic link gives one directory two spellings, and the guard has to
@@ -804,10 +741,7 @@ mod tests {
         assert!(!record.backing_path.exists());
         assert!(!record.info_path.exists());
         assert!(restored.undoable);
-        assert_eq!(
-            restored.records[0].original_path(),
-            original_parent.join("note.txt")
-        );
+        assert_eq!(restored.records[0].original_path(), original_parent.join("note.txt"));
     }
 
     /// A refusal raised before the first rename leaves the Trash exactly as the
@@ -820,11 +754,7 @@ mod tests {
         let failure = restore_trash_records(std::slice::from_ref(&record))
             .expect_err("an occupied destination must refuse");
 
-        assert!(
-            !failure.committed,
-            "a preflight refusal must stay retryable: {}",
-            failure.error
-        );
+        assert!(!failure.committed, "a preflight refusal must stay retryable: {}", failure.error);
         assert!(record.backing_path.exists());
         assert!(record.info_path.exists());
     }
@@ -902,11 +832,7 @@ mod tests {
         // reconcile by entry, not by original path, because two entries can
         // share one original.
         assert_eq!(
-            outcome
-                .records
-                .iter()
-                .map(|record| record.backing_path())
-                .collect::<Vec<_>>(),
+            outcome.records.iter().map(|record| record.backing_path()).collect::<Vec<_>>(),
             [record.backing_path()]
         );
     }
@@ -929,11 +855,7 @@ mod tests {
 
         assert!(outcome.failures.is_empty(), "{outcome:?}");
         assert_eq!(
-            outcome
-                .records
-                .iter()
-                .map(|record| record.backing_path())
-                .collect::<Vec<_>>(),
+            outcome.records.iter().map(|record| record.backing_path()).collect::<Vec<_>>(),
             [first.backing_path()]
         );
         assert!(second.backing_path.exists());

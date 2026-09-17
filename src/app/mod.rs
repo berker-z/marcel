@@ -91,13 +91,10 @@ pub struct Marcel {
 impl Marcel {
     pub fn new(start_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let start_dir = normalize_start_directory(start_dir);
-        let home_dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| start_dir.clone());
+        let home_dir =
+            std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| start_dir.clone());
         let search_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Filter current folder")
-                .clean_on_escape()
+            InputState::new(window, cx).placeholder("Filter current folder").clean_on_escape()
         });
         let location_input = cx.new(|cx| InputState::new(window, cx).placeholder("Enter a path"));
         let subscriptions = [
@@ -141,13 +138,9 @@ impl Marcel {
         let shared = [
             cx.observe(&operations, |_, _, cx| cx.notify()),
             cx.observe(&bookmarks, |_, _, cx| cx.notify()),
-            cx.subscribe_in(
-                &operations,
-                window,
-                |this, _, event: &OperationEvent, window, cx| {
-                    this.on_operation_event(event, window, cx);
-                },
-            ),
+            cx.subscribe_in(&operations, window, |this, _, event: &OperationEvent, window, cx| {
+                this.on_operation_event(event, window, cx);
+            }),
         ];
 
         let mut this = Self {
@@ -196,9 +189,7 @@ impl Marcel {
         ),
     ) {
         let origin = Self::origin(window);
-        self.operations
-            .clone()
-            .update(cx, |operations, cx| start(operations, origin, cx));
+        self.operations.clone().update(cx, |operations, cx| start(operations, origin, cx));
     }
 
     pub(crate) fn operations_busy(&self, cx: &App) -> bool {
@@ -207,21 +198,14 @@ impl Marcel {
 
     /// The entry the preview and single-item commands act on.
     pub(crate) fn primary_entry(&self) -> Option<&FileEntry> {
-        self.directory
-            .selection
-            .primary()
-            .and_then(|path| self.directory.entry(path))
+        self.directory.selection.primary().and_then(|path| self.directory.entry(path))
     }
 
     /// The selected paths in visible order, which is the order every
     /// operation — and a picker's caller — receives them in.
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
         let selected = self.directory.selection.selected();
-        self.directory
-            .visible_paths()
-            .into_iter()
-            .filter(|path| selected.contains(path))
-            .collect()
+        self.directory.visible_paths().into_iter().filter(|path| selected.contains(path)).collect()
     }
 
     pub(crate) fn has_selection(&self) -> bool {
@@ -246,9 +230,7 @@ fn normalize_start_directory(path: PathBuf) -> PathBuf {
     if path.is_dir() {
         path
     } else {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/"))
+        path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"))
     }
 }
 
@@ -264,11 +246,7 @@ pub(crate) fn test_file_entry(path: &str, navigable: bool) -> FileEntry {
         name: name.clone(),
         name_os: name.clone().into(),
         folded_name: name.to_lowercase().chars().collect(),
-        kind: if navigable {
-            EntryKind::Directory
-        } else {
-            EntryKind::File
-        },
+        kind: if navigable { EntryKind::Directory } else { EntryKind::File },
         navigable,
         size: Some(0),
         icon_path: None,

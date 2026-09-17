@@ -58,11 +58,7 @@ impl Marcel {
         let view = cx.entity();
         let danger = cx.theme().colors.danger;
         let on_ok = std::rc::Rc::new(on_ok);
-        let variant = if confirm.danger {
-            ButtonVariant::Danger
-        } else {
-            ButtonVariant::Primary
-        };
+        let variant = if confirm.danger { ButtonVariant::Danger } else { ButtonVariant::Primary };
         window.open_dialog(cx, move |dialog, _, _| {
             let view = view.clone();
             let on_ok = on_ok.clone();
@@ -118,11 +114,7 @@ impl Marcel {
             dialog_builder
                 .title(dialog.title)
                 .child(Input::new(&input))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text(dialog.action)
-                        .show_cancel(true),
-                )
+                .button_props(DialogButtonProps::default().ok_text(dialog.action).show_cancel(true))
                 .footer(footer(dialog.action, ButtonVariant::Primary, true))
                 .overlay_closable(false)
                 .close_button(false)
@@ -148,29 +140,18 @@ impl Marcel {
             .iter()
             .map(|palette| SharedString::from(palette.label()))
             .collect::<Vec<_>>();
-        let selected = Palette::ALL
-            .iter()
-            .position(|palette| *palette == theme::active())
-            .unwrap_or_default();
+        let selected =
+            Palette::ALL.iter().position(|palette| *palette == theme::active()).unwrap_or_default();
         let theme_select = cx.new(|cx| {
-            SelectState::new(
-                palettes,
-                Some(IndexPath::default().row(selected)),
-                window,
-                cx,
-            )
+            SelectState::new(palettes, Some(IndexPath::default().row(selected)), window, cx)
         });
         window
-            .subscribe(
-                &theme_select,
-                cx,
-                |_, event: &SelectEvent<Vec<SharedString>>, _, cx| {
-                    let SelectEvent::Confirm(selected) = event;
-                    if let Some(palette) = selected.as_deref().and_then(Palette::from_name) {
-                        theme::apply(palette, cx);
-                    }
-                },
-            )
+            .subscribe(&theme_select, cx, |_, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                let SelectEvent::Confirm(selected) = event;
+                if let Some(palette) = selected.as_deref().and_then(Palette::from_name) {
+                    theme::apply(palette, cx);
+                }
+            })
             .detach();
 
         window.open_dialog(cx, move |dialog, _, _| {

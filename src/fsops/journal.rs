@@ -85,22 +85,16 @@ impl OperationRecord {
     pub fn path(&self) -> &Path {
         match self {
             Self::CreateDirectory { path, .. } => path,
-            Self::Copy {
-                destination,
-                created,
-                ..
-            } => created
-                .first()
-                .map(|snapshot| snapshot.path.as_path())
-                .unwrap_or(destination),
+            Self::Copy { destination, created, .. } => {
+                created.first().map(|snapshot| snapshot.path.as_path()).unwrap_or(destination)
+            }
             Self::Move { transfers, .. } => transfers
                 .first()
                 .map(|transfer| transfer.destination.as_path())
                 .unwrap_or_else(|| Path::new("")),
-            Self::Trash { records } | Self::Restore { records } => records
-                .first()
-                .map(TrashRecord::original_path)
-                .unwrap_or_else(|| Path::new("")),
+            Self::Trash { records } | Self::Restore { records } => {
+                records.first().map(TrashRecord::original_path).unwrap_or_else(|| Path::new(""))
+            }
             Self::Rename { destination, .. } => destination,
             Self::ArchiveCreate { destination, .. } => destination,
             Self::ArchiveExtract { output, .. } => output,
@@ -110,11 +104,7 @@ impl OperationRecord {
     pub fn forward_directory_changes(&self) -> DirectoryChanges {
         match self {
             Self::CreateDirectory { path, .. } => DirectoryChanges::upserted(vec![path.clone()]),
-            Self::Copy {
-                destination,
-                created,
-                ..
-            } => DirectoryChanges::upserted(
+            Self::Copy { destination, created, .. } => DirectoryChanges::upserted(
                 created
                     .iter()
                     .filter(|snapshot| snapshot.path.parent() == Some(destination.as_path()))
@@ -127,11 +117,7 @@ impl OperationRecord {
             },
             Self::Trash { records } => DirectoryChanges::removed(original_paths(records)),
             Self::Restore { records } => DirectoryChanges::upserted(original_paths(records)),
-            Self::Rename {
-                source,
-                destination,
-                ..
-            } => DirectoryChanges {
+            Self::Rename { source, destination, .. } => DirectoryChanges {
                 removed: vec![source.clone()],
                 upserted: vec![destination.clone()],
             },
@@ -173,10 +159,7 @@ impl OperationRecord {
 }
 
 fn original_paths(records: &[TrashRecord]) -> Vec<PathBuf> {
-    records
-        .iter()
-        .map(|record| record.original_path().to_path_buf())
-        .collect()
+    records.iter().map(|record| record.original_path().to_path_buf()).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,11 +268,7 @@ pub struct CommittedOperation {
 impl CommittedOperation {
     /// A commit whose observable effect is known even when `record` is `None`.
     pub fn new(path: PathBuf, changes: DirectoryChanges, record: Option<OperationRecord>) -> Self {
-        Self {
-            path,
-            changes,
-            record,
-        }
+        Self { path, changes, record }
     }
 
     /// A commit that published one new path, undoable when `record` is present.
@@ -345,10 +324,7 @@ pub enum MutationOutcome {
     /// compensation put everything back. Empty does *not* mean retryable: a
     /// compensating rename bumps the root's ctime, so the record that produced
     /// this attempt can no longer validate and must be discarded.
-    Discarded {
-        changes: DirectoryChanges,
-        error: anyhow::Error,
-    },
+    Discarded { changes: DirectoryChanges, error: anyhow::Error },
 }
 
 impl MutationOutcome {
@@ -359,10 +335,7 @@ impl MutationOutcome {
 
     /// Treat a failure past the first commit as history-invalidating.
     pub(super) fn discarded(changes: DirectoryChanges, error: impl Into<anyhow::Error>) -> Self {
-        Self::Discarded {
-            changes,
-            error: error.into(),
-        }
+        Self::Discarded { changes, error: error.into() }
     }
 
     /// Whether the history record survives this outcome.
@@ -416,11 +389,7 @@ impl Default for OperationJournal {
 
 impl OperationJournal {
     pub fn new(limit: usize) -> Self {
-        Self {
-            undo: VecDeque::new(),
-            redo: VecDeque::new(),
-            limit,
-        }
+        Self { undo: VecDeque::new(), redo: VecDeque::new(), limit }
     }
 
     /// Take every record out, leaving the journal empty.
@@ -428,9 +397,7 @@ impl OperationJournal {
     /// Used when the journal is going away, so its records can release what
     /// they were holding aside before they are dropped.
     pub fn drain(&mut self) -> impl Iterator<Item = OperationRecord> + use<> {
-        std::mem::take(&mut self.undo)
-            .into_iter()
-            .chain(std::mem::take(&mut self.redo))
+        std::mem::take(&mut self.undo).into_iter().chain(std::mem::take(&mut self.redo))
     }
 
     pub fn can_undo(&self) -> bool {
@@ -449,9 +416,7 @@ impl OperationJournal {
     /// is what keeps quarantines from accumulating for the life of the process.
     #[must_use = "evicted records may hold quarantined data that must be released"]
     pub fn record(&mut self, operation: OperationRecord) -> Vec<OperationRecord> {
-        let mut evicted = std::mem::take(&mut self.redo)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut evicted = std::mem::take(&mut self.redo).into_iter().collect::<Vec<_>>();
         evicted.extend(push_bounded(&mut self.undo, operation, self.limit));
         evicted
     }
@@ -525,11 +490,7 @@ pub(super) struct SnapshotCollector {
 
 impl SnapshotCollector {
     pub(super) fn new(limit: usize) -> Self {
-        Self {
-            snapshots: Vec::new(),
-            limit,
-            overflowed: false,
-        }
+        Self { snapshots: Vec::new(), limit, overflowed: false }
     }
 
     pub(super) fn push(&mut self, path: &Path, metadata: &fs::Metadata) -> Option<usize> {
@@ -630,11 +591,8 @@ pub(super) fn rebase_snapshots(snapshots: &mut [PathSnapshot], from: &Path, to: 
         let Ok(relative) = snapshot.path.strip_prefix(from) else {
             continue;
         };
-        snapshot.path = if relative.as_os_str().is_empty() {
-            to.to_path_buf()
-        } else {
-            to.join(relative)
-        };
+        snapshot.path =
+            if relative.as_os_str().is_empty() { to.to_path_buf() } else { to.join(relative) };
     }
 }
 
@@ -680,24 +638,15 @@ pub(super) fn validate_snapshot_tree(snapshots: &[PathSnapshot]) -> Result<()> {
         // Validation compares against a record that already exists, so it is
         // bounded by that record rather than by a budget of its own.
         snapshot_entry(&root, &mut actual, usize::MAX).with_context(|| {
-            format!(
-                "Cannot continue: “{}” changed or no longer exists",
-                root.display()
-            )
+            format!("Cannot continue: “{}” changed or no longer exists", root.display())
         })?;
     }
     if actual.len() != snapshots.len() {
         bail!("Cannot continue: the recorded directory contents changed");
     }
     for actual in actual {
-        if expected
-            .get(actual.path.as_path())
-            .is_none_or(|expected| *expected != &actual)
-        {
-            bail!(
-                "Cannot continue: “{}” changed or was replaced",
-                actual.path.display()
-            );
+        if expected.get(actual.path.as_path()).is_none_or(|expected| *expected != &actual) {
+            bail!("Cannot continue: “{}” changed or was replaced", actual.path.display());
         }
     }
     Ok(())
@@ -719,10 +668,7 @@ pub(super) fn remove_snapshotted_tree(snapshots: &[PathSnapshot]) -> Result<(), 
     if let Err(error) =
         validate_snapshot_tree(snapshots).and_then(|()| reject_special_entries(snapshots))
     {
-        return Err(PartialRemoval {
-            removed: Vec::new(),
-            error,
-        });
+        return Err(PartialRemoval { removed: Vec::new(), error });
     }
 
     // Quarantine first, by reusing permanent deletion rather than walking the
@@ -754,11 +700,7 @@ pub(super) fn top_level_paths(snapshots: &[PathSnapshot]) -> Vec<PathBuf> {
     snapshots
         .iter()
         .filter(|candidate| {
-            !candidate
-                .path
-                .ancestors()
-                .skip(1)
-                .any(|ancestor| directories.contains(ancestor))
+            !candidate.path.ancestors().skip(1).any(|ancestor| directories.contains(ancestor))
         })
         .map(|snapshot| snapshot.path.clone())
         .collect()

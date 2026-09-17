@@ -133,10 +133,7 @@ fn open_window(
             cx.new(|cx| Root::new(marcel, window, cx))
         },
     )?;
-    Ok(MarcelWindow {
-        handle,
-        view: view.expect("window builder must initialize Marcel"),
-    })
+    Ok(MarcelWindow { handle, view: view.expect("window builder must initialize Marcel") })
 }
 
 /// Open a window showing `path`, and register it.
@@ -212,9 +209,7 @@ pub fn open_picker(request: PickerRequest, cx: &mut App) -> anyhow::Result<()> {
             return;
         }
         let _ = opened.handle.update(cx, |_, window, cx| {
-            opened
-                .view
-                .update(cx, |view, cx| view.withdraw_picker(window, cx));
+            opened.view.update(cx, |view, cx| view.withdraw_picker(window, cx));
         });
     })
     .detach();
@@ -251,10 +246,7 @@ impl WindowRegistry {
         let active = cx.active_window();
         // Skipping closed windows here rather than relying on pruning keeps a
         // stale handle from turning a reveal into a new window.
-        let mut live = self
-            .windows
-            .iter()
-            .filter(|window| window.handle.read(cx).is_ok());
+        let mut live = self.windows.iter().filter(|window| window.handle.read(cx).is_ok());
         let last = live.clone().next_back();
         live.find(|window| active.is_some_and(|active| active == window.handle.into()))
             .or(last)
@@ -306,18 +298,9 @@ mod tests {
             picker_title(&request("Choose a cover", PickerMode::OpenFiles)),
             "Choose a cover"
         );
-        assert_eq!(
-            picker_title(&request("  ", PickerMode::OpenFiles)),
-            "Open File"
-        );
-        assert_eq!(
-            picker_title(&request("", PickerMode::OpenDirectories)),
-            "Select Folder"
-        );
-        assert_eq!(
-            picker_title(&request("", PickerMode::SaveFile)),
-            "Save File"
-        );
+        assert_eq!(picker_title(&request("  ", PickerMode::OpenFiles)), "Open File");
+        assert_eq!(picker_title(&request("", PickerMode::OpenDirectories)), "Select Folder");
+        assert_eq!(picker_title(&request("", PickerMode::SaveFile)), "Save File");
         assert_eq!(
             picker_title(&request("", PickerMode::SaveFiles { names: Vec::new() })),
             "Select Folder"

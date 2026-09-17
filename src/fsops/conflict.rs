@@ -78,17 +78,11 @@ pub struct ConflictDecision {
 
 impl ConflictDecision {
     pub fn once(response: ConflictResponse) -> Self {
-        Self {
-            response,
-            apply_to_all: false,
-        }
+        Self { response, apply_to_all: false }
     }
 
     pub fn for_all(response: ConflictResponse) -> Self {
-        Self {
-            response,
-            apply_to_all: true,
-        }
+        Self { response, apply_to_all: true }
     }
 }
 
@@ -156,10 +150,7 @@ impl ConflictPolicy {
     }
 
     pub fn interactive(resolver: Arc<dyn ConflictResolver>) -> Self {
-        Self {
-            resolver: Some(resolver),
-            ..Self::refusing()
-        }
+        Self { resolver: Some(resolver), ..Self::refusing() }
     }
 
     /// Whether a conflict can be answered by anything other than refusal.
@@ -254,19 +245,14 @@ impl PromptingResolver {
 impl ConflictResolver for PromptingResolver {
     fn resolve(&self, request: &ConflictRequest) -> ConflictDecision {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
-        let pending = PendingConflict {
-            request: request.clone(),
-            reply,
-        };
+        let pending = PendingConflict { request: request.clone(), reply };
         // Nobody is listening, or nobody answered. Cancelling is the honest
         // outcome: it stops the operation and accounts for every source it did
         // not reach, where skipping would quietly do nothing to each in turn.
         if self.requests.send_blocking(pending).is_err() {
             return ConflictDecision::once(ConflictResponse::Cancel);
         }
-        answer
-            .recv()
-            .unwrap_or_else(|_| ConflictDecision::once(ConflictResponse::Cancel))
+        answer.recv().unwrap_or_else(|_| ConflictDecision::once(ConflictResponse::Cancel))
     }
 }
 
@@ -288,11 +274,7 @@ const MAX_UNIQUE_ATTEMPTS: usize = 10_000;
 fn extension_offset(name: &[u8]) -> usize {
     // Skipping the first byte protects dotfiles. A `.` can never appear inside
     // a multi-byte UTF-8 sequence, so this cannot split a character.
-    let Some(dot) = name
-        .iter()
-        .rposition(|byte| *byte == b'.')
-        .filter(|dot| *dot >= 1)
-    else {
+    let Some(dot) = name.iter().rposition(|byte| *byte == b'.').filter(|dot| *dot >= 1) else {
         return name.len();
     };
     if dot + 1 == name.len() {
@@ -333,10 +315,7 @@ fn parse_existing_count(stem: &[u8]) -> (usize, usize) {
     if digits[0] == b'0' {
         return (full, 0);
     }
-    match std::str::from_utf8(digits)
-        .ok()
-        .and_then(|d| d.parse().ok())
-    {
+    match std::str::from_utf8(digits).ok().and_then(|d| d.parse().ok()) {
         Some(count) => (open - 1, count),
         None => (full, 0),
     }
@@ -352,11 +331,7 @@ pub fn conflict_name(name: &OsStr, count: usize, is_directory: bool) -> OsString
 
     let bytes = name.as_bytes();
     // A directory named `backup.2024` has no file type to preserve.
-    let split = if is_directory {
-        bytes.len()
-    } else {
-        extension_offset(bytes)
-    };
+    let split = if is_directory { bytes.len() } else { extension_offset(bytes) };
     let (stem, extension) = bytes.split_at(split);
     let (base_length, existing) = parse_existing_count(stem);
     let suffix = format!(" ({})", (existing + count).max(2)).into_bytes();
@@ -510,18 +485,12 @@ mod tests {
 
     #[test]
     fn a_single_answer_applies_only_to_its_own_conflict() {
-        let (mut policy, resolver) = scripted(vec![
-            once(ConflictResponse::Replace),
-            once(ConflictResponse::Skip),
-        ]);
+        let (mut policy, resolver) =
+            scripted(vec![once(ConflictResponse::Replace), once(ConflictResponse::Skip)]);
 
         assert_eq!(policy.decide(&file()), ConflictResponse::Replace);
         assert_eq!(policy.decide(&file()), ConflictResponse::Skip);
-        assert_eq!(
-            resolver.asked(),
-            2,
-            "each conflict must be asked separately"
-        );
+        assert_eq!(resolver.asked(), 2, "each conflict must be asked separately");
     }
 
     /// Replacing files and merging directories are different intentions.
@@ -530,10 +499,8 @@ mod tests {
     #[test]
     fn replace_all_and_merge_all_do_not_imply_each_other() {
         for (answered, other) in [(file(), merge()), (merge(), file())] {
-            let (mut policy, resolver) = scripted(vec![
-                for_all(ConflictResponse::Replace),
-                once(ConflictResponse::Skip),
-            ]);
+            let (mut policy, resolver) =
+                scripted(vec![for_all(ConflictResponse::Replace), once(ConflictResponse::Skip)]);
 
             // Answered for all, then served from sticky state.
             assert_eq!(policy.decide(&answered), ConflictResponse::Replace);
@@ -559,10 +526,8 @@ mod tests {
     /// A standing replace answer must not survive a cancellation.
     #[test]
     fn cancelling_ends_the_operation_and_overrides_sticky_answers() {
-        let (mut policy, resolver) = scripted(vec![
-            for_all(ConflictResponse::Replace),
-            once(ConflictResponse::Cancel),
-        ]);
+        let (mut policy, resolver) =
+            scripted(vec![for_all(ConflictResponse::Replace), once(ConflictResponse::Cancel)]);
 
         assert_eq!(policy.decide(&merge()), ConflictResponse::Replace);
         assert_eq!(policy.decide(&file()), ConflictResponse::Cancel);
@@ -613,9 +578,7 @@ mod tests {
     }
 
     fn named(name: &str, count: usize) -> String {
-        conflict_name(OsStr::new(name), count, false)
-            .into_string()
-            .unwrap()
+        conflict_name(OsStr::new(name), count, false).into_string().unwrap()
     }
 
     /// Numbering starts at 2 because the item already on disk is implicitly
@@ -716,10 +679,7 @@ mod tests {
         let asking = std::thread::spawn(move || resolver.resolve(&file()));
 
         let pending = questions.recv_blocking().unwrap();
-        assert_eq!(
-            pending.request().destination,
-            PathBuf::from("/destination/item")
-        );
+        assert_eq!(pending.request().destination, PathBuf::from("/destination/item"));
         pending.answer(for_all(ConflictResponse::Replace));
 
         let decision = asking.join().unwrap();

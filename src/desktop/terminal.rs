@@ -11,10 +11,7 @@ use anyhow::{Context as _, Result, bail};
 /// off the foreground.
 pub fn open_terminal(directory: &Path) -> Result<()> {
     if !directory.is_dir() {
-        bail!(
-            "Cannot open a terminal because “{}” is not a directory",
-            directory.display()
-        );
+        bail!("Cannot open a terminal because “{}” is not a directory", directory.display());
     }
 
     // Prefer the proposed cross-desktop default-terminal interface before
@@ -34,11 +31,7 @@ pub fn open_terminal(directory: &Path) -> Result<()> {
     }
 
     for (program, arguments) in terminal_fallbacks(directory) {
-        if spawn(
-            program,
-            arguments.iter().map(OsString::as_os_str),
-            directory,
-        )? {
+        if spawn(program, arguments.iter().map(OsString::as_os_str), directory)? {
             return Ok(());
         }
     }
@@ -97,19 +90,13 @@ fn terminal_fallbacks(directory: &Path) -> Vec<(&'static str, Vec<OsString>)> {
         ("kitty", vec!["--directory".into(), path.into()]),
         ("ghostty", vec!["--working-directory".into(), path.into()]),
         ("konsole", vec!["--workdir".into(), path.into()]),
-        (
-            "gnome-terminal",
-            vec!["--working-directory".into(), path.into()],
-        ),
+        ("gnome-terminal", vec!["--working-directory".into(), path.into()]),
         ("kgx", vec!["--working-directory".into(), path.into()]),
         ("ptyxis", vec!["--working-directory".into(), path.into()]),
         ("foot", vec!["--working-directory".into(), path.into()]),
         ("alacritty", vec!["--working-directory".into(), path.into()]),
         ("wezterm", vec!["start".into(), "--cwd".into(), path.into()]),
-        (
-            "xfce4-terminal",
-            vec!["--working-directory".into(), path.into()],
-        ),
+        ("xfce4-terminal", vec!["--working-directory".into(), path.into()]),
         // These inherit the process working directory without a dedicated
         // option.
         ("xterm", Vec::new()),
@@ -125,13 +112,7 @@ mod tests {
     fn fallback_arguments_keep_the_directory_as_one_os_argument() {
         let directory = Path::new("/tmp/a folder");
         let fallbacks = terminal_fallbacks(directory);
-        let kitty = fallbacks
-            .iter()
-            .find(|(program, _)| *program == "kitty")
-            .unwrap();
-        assert_eq!(
-            kitty.1,
-            vec![OsString::from("--directory"), directory.as_os_str().into()]
-        );
+        let kitty = fallbacks.iter().find(|(program, _)| *program == "kitty").unwrap();
+        assert_eq!(kitty.1, vec![OsString::from("--directory"), directory.as_os_str().into()]);
     }
 }

@@ -48,9 +48,7 @@ pub(super) fn copy_one(
     // Prepare.
     ensure_unoccupied(destination)?;
     ensure_not_self_containing(source, destination, "copy")?;
-    let name = destination
-        .file_name()
-        .context("Copy destination has no file name")?;
+    let name = destination.file_name().context("Copy destination has no file name")?;
     let staging = reserve_staging_directory(destination)?;
     let staged = staging.path().join(name);
     let mut copier = Copier {
@@ -64,16 +62,11 @@ pub(super) fn copy_one(
     // Commit. The staging directory is removed when `staging` drops, taking
     // any partially copied tree with it; only the published entry survives.
     rename_no_replace(&staged, destination).with_context(|| {
-        format!(
-            "Could not publish copy at “{}”; nothing was overwritten",
-            destination.display()
-        )
+        format!("Could not publish copy at “{}”; nothing was overwritten", destination.display())
     })?;
     // Finalize: the copy is published. Re-reading identities can only cost
     // undo, because publication renames the staged root and bumps its ctime.
-    let Copier {
-        sources, created, ..
-    } = copier;
+    let Copier { sources, created, .. } = copier;
     let mut created_snapshots = created.snapshots;
     rebase_snapshots(&mut created_snapshots, &staged, destination);
     let undoable = refresh_snapshot_identities(&mut created_snapshots);
@@ -100,13 +93,9 @@ pub(super) fn ensure_not_self_containing(
         return Ok(());
     }
     let source_real = source.canonicalize().at("Could not resolve", source)?;
-    let parent = destination
-        .parent()
-        .context("Destination has no parent directory")?;
+    let parent = destination.parent().context("Destination has no parent directory")?;
     let parent_real = parent.canonicalize().at("Could not resolve", parent)?;
-    let name = destination
-        .file_name()
-        .context("Destination has no file name")?;
+    let name = destination.file_name().context("Destination has no file name")?;
     if parent_real.join(name).starts_with(&source_real) {
         bail!(
             "Cannot {action} “{}” into itself",
@@ -123,9 +112,7 @@ pub(super) fn ensure_not_self_containing(
 /// can never adopt — and then recursively delete — a path another process
 /// created in the gap.
 fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
-    let parent = destination
-        .parent()
-        .context("Copy destination has no parent directory")?;
+    let parent = destination.parent().context("Copy destination has no parent directory")?;
     let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     tempfile::Builder::new()
         .prefix(&format!(".marcel-copy-{}-{sequence}-", std::process::id()))
@@ -175,19 +162,12 @@ impl Copier<'_> {
         }];
         while let Some(step) = steps.pop() {
             match step {
-                CopyStep::Visit {
-                    source,
-                    destination,
-                } => self.visit(source, destination, &mut steps)?,
-                CopyStep::FinishDirectory {
-                    source,
-                    destination,
-                    metadata,
-                    created_index,
-                } => {
+                CopyStep::Visit { source, destination } => {
+                    self.visit(source, destination, &mut steps)?
+                }
+                CopyStep::FinishDirectory { source, destination, metadata, created_index } => {
                     preserve_metadata(&source, &destination, &metadata)?;
-                    self.created
-                        .refresh(created_index, &destination, &inspect(&destination)?);
+                    self.created.refresh(created_index, &destination, &inspect(&destination)?);
                     self.complete_item();
                 }
             }
@@ -238,10 +218,7 @@ impl Copier<'_> {
             std::os::unix::fs::symlink(target, &destination).at("Could not copy link", &source)?;
             preserve_supported_xattrs(&source, &destination)?;
         } else {
-            bail!(
-                "Special files are not supported yet: “{}”",
-                source.display()
-            );
+            bail!("Special files are not supported yet: “{}”", source.display());
         }
         self.created.push(&destination, &inspect(&destination)?);
         self.complete_item();
@@ -300,21 +277,12 @@ fn copy_file_cancellable(
         .open(destination)
         .at("Could not create", destination)?;
     if !try_copy_sparse(&mut input, &mut output, source, cancelled, progress)? {
-        input
-            .seek(io::SeekFrom::Start(0))
-            .at("Could not rewind", source)?;
+        input.seek(io::SeekFrom::Start(0)).at("Could not rewind", source)?;
         output
             .set_len(0)
             .and_then(|()| output.seek(io::SeekFrom::Start(0)).map(|_| ()))
             .at("Could not restart", destination)?;
-        copy_buffered(
-            &mut input,
-            &mut output,
-            source,
-            destination,
-            cancelled,
-            progress,
-        )?;
+        copy_buffered(&mut input, &mut output, source, destination, cancelled, progress)?;
     }
     output.sync_all().at("Could not finish", destination)
 }
@@ -336,9 +304,7 @@ fn copy_buffered(
         if read == 0 {
             return Ok(());
         }
-        output
-            .write_all(&buffer[..read])
-            .at("Could not write", destination)?;
+        output.write_all(&buffer[..read]).at("Could not write", destination)?;
         if let Some(progress) = progress {
             progress.complete_bytes(read as u64);
         }
@@ -365,9 +331,7 @@ fn try_copy_sparse(
         return Ok(false);
     }
     let finish = |output: &mut fs::File| {
-        output
-            .set_len(length)
-            .at("Could not size sparse file", source)?;
+        output.set_len(length).at("Could not size sparse file", source)?;
         if let Some(progress) = progress {
             progress.complete_bytes(length);
         }
@@ -417,12 +381,8 @@ fn try_copy_sparse(
             }
             let chunk = usize::try_from(remaining.min(buffer.len() as u64))
                 .expect("chunk is bounded by the buffer length");
-            input
-                .read_exact(&mut buffer[..chunk])
-                .at("Could not read", source)?;
-            output
-                .write_all(&buffer[..chunk])
-                .at("Could not write sparse extent for", source)?;
+            input.read_exact(&mut buffer[..chunk]).at("Could not read", source)?;
+            output.write_all(&buffer[..chunk]).at("Could not write sparse extent for", source)?;
             remaining -= chunk as u64;
         }
         cursor = hole;
@@ -489,10 +449,7 @@ pub(super) fn supported_xattr_name(name: &OsStr) -> bool {
 
     let name = name.as_bytes();
     name.starts_with(b"user.")
-        || matches!(
-            name,
-            b"system.posix_acl_access" | b"system.posix_acl_default"
-        )
+        || matches!(name, b"system.posix_acl_access" | b"system.posix_acl_default")
 }
 
 pub(super) fn xattrs_unsupported(error: &io::Error) -> bool {
@@ -598,11 +555,7 @@ pub(super) fn merge_directories(
     progress: Option<&TransferProgress>,
     snapshot_limit: usize,
 ) -> MergeOutcome {
-    let not_undoable = |stopped| MergeOutcome {
-        created: Vec::new(),
-        undoable: false,
-        stopped,
-    };
+    let not_undoable = |stopped| MergeOutcome { created: Vec::new(), undoable: false, stopped };
     // Prepare: decide the whole merge before writing any of it. Nothing has
     // been created yet, so a plan that cannot be made is an ordinary failure.
     let plan = match plan_merge(source, destination) {
@@ -683,11 +636,7 @@ pub(super) fn merge_directories(
         }
     }
     created.extend(files);
-    MergeOutcome {
-        created,
-        undoable: true,
-        stopped,
-    }
+    MergeOutcome { created, undoable: true, stopped }
 }
 
 /// Remove exactly what a merge added.
@@ -708,10 +657,8 @@ pub(super) fn remove_merged_items(
             Ok(metadata) => metadata,
             Err(error) => {
                 return Err(failure(
-                    anyhow::Error::new(error).context(format!(
-                        "Cannot undo: “{}” is missing",
-                        snapshot.path.display()
-                    )),
+                    anyhow::Error::new(error)
+                        .context(format!("Cannot undo: “{}” is missing", snapshot.path.display())),
                     removed,
                 ));
             }

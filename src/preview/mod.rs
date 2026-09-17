@@ -59,9 +59,7 @@ pub fn load_preview(
     cancelled: &Arc<std::sync::atomic::AtomicBool>,
 ) -> io::Result<Preview> {
     if entry.navigable {
-        return Ok(Preview::Directory {
-            path: entry.path.clone(),
-        });
+        return Ok(Preview::Directory { path: entry.path.clone() });
     }
 
     // Everything below previews regular files only, and `open(2)` on a FIFO
@@ -84,33 +82,23 @@ pub fn load_preview(
     let head_read = read_up_to(&mut file, &mut head)?;
     let inferred = infer::get(&head[..head_read]).map(|kind| kind.mime_type().to_string());
 
-    if inferred
-        .as_deref()
-        .is_some_and(|mime| mime.starts_with("image/"))
+    if inferred.as_deref().is_some_and(|mime| mime.starts_with("image/"))
         || is_image_extension(&entry.path)
     {
         let image = image::prepare(&entry.path, cancelled).map_err(io::Error::other)?;
-        return Ok(Preview::Image {
-            image,
-            mime: inferred.unwrap_or_else(|| "image".to_string()),
-        });
+        return Ok(Preview::Image { image, mime: inferred.unwrap_or_else(|| "image".to_string()) });
     }
 
     if inferred.as_deref() == Some("application/pdf") || has_extension(&entry.path, &["pdf"]) {
         let document = inspect_pdf(&entry.path, cancelled)?;
-        return Ok(Preview::Pdf {
-            source: document.source,
-            pages: document.pages,
-        });
+        return Ok(Preview::Pdf { source: document.source, pages: document.pages });
     }
 
     let markdown = has_extension(&entry.path, &["md", "markdown", "mdown", "mkd"]);
     let language = language_for_path(&entry.path);
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
-    file.by_ref()
-        .take(MAX_TEXT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    file.by_ref().take(MAX_TEXT_BYTES + 1).read_to_end(&mut bytes)?;
     let truncated = bytes.len() as u64 > MAX_TEXT_BYTES;
     bytes.truncate(MAX_TEXT_BYTES as usize);
 
@@ -129,10 +117,7 @@ pub fn load_preview(
     }
 
     Ok(Preview::Metadata {
-        summary: metadata_summary(
-            entry,
-            inferred.unwrap_or_else(|| "Unknown format".to_string()),
-        ),
+        summary: metadata_summary(entry, inferred.unwrap_or_else(|| "Unknown format".to_string())),
     })
 }
 
@@ -142,15 +127,11 @@ pub fn load_preview(
 /// file, most often — and this text is centred in the preview pane, where an
 /// empty middle row reads as a rendering fault rather than as an absent size.
 fn metadata_summary(entry: &FileEntry, detail: String) -> String {
-    [
-        entry.display_kind().to_string(),
-        format_size(entry.size),
-        detail,
-    ]
-    .into_iter()
-    .filter(|line| !line.is_empty())
-    .collect::<Vec<_>>()
-    .join("\n")
+    [entry.display_kind().to_string(), format_size(entry.size), detail]
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Read as much of `buffer` as the file can fill, tolerating short reads.
@@ -178,10 +159,7 @@ fn split_preview_lines(contents: &str) -> (Arc<[String]>, bool) {
         .map(|line| {
             let line = line.strip_suffix('\r').unwrap_or(line);
             let mut chars = line.chars();
-            let mut visible = chars
-                .by_ref()
-                .take(MAX_PREVIEW_LINE_CHARS)
-                .collect::<String>();
+            let mut visible = chars.by_ref().take(MAX_PREVIEW_LINE_CHARS).collect::<String>();
             if chars.next().is_some() {
                 clipped_any = true;
                 visible.push_str(" … [line truncated]");
@@ -205,30 +183,19 @@ fn is_probably_text(bytes: &[u8]) -> bool {
         return false;
     }
 
-    let suspicious = bytes
-        .iter()
-        .filter(|byte| **byte < 0x09 || (**byte > 0x0d && **byte < 0x20))
-        .count();
+    let suspicious =
+        bytes.iter().filter(|byte| **byte < 0x09 || (**byte > 0x0d && **byte < 0x20)).count();
     suspicious * 100 / bytes.len() < 5
 }
 
 fn is_image_extension(path: &Path) -> bool {
-    has_extension(
-        path,
-        &[
-            "avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "tif", "tiff", "webp",
-        ],
-    )
+    has_extension(path, &["avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "tif", "tiff", "webp"])
 }
 
 fn has_extension(path: &Path, extensions: &[&str]) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extensions
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        })
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        extensions.iter().any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    })
 }
 
 fn language_for_path(path: &Path) -> &'static str {
@@ -273,10 +240,7 @@ mod tests {
             &metadata_entry(EntryKind::Other, None),
             "No preview is available for this kind of file".to_string(),
         );
-        assert_eq!(
-            summary,
-            "Special file\nNo preview is available for this kind of file"
-        );
+        assert_eq!(summary, "Special file\nNo preview is available for this kind of file");
 
         let sized = metadata_summary(
             &metadata_entry(EntryKind::File, Some(2048)),

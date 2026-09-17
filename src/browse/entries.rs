@@ -40,39 +40,21 @@ impl FileEntry {
     fn from_dir_entry(entry: DirEntry, icons: &mut IconProvider) -> io::Result<Self> {
         let path = entry.path();
         let file_type = entry.file_type()?;
-        let followed_metadata = if file_type.is_symlink() {
-            path.metadata().ok()
-        } else {
-            entry.metadata().ok()
-        };
-        Ok(Self::from_parts(
-            path,
-            entry.file_name(),
-            file_type,
-            followed_metadata,
-            icons,
-        ))
+        let followed_metadata =
+            if file_type.is_symlink() { path.metadata().ok() } else { entry.metadata().ok() };
+        Ok(Self::from_parts(path, entry.file_name(), file_type, followed_metadata, icons))
     }
 
     pub(crate) fn from_path(path: &Path, icons: &mut IconProvider) -> io::Result<Self> {
         let metadata = std::fs::symlink_metadata(path)?;
         let file_type = metadata.file_type();
-        let followed_metadata = if file_type.is_symlink() {
-            path.metadata().ok()
-        } else {
-            Some(metadata)
-        };
+        let followed_metadata =
+            if file_type.is_symlink() { path.metadata().ok() } else { Some(metadata) };
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
             .to_os_string();
-        Ok(Self::from_parts(
-            path.to_path_buf(),
-            name,
-            file_type,
-            followed_metadata,
-            icons,
-        ))
+        Ok(Self::from_parts(path.to_path_buf(), name, file_type, followed_metadata, icons))
     }
 
     fn from_parts(
@@ -101,10 +83,7 @@ impl FileEntry {
             name_os: name,
             folded_name,
             navigable,
-            size: followed_metadata
-                .as_ref()
-                .filter(|meta| meta.is_file())
-                .map(|meta| meta.len()),
+            size: followed_metadata.as_ref().filter(|meta| meta.is_file()).map(|meta| meta.len()),
             icon_path: icons.icon_for(&path, navigable),
             path,
             kind,
@@ -134,10 +113,7 @@ impl FileEntry {
 #[derive(Debug)]
 pub enum DirectoryUpdate {
     Batch(Vec<FileEntry>),
-    Degraded {
-        skipped: usize,
-        examples: Vec<String>,
-    },
+    Degraded { skipped: usize, examples: Vec<String> },
     Done,
     Error(String),
 }
@@ -191,10 +167,7 @@ pub fn stream_directory(
         batch.push(entry);
         if batch.len() == DIRECTORY_BATCH_SIZE {
             batch.sort_by(compare_entries);
-            if sender
-                .send_blocking(DirectoryUpdate::Batch(std::mem::take(&mut batch)))
-                .is_err()
-            {
+            if sender.send_blocking(DirectoryUpdate::Batch(std::mem::take(&mut batch))).is_err() {
                 return;
             }
             batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
@@ -207,10 +180,7 @@ pub fn stream_directory(
             return;
         }
     }
-    if skipped > 0
-        && sender
-            .send_blocking(DirectoryUpdate::Degraded { skipped, examples })
-            .is_err()
+    if skipped > 0 && sender.send_blocking(DirectoryUpdate::Degraded { skipped, examples }).is_err()
     {
         return;
     }
@@ -314,11 +284,7 @@ mod tests {
             name: name.to_string(),
             name_os,
             folded_name: name.to_lowercase().chars().collect(),
-            kind: if navigable {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
-            },
+            kind: if navigable { EntryKind::Directory } else { EntryKind::File },
             navigable,
             size: None,
             icon_path: None,
@@ -336,10 +302,7 @@ mod tests {
         entries.sort_by(compare_entries);
 
         assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
+            entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
             ["Alpha", "beta", "A.txt", "z.txt"]
         );
     }
@@ -352,10 +315,7 @@ mod tests {
         let merged = merge_sorted_entries(left, right);
 
         assert_eq!(
-            merged
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
+            merged.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
             ["Alpha", "Beta", "a.txt", "b.txt"]
         );
     }
@@ -393,11 +353,7 @@ mod tests {
 
         assert_eq!(skipped, 10);
         assert_eq!(examples.len(), 3);
-        assert!(
-            examples
-                .iter()
-                .all(|example| example.chars().count() <= 240)
-        );
+        assert!(examples.iter().all(|example| example.chars().count() <= 240));
     }
 
     #[test]
@@ -421,9 +377,6 @@ mod tests {
     #[test]
     fn valid_names_cannot_impersonate_escaped_byte_labels() {
         let invalid_label = "⟦bytes:6eff⟧";
-        assert_eq!(
-            display_filename(OsStr::new(invalid_label)),
-            "⟦text:⟦bytes:6eff⟧⟧"
-        );
+        assert_eq!(display_filename(OsStr::new(invalid_label)), "⟦text:⟦bytes:6eff⟧⟧");
     }
 }
