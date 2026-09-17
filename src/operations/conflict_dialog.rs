@@ -208,5 +208,5 @@ fn ask(
     });
     // The suggested name is selected, so typing over it replaces it and Rename
     // works without reaching for the pointer.
-    input.update(cx, |input, cx| input.focus(window, cx));
+    crate::app::select_stem(input, request.source_is_directory, window, cx);
 }

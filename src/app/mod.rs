@@ -53,6 +53,7 @@ use crate::{
 };
 
 pub use actions::init_key_bindings;
+pub(crate) use edits::select_stem;
 use preview::PreviewState;
 use state::{DragState, PickerState, SidebarState, UiState};
 

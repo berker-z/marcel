@@ -5,10 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, Window};
+use gpui::{App, Context, Entity, Window};
 use gpui_component::{
     WindowExt as _,
-    input::{InputEvent, InputState, Position, SelectToStart as InputSelectToStart},
+    input::{InputEvent, InputState},
     notification::Notification,
 };
 
@@ -28,35 +28,36 @@ use super::{
     state::RenameEdit,
 };
 
-/// Where the caret goes when a name is offered for editing: before the
-/// extension, or at the end for a folder, whose dots are not extensions.
+/// How much of a name is offered for replacement, as a byte offset: up to the
+/// extension, or all of it for a folder, whose dots are not extensions.
 pub(super) fn rename_stem_end(name: &str, is_directory: bool) -> usize {
     if is_directory {
-        return name.chars().count();
+        return name.len();
     }
-    name.char_indices()
-        .rev()
-        .find_map(|(index, character)| {
-            (character == '.' && index > 0).then(|| name[..index].chars().count())
-        })
-        .unwrap_or_else(|| name.chars().count())
+    name.rfind('.').filter(|index| *index > 0).unwrap_or(name.len())
 }
 
-/// Focus `input` and select its stem, as every rename field does.
-pub(super) fn select_stem(
+/// Focus `input` with its stem selected, so typing replaces the name and
+/// leaves the extension. Every field that offers a name uses this: inline
+/// rename, the save dialog, Compress, and the conflict dialog.
+///
+/// The selection is set directly rather than through the input's
+/// `SelectToStart` action: an action dispatches to whatever has focus, and
+/// focus given in the same frame has not landed yet, so the action went
+/// nowhere and the caret merely sat before the extension.
+pub(crate) fn select_stem(
     input: Entity<InputState>,
     is_directory: bool,
     window: &mut Window,
-    cx: &mut Context<Marcel>,
+    cx: &mut App,
 ) {
     let value = input.read(cx).value().to_string();
     let stem_end = rename_stem_end(&value, is_directory);
-    cx.defer_in(window, move |_, window, cx| {
+    window.defer(cx, move |window, cx| {
         input.update(cx, |input, cx| {
             input.focus(window, cx);
-            input.set_cursor_position(Position::new(0, stem_end as u32), window, cx);
+            input.set_selected_range(0..stem_end, cx);
         });
-        window.dispatch_action(Box::new(InputSelectToStart), cx);
     });
 }
 
@@ -540,6 +541,6 @@ mod tests {
         assert_eq!(rename_stem_end("report.final.txt", false), 12);
         assert_eq!(rename_stem_end(".bashrc", false), 7);
         assert_eq!(rename_stem_end("folder.with.dots", true), 16);
-        assert_eq!(rename_stem_end("猫.txt", false), 1);
+        assert_eq!(rename_stem_end("猫.txt", false), 3);
     }
 }

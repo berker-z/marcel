@@ -18,7 +18,7 @@ use crate::{
     theme::{self, Palette},
 };
 
-use super::Marcel;
+use super::{Marcel, edits::select_stem};
 
 /// A question with one destructive or affirmative answer and Cancel.
 pub(super) struct Confirm {
@@ -135,7 +135,9 @@ impl Marcel {
                     true
                 })
         });
-        dialog.input.update(cx, |input, cx| input.focus(window, cx));
+        // Compress proposes a name; New Folder and New File start empty, and
+        // selecting nothing of nothing is just focus.
+        select_stem(dialog.input, false, window, cx);
         cx.notify();
     }
 
