@@ -8,7 +8,7 @@ Marcel borrows heavily from [Yazi](https://github.com/sxyazi/yazi). The filesyst
 
 ## Status
 
-Alpha. I use Marcel as my daily file manager, and it has been through two rounds of external review focused on filesystem safety. It has not been used widely by anyone else yet.
+Alpha. I use Marcel as my daily file manager, and it has been through several rounds of external review focused on filesystem safety. Nobody else has used it much yet.
 
 Copy, move, rename, Trash, restore, archive creation, and extraction can all be undone. Marcel checks that files are still what and where it thinks they are before touching them, and refuses rather than guessing. Permanent deletion is the exception.
 
@@ -20,27 +20,27 @@ Linux only. Wayland is the tested target. X11 mostly works, but dragging files o
 
 ### Browsing
 
-Marcel has list and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. Press `Ctrl+L` to type a path, or just start typing to filter the current folder with fuzzy matching. Selection works with a marquee or the keyboard. Folders update as they change on disk instead of reloading, and directories with 50,000 entries remain comfortable to browse.
+List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. `Ctrl+L` to type a path, or just start typing to filter the folder with fuzzy matching. Sort by name, modified time, size, or kind from the button next to the location bar, or by clicking a column heading in list view; folders stay first. Folders update as they change on disk instead of reloading, and 50,000 entries remain comfortable.
 
 ### Preview
 
-The preview pane handles text and code files, images, continuously scrolling PDFs, and folder listings. Thumbnails use the freedesktop cache, so Marcel shares them with other applications instead of generating another private copy.
+Text and code, images, continuously scrolling PDFs, and folder listings. Thumbnails come from the freedesktop cache, shared with other applications rather than generated again.
 
 ### File operations
 
-Copy and move operations show progress and can be cancelled. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge the two folders. One answer can apply to the rest of the operation. Undo and redo cover copy, move, duplicate, rename, Trash, restore, archive creation, and extraction. Permanent deletion requires confirmation and stays out of undo history. Marcel also creates folders, empty files, and zip archives, and extracts most common archive formats; an extraction that lands on an existing name asks the same replace, rename, skip, or merge question a copy does. Move To… asks for a folder in a small dialog that works like the location bar (breadcrumbs, the folders inside, Places and Bookmarks as shortcuts, or a typed path) and moves the selection there.
+Copy and move with progress and cancellation. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge, and one answer can apply to the rest of the operation. Undo and redo cover copy, move, duplicate, rename, Trash, restore, archive creation, extraction, and permission changes. Permanent deletion requires confirmation and stays out of undo history. New folders and files, zip creation, extraction of the common free formats, Move To… through a small folder dialog, and Copy Path.
 
-Properties (`Ctrl+I`, or `Alt+Enter` if your hands know KDE) shows what an item is, where it lives, who owns it, and its permissions and timestamps. What its kind adds comes from the same code that draws the preview: an image reports its dimensions, a PDF its page count, a text file its line count, an archive how many entries it holds and how big they unpack. A folder is measured in the background while the dialog is open, and a multi-selection gets a summary.
+Properties (`Ctrl+I`, or `Alt+Enter` if your hands know KDE) shows what an item is, where it lives, who owns it, and its permissions and timestamps, plus what the preview loaders know: image dimensions, PDF page count, text line count, archive contents. Folders are measured in the background while the dialog is open. The permission bits are checkboxes, and ticking one is a `chmod` that undoes like everything else.
 
 ### Desktop integration
 
-On Wayland, files can be dragged to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. It runs one process per session, but each `marcel-rs` invocation opens a new window instead of taking over one you were already using.
+On Wayland, files drag to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. One process per session; each `marcel-rs` invocation opens a new window rather than taking over one you were using.
 
-Marcel can also be the file dialog. Applications on a modern Linux desktop do not draw their own open and save dialogs; they ask xdg-desktop-portal for one, and the portal hands the job to whichever backend is configured. Marcel implements that backend, so with it enabled the dialog that opens from a browser, an editor, or a chat client is a Marcel window: the same browser, preview pane, bookmarks, and type-to-filter you use everywhere else, plus a bar along the bottom with the name field, the file-type filter the application asked for, Cancel, and the accept button. Filters match case-insensitively, so `*.jpg` finds `Photo.JPG`. If Marcel is not running when a dialog is requested, D-Bus starts it. How to turn it on is under Installing.
+Marcel can also be the file dialog. Applications on a modern Linux desktop ask xdg-desktop-portal for open and save dialogs, and the portal hands the job to a backend. Marcel implements that backend, so with it enabled the dialog from a browser, an editor, or a chat client is a Marcel window: the same browser, preview, bookmarks, and filter, plus a bar with the name field, the file-type filter the application asked for, Cancel, and the accept button. If Marcel is not running, D-Bus starts it. How to turn it on is under Installing.
 
 ### Appearance
 
-Marcel includes several themes and ships its own icons and font, so it still looks right on a bare system. Missing icons fall back to the system icon theme. An explicit icon theme setting overrides both.
+Several themes, picked in Settings and remembered. Marcel ships its own icons and font, so it looks right on a bare system; missing icons fall back to the system icon theme, and an explicit icon theme setting overrides both.
 
 ## Keyboard shortcuts
 
@@ -72,14 +72,13 @@ Marcel includes several themes and ships its own icons and font, so it still loo
 Known gaps, roughly in the order they are likely to be addressed:
 
 * No search. You can filter the folder you are in, but there is no recursive search by name or content.
-* Moving between filesystems is refused. Marcel will not quietly turn a move across drives into a copy followed by a delete. It says it cannot do it. Copying across drives works.
+* Moving between filesystems is refused rather than quietly turned into a copy and a delete. Copying across drives works.
 * No removable volumes, network shares, or remote locations. Local paths only.
 * No media playback, and no thumbnails for video.
-* Sorting is fixed, and preferences other than view mode and hidden files are not persisted.
-* The window needs to be at least 900 pixels wide. Below that the panes are collectively wider than the window and the preview pane runs off the right edge, so Marcel asks the desktop not to shrink it that far. A tiling compositor can insist anyway.
+* The window needs to be at least 900 pixels wide; below that the preview pane runs off the edge. Marcel asks the desktop not to shrink it further, and a tiling compositor can insist anyway.
 * Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer.
 * RAR extraction needs a separate build. The default package ships only free components.
-* No Flatpak. Nix is the only packaging route today.
+* Nix is the only packaging route today. One file operation runs at a time; a second is refused until the first finishes.
 
 Not planned: tabs, as I do not like them very much.
 
@@ -127,24 +126,18 @@ and each is off by default because it takes something over:
 - `defaultDirectoryHandler` makes Marcel the `inode/directory` handler, so
   `xdg-open` on a folder opens Marcel.
 - `fileManager1` makes Marcel answer `org.freedesktop.FileManager1` on the
-  session bus, which is the D-Bus call behind "show in folder" in browsers
-  and most other applications. Every launch of the installed binary then
-  claims the name, and the module writes an activation file to
-  `~/.local/share/dbus-1/services`. D-Bus reads that directory before any
-  installed package's, so Marcel wins even with Nautilus or Dolphin
-  installed; both ship a file claiming the same name.
-- `fileChooserPortal` makes Marcel the open-file and save-file dialog of
-  every application that asks xdg-desktop-portal for one, which on Wayland is
-  most of them. It adds the portal variant to `xdg.portal.extraPortals` and
-  names `marcel` for the FileChooser interface in `xdg.portal.config`;
-  `xdg.portal.enable` is still yours to set (the Home Manager Hyprland module
-  turns it on for you). After the rebuild, run
-  `systemctl --user restart xdg-desktop-portal`: the frontend reads
-  `portals.conf` once at startup, and until it restarts you keep getting the
-  old dialog. Chromium-based browsers pick it up straight away. Firefox and
-  Zen only use the portal picker when
-  `widget.use-xdg-desktop-portal.file-picker` is `1` in `about:config`.
-  Details in [`docs/file-chooser-portal.md`](docs/file-chooser-portal.md).
+  session bus, the call behind "show in folder" in browsers and most other
+  applications. The module writes an activation file to
+  `~/.local/share/dbus-1/services`, which D-Bus reads before any package's,
+  so Marcel wins even with Nautilus or Dolphin installed.
+- `fileChooserPortal` makes Marcel the open and save dialog of every
+  application that asks xdg-desktop-portal for one, which on Wayland is most
+  of them. It adds the portal variant to `xdg.portal.extraPortals` and names
+  `marcel` for the FileChooser interface; `xdg.portal.enable` is still yours
+  to set. After the rebuild, `systemctl --user restart xdg-desktop-portal`,
+  since the frontend reads `portals.conf` once at startup. Firefox and Zen
+  need `widget.use-xdg-desktop-portal.file-picker` set to `1` in
+  `about:config`. Details in [`docs/file-chooser-portal.md`](docs/file-chooser-portal.md).
 
 There is a NixOS module with the same options
 (`inputs.marcel.nixosModules.default`; packages land in
@@ -153,7 +146,7 @@ override, so with a second file manager on the system, which one D-Bus starts
 for `FileManager1` falls back to profile order. Use the Home Manager module
 when that matters.
 
-The command is `marcel-rs`, not `marcel`. nixpkgs already has a `marcel`, an unrelated Python shell, and two packages installing the same `bin/marcel` collide in a profile. Only the command carries the suffix: the application is still Marcel everywhere you see it, including its icon, its desktop entry, its D-Bus name, and its config directory at `~/.config/marcel`.
+The command is `marcel-rs`, not `marcel`: nixpkgs already has a `marcel` (an unrelated Python shell) and two packages installing the same `bin/marcel` collide in a profile. Only the command carries the suffix; the application, icon, desktop entry, D-Bus name, and `~/.config/marcel` are all still Marcel.
 
 Without the module, `overlays.default` provides `pkgs.marcel-rs`,
 `packages.<system>.file-manager1-service` is the variant that claims the
@@ -177,7 +170,7 @@ programs.marcel.settings = {
 
 Leaving `icon_theme` and `ui_font` as `null` keeps Marcel's bundled icons and font, which is the default.
 
-View mode and hidden file visibility are deliberately not Nix options. Marcel treats them as interaction state and remembers what you last chose in `$XDG_CONFIG_HOME/marcel/state.conf`.
+View mode, sort order, and hidden files are interaction state, not Nix options; Marcel remembers them in `$XDG_CONFIG_HOME/marcel/state.conf`. The theme is both: `settings.theme` is the default, and a theme picked in Settings is written to the same file and wins from then on. Delete its `theme=` line to follow the Nix option again.
 
 ## Building
 
@@ -186,41 +179,16 @@ nix develop
 cargo run
 ```
 
-The development shell is required. A plain shell will not find the system libraries the build needs.
+The development shell is required: a plain shell will not find the system libraries the build needs, and a different `cargo` picks a different compiler and invalidates everything compiled in `target/`. The shell pins its compiler through `flake.lock`. Avoid `cargo clean`; the dependency build is long.
 
-Use this repository's `nix develop` consistently for Marcel, including checks
-and tests. A general Rust shell or system `cargo` can select another compiler
-and invalidate the compiled dependencies in `target/`. The shell pins its
-compiler through `flake.lock` and defaults to two Cargo build jobs. Avoid
-`cargo clean` during routine development: it deletes those compiled dependencies.
-
-`cargo run` reuses local development artifacts. `nix build .#marcel-rs` builds
-the isolated release package; it cannot reuse `target/`. The flake uses Crane
-to compile dependencies separately and reuse them after application-only
-edits. Both routes select the same pinned compiler. Changes to dependencies,
-the compiler, native libraries or build flags still invalidate the relevant
-artifacts. The standalone nixpkgs recipe retains `buildRustPackage`.
-
-To retain the release dependencies locally across Nix garbage collection:
+`nix build .#marcel-rs` builds the release package in isolation, using Crane so dependencies survive application-only edits. To keep those dependencies across garbage collection:
 
 ```sh
 nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-deps --out-link .marcel-deps
 nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-rs
 ```
 
-Keep the `.marcel-deps` symlink while developing. The first build with this
-recipe compiles the dependency set once unless Cachix already has it. Release
-CI publishes the compiled dependencies as well as the finished application;
-these artifacts use more cache storage than the runtime binary alone.
-
-Cachix serves complete Nix builds with matching inputs. System configurations
-should consume `packages.<system>.marcel-rs` from this flake, retaining its
-own locked nixpkgs, to match the published cache. Applying the overlay against
-another nixpkgs revision can produce a different build. The cache workflow
-runs on every push to `master` as well as on release tags, so a commit is
-cached a few minutes after it lands; pinning a revision before its workflow
-has finished still means a local build. Development-shell and release builds have
-different profiles and do not share compiled Cargo artifacts.
+The cache workflow runs on every push to `master` and on tags, so a commit is cached a few minutes after it lands. The cache holds builds against Marcel's own locked nixpkgs; consume `packages.<system>.marcel-rs` from this flake rather than applying the overlay to another nixpkgs, or you compile GPUI yourself.
 
 ## Credits
 

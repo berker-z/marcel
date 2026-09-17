@@ -6,7 +6,7 @@ quality gate. The multi-window acceptance checks below are unrun; they need a
 graphical session, and they are carried unchanged into
 [Sprint 20](020-cleanup-interlude.md), which is where they will be run.
 
-[Review D](../review-2026-08-18.md) read this work and endorsed both the
+Review D read this work and endorsed both the
 ownership model and the decision not to accept the sprint until that list is
 run.
 
@@ -18,7 +18,7 @@ window cannot orphan work or discard history.
 
 This is the first item in [Sprint 17](017-stability-and-architecture-hardening.md)'s
 remaining hardening queue and Stage 5 of the plan in
-[`review-2026-08-10.md`](../review-2026-08-10.md). It deliberately follows
+`review-2026-08-10.md`. It deliberately follows
 [Sprint 18](018-destination-conflict-decisions.md), which made conflict
 decisions interactive and thereby constrained this design: an operation can now
 block a worker thread waiting for a user, so any ownership model that outlives a
@@ -44,7 +44,7 @@ with the window.
 - **The bookmark P2.** Every window kept its own bookmark list and its own save
   task. The file was published atomically, which makes each write indivisible
   but does not make two writers agree: a window that had not seen the other's
-  addition wrote its stale list over the top. [`review-2026-08-05.md`](../review-2026-08-05.md)
+  addition wrote its stale list over the top. `review-2026-08-05.md`
   parked this as "benign last-writer-wins"; that judgement was wrong for
   bookmarks specifically, because the loss is user data and leaves no parse
   error behind.

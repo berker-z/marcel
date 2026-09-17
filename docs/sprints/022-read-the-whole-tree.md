@@ -20,7 +20,7 @@ layer Sprint 21 had just added. This sprint ran a fifth review across all of
 it, cross-checked every candidate finding against the exact code path, and
 fixed everything that survived verification.
 
-The evidence document is [`review-2026-08-20.md`](../review-2026-08-20.md)
+The evidence document is `review-2026-08-20.md`
 (Review E): per-finding tiers, code paths, and the confirmed-sound list. This
 sprint records what was *done* about it.
 
@@ -218,7 +218,7 @@ corollary: the defects lived almost entirely where no reviewer had read.
 
 ### Documentation
 
-- [x] [`review-2026-08-20.md`](../review-2026-08-20.md) records the review:
+- [x] `review-2026-08-20.md` records the review:
   verdict table, evidence, the deferred items with reasons, and the
   confirmed-sound list so a future review does not re-derive it.
 - [x] `TODO.md` and `HANDOFF.md` reflect the new state; the four deferred

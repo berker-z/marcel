@@ -15,10 +15,11 @@ is what Marcel does at 0.1.0.
 
 ### Browsing
 
-List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a
-sidebar. `Ctrl+L` to type a path, or start typing to filter the current folder
-with fuzzy matching. Marquee and keyboard selection. Folders update as they
-change on disk instead of reloading. Comfortable at 50,000 entries.
+List and grid views, sorted by name, modified time, size, or kind, with
+breadcrumbs, bookmarks, and the usual XDG places in a sidebar. `Ctrl+L` to
+type a path, or start typing to filter the current folder with fuzzy matching.
+Marquee and keyboard selection. Folders update as they change on disk instead
+of reloading. Comfortable at 50,000 entries.
 
 ### Preview
 
@@ -43,6 +44,10 @@ answering `ShowItemProperties` over D-Bus): kind, location, size, owner,
 group, permissions, and timestamps, plus what the preview loaders know about
 the file, so image dimensions, PDF page count, text line count, and archive
 contents. Folders are measured in the background while the dialog is open.
+The permission bits are checkboxes, and ticking one is an undoable `chmod`.
+
+Copy Path puts the selected paths on the clipboard, and Copy Location the
+folder's.
 
 Marcel checks that files are still what and where it thinks they are before
 touching them, and refuses rather than guessing.
@@ -59,9 +64,9 @@ generic `org.freedesktop.FileManager1` name. Both are opt-in.
 
 ### Appearance
 
-Several built-in themes. Marcel ships its own icon subset and font and uses
-them first, so it looks the same on a bare system, falling back to the system
-icon theme only for icons it does not ship.
+Several built-in themes, chosen in Settings and remembered. Marcel ships its
+own icon subset and font and uses them first, so it looks the same on a bare
+system, falling back to the system icon theme only for icons it does not ship.
 
 ### Packaging
 
@@ -78,5 +83,5 @@ wider than the window and the preview pane runs off the edge, so the window
 refuses to shrink below it on desktops that honour a minimum size.
 
 No search. Moves between filesystems are refused rather than silently turned
-into a copy and a delete. No removable volumes or remote locations. Sorting is fixed. Dragging files out of Marcel is
+into a copy and a delete. No removable volumes or remote locations. Dragging files out of Marcel is
 not implemented on X11. The full list is in the README.

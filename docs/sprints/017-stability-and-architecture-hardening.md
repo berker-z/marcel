@@ -256,7 +256,7 @@ Verified:
 
 ## 2026-08-10 transaction-integrity slice
 
-A third review, cross-checked in [`review-2026-08-10.md`](../review-2026-08-10.md),
+A third review, cross-checked in `review-2026-08-10.md`,
 found that `CommittedOperation` closed the single-commit boundary and left the
 multi-commit one open. Undo, Redo, and the Trash mutations could rename one
 item, fail on the next, compensate, and still return an ordinary error, after

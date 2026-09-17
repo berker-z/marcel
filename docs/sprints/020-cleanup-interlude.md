@@ -14,9 +14,9 @@ conversation*, and close it in one deliberate pass rather than as a tail of
 half-finished sprints.
 
 This is not a feature sprint and it is not an architecture sprint. It is an
-interlude: [Review D](../review-2026-08-18.md) found two P0 defects in code
+interlude: Review D found two P0 defects in code
 Sprint 18 shipped, three sprints have unchecked acceptance boxes, and
-[`review-2026-08-10.md`](../review-2026-08-10.md)'s plan has four unstarted
+`review-2026-08-10.md`'s plan has four unstarted
 stages. Those three lists overlap enough that working them separately would mean
 touching `file_ops.rs` three times.
 

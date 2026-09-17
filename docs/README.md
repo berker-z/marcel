@@ -1,83 +1,42 @@
 # Marcel internal documentation
 
-The root `README.md` is Marcel's public landing page. This directory holds the
-durable product, engineering, and release records used to build it.
+The root `README.md` is the public page. This directory holds what was
+decided and why, and what is left.
 
-## Current milestone
+## Where things stand
 
-Marcel has reached the personal daily-driver milestone. Feature and release work
-remain paused for hardening.
+`v0.1.0` is untagged and close. [Sprint 26](sprints/026-tag-readiness.md)
+closed the last review's blockers and added editable permissions, sorting,
+and a theme that persists; its acceptance list holds the hand-checks still
+open. [`TODO.md`](TODO.md) is the one list of what is left, in order, and
+[`release.md`](release.md) is the gate the tag has to pass.
 
-[Sprint 22: read the whole tree](sprints/022-read-the-whole-tree.md) is the
-current document. A fifth review — the first to read past the operations core —
-found twenty confirmed defects, almost all in code no earlier review had read:
-the load/watcher seam, the preview surface, bookmarks persistence, the D-Bus
-surface, and the window layer. All are fixed with regression coverage; the
-evidence is [`review-2026-08-20.md`](review-2026-08-20.md).
+## Documents
 
-[Sprint 21: a launch is a window](sprints/021-a-launch-is-a-window.md) precedes
-it. Running `marcel-rs` while Marcel is open now opens a window
-instead of navigating the one in front of you, which is both the conventional
-behaviour and what makes Sprint 20's two-window acceptance matrix something a
-person can actually run.
-
-[Sprint 20: cleanup interlude](sprints/020-cleanup-interlude.md) precedes it. It closed [Review D](review-2026-08-18.md)'s findings together with
-the remaining code queue from
-[Sprint 17](sprints/017-stability-and-architecture-hardening.md),
-[Sprint 18](sprints/018-destination-conflict-decisions.md), and
-[`review-2026-08-10.md`](review-2026-08-10.md), because those three lists
-overlapped in the same files. Its code slice is complete; what remains is the
-graphical acceptance matrix it inherits from
-[Sprint 19](sprints/019-application-global-operations.md) and Sprint 18, which
-`cargo test` cannot reach.
-
-[Sprint 16: public release presentation and metadata](sprints/016-public-release-presentation.md)
-remains planned but deprioritized until that matrix is run.
-
-## Source-of-truth documents
-
-- [`TODO.md`](TODO.md): cross-sprint product roadmap and backlog.
-- [`release.md`](release.md): release, packaging, artifact, and repository
-  submission handbook. It is platform-neutral in intent while documenting Nix
-  as the only currently shipped route.
-- [`interaction-model.md`](interaction-model.md): conventional file-manager
-  interaction and safety contract.
-- [`copy-semantics.md`](copy-semantics.md): copy fidelity and symbolic-link
-  policy.
-- [`external-review.md`](external-review.md): external architectural review
-  retained as design input, not an implementation specification.
-- [`review-2026-08-05.md`](review-2026-08-05.md): two cross-checked operation
-  layer reviews with per-finding verdicts, reproductions, and remediation
-  status. Unlike `external-review.md`, its confirmed findings were defects.
-- [`review-2026-08-18.md`](review-2026-08-18.md): cross-check of the fourth
-  review, the first to read the tree Sprints 18 and 19 produced. Its four
-  findings all reproduced; it records a fifth in the same function that the
-  review missed, and the evidence for each. The plan is Sprint 20.
-- [`review-2026-08-20.md`](review-2026-08-20.md): the fifth review, and the
-  first to read the whole tree rather than the operations core. Twenty
-  confirmed findings with per-finding tiers and evidence, four deliberate
-  deferrals with reasons, and the confirmed-sound list. The record of what was
-  done is [Sprint 22](sprints/022-read-the-whole-tree.md).
-- [`review-2026-08-10.md`](review-2026-08-10.md): cross-check of a third review,
-  with per-finding verdicts and re-tiering, one rejected finding, three findings
-  it missed, and the Yazi and Nautilus evidence that decided the remediation
-  plan. Records why Marcel keeps identity validation where Nautilus does not.
+- [`TODO.md`](TODO.md): the backlog, in order.
+- [`release.md`](release.md): release, packaging, CI, and distribution.
+- [`nixpkgs.md`](nixpkgs.md): the nixpkgs submission recipe.
+- [`interaction-model.md`](interaction-model.md): shortcuts, menus, selection,
+  undo, and the safety contract behind them.
+- [`copy-semantics.md`](copy-semantics.md): what a copy preserves, and the
+  symbolic-link policy.
+- [`file-chooser-portal.md`](file-chooser-portal.md): Marcel as the
+  xdg-desktop-portal file chooser, and how to test it.
 - [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md): upstream reuse,
-  bundled assets, adaptations, and license notices.
-- [`sprints/`](sprints/): numbered implementation plans and acceptance history.
+  bundled assets, and their licenses.
+- [`sprints/`](sprints/): numbered records of each slice of work, with the
+  acceptance checks as they stood. Older ones keep the status of their own
+  time; read them as history.
 
-[`HANDOFF.md`](HANDOFF.md) is a short pointer to the current state and the next
-queue. `TODO.md` and the sprint documents remain the source of truth; the
-handoff only says where to start.
+The external review records that used to live here (five reviews and one
+acceptance run between 2026-07-29 and 2026-08-21) were removed once every
+finding was either fixed or on the backlog. They are in the git history;
+sprint documents 17 through 22 still name them.
 
 ## Sprint status convention
 
-- **Planned:** contract and acceptance criteria exist; implementation has not
-  started.
-- **In progress:** the sprint still has active implementation work.
-- **Implemented:** its automated/product slice is present, though named manual
-  or release-gate checks may remain.
-- **Accepted:** every required automated and manual check is complete.
-
-Older sprint files preserve the status and open checks from their own period.
-The current milestone above and `TODO.md` decide what is next.
+- **Planned:** the contract and acceptance checks exist; nothing is built.
+- **In progress:** implementation is under way.
+- **Implemented:** the code and automated checks are in; named manual checks
+  may remain and are listed as unchecked.
+- **Accepted:** every check, automated and manual, is done.

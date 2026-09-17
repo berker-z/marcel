@@ -5,7 +5,7 @@ graphical session, apart from the named acceptance checks below that remain
 unrun and are carried into [Sprint 20](020-cleanup-interlude.md). Merging a
 folder while *moving* it is the one deliberate gap.
 
-[Review D](../review-2026-08-18.md) later found two defects in this sprint's
+Review D later found two defects in this sprint's
 merge and replacement code, both closed in Sprint 20: a merge that stopped part
 way reported no committed effect while half of it sat in the destination, and a
 failed rollback left the user's only copy in storage a later Marcel would sweep.

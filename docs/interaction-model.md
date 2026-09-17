@@ -205,8 +205,9 @@ configured MIME default without prompting, while `Open With…` explicitly
 requests the desktop application chooser. Cut, Copy, and Paste are active
 through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
-Remaining planned commands are disabled and prefixed with `–`: Create Link
-and Copy Path. Duplicate copies the selection beside itself and lets the
+The one planned command still disabled and prefixed with `–` is Create Link.
+Copy Path puts the selected paths on the clipboard, one per line.
+Duplicate copies the selection beside itself and lets the
 transfer choose the free names. Move To… asks for a folder in a small dialog
 that works like the location bar: breadcrumbs for the destination, the
 folders inside it, Places and Bookmarks as shortcuts, and a path field behind
@@ -268,9 +269,10 @@ filesystem directory. On Linux, Marcel first tries the proposed
 bounded list of established terminal-emulator working-directory arguments.
 Every launch strips the Nix development shell's `LD_LIBRARY_PATH`.
 
-View mode belongs in the persistent Places footer rather than this context
-menu. Marcel exposes a list/grid switch there. Future sorting controls should
-use persistent application chrome rather than expanding the context menu.
+View mode and sort order are not in this menu. Both are buttons in the top
+bar between the location bar and the filter: the view toggle flips between
+list and grid, and the sort button opens a picker with the four keys and
+Reverse Order. In list view the column headings sort on a click as well.
 
 Show Hidden Files is active both in the Places footer and this menu. It toggles
 Unix dotfiles through the shared visible-index layer and safely removes newly

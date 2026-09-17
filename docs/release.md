@@ -284,12 +284,29 @@ thumbnail caches, Trash paths, and subprocess behavior.
 
 ### Pinned GPUI
 
-Marcel consumes GPUI's upstream native external-drag API directly. The exact
-Zed and gpui-component revisions are recorded in `Cargo.lock`; Marcel no longer
-ships a locally modified GPUI tree. Release and downstream builds must fetch or
-prefetch those immutable Git sources and retain their upstream license notices.
+Marcel consumes GPUI's upstream native external-drag API directly, from the
+Zed repository at the revision `Cargo.lock` records. The dependency lines
+cannot carry that revision: gpui-component names the same repository without
+one, and cargo refuses a `[patch]` that points a git source back at itself,
+so a `rev` on Marcel's lines would split the graph into two GPUIs. The lock is
+the pin. `Cargo.toml` writes the revision down under
+`package.metadata.marcel.zed-rev`, and `scripts/check_version.sh` fails when
+the lock resolves any Zed crate to anything else, which is what turns a stray
+`cargo update` into a CI failure instead of a silent framework upgrade.
+Release and downstream builds must fetch or prefetch those immutable Git
+sources and retain their upstream license notices.
 
 ## Distribution targets
+
+The order, weighed by reach per hour of maintenance: the repository flake
+(done), then a source tarball on the GitHub release and an AUR package (an
+afternoon each, and AUR is exactly the audience), then the nixpkgs submission
+(the plan is written, the review latency is the cost), and only after those
+have real users an AppImage or a Flatpak. AppImage is days of work and stays
+fragile; Flatpak costs the portal backend and the D-Bus activation that make
+Marcel worth installing, and Flathub wants a maintenance history the
+repository does not have yet. Both are reassessed once the first three routes
+exist.
 
 ### Repository flake
 
@@ -474,17 +491,21 @@ jobs:
   `cargo test --all-targets`, all inside `nix develop`. CI enters the dev shell
   rather than installing a toolchain and a list of system libraries, because
   the dev shell already declares that list and a second copy of it would drift.
-- `metadata` validates the AppStream file and runs `scripts/check_version.sh`.
+- `metadata` validates the AppStream file and runs `scripts/check_version.sh`
+  (versions and the Zed revision).
   Both are quick, so they do not queue behind a compile.
-- `package` runs `nix build .#marcel` on `x86_64-linux` and `aarch64-linux`,
+- `package` runs `nix build .#marcel-rs` on `x86_64-linux` and `aarch64-linux`,
   then checks the installed tree for the binary, metainfo, desktop entry, D-Bus
   service, icons, and the private `7zz`, and asserts that the default package
   installs no `org.freedesktop.FileManager1` service.
 - `flake` runs `nix flake check`.
 
-**What runs when.** Nothing runs on an ordinary push, or on a pull request.
-The whole workflow fires on `v*` tags and on manual `workflow_dispatch`, and
-nowhere else. This is deliberate and should stay.
+**What runs when.** Nothing runs on an ordinary push. The whole workflow
+fires on `v*` tags and on manual `workflow_dispatch`. A pull request gets
+`.github/workflows/pr.yml` instead: the version and Zed-revision check,
+AppStream validation, `cargo fmt --check`, and Clippy, but not the tests or
+the packaged build. Clippy does compile GPUI, which is the cost the rest of
+this section is about; a pull request is rare enough here to pay it.
 
 Every job here compiles GPUI, including `quality`: entering the dev shell and
 running the gate costs minutes with a warm cache and far more without one.
@@ -546,9 +567,10 @@ published source tag.
 
 ## `v0.1.0` release gate
 
-The graphical half of this gate is evidence rather than a checkbox, and it
-lives in dated acceptance records. The first is
-[`acceptance-2026-08-21.md`](acceptance-2026-08-21.md).
+The graphical half of this gate is evidence rather than a checkbox. The
+first full pass was recorded on 2026-08-21 (the record has since been removed
+from the tree with the other review documents; it is in the git history);
+Sprint 26 carries the checks that are still open.
 
 Before creating the first tag:
 
@@ -558,14 +580,14 @@ Before creating the first tag:
 - [x] Bundle and verify the private curated Nordzy semantic fallback.
 - [x] Bundle and verify Marcel's private regular/semibold Iosevka subsets and
       explicit installed-font override.
-- [ ] Complete Sprint 16's public README, visual media, and platform support
+- [x] Complete Sprint 16's public README, visual media, and platform support
       matrix.
 - [ ] Audit runtime programs, libraries, metadata, and XDG/D-Bus paths.
 - [x] Add a changelog and write `0.1.0` release notes.
 - [ ] Verify the version is consistent everywhere. `scripts/check_version.sh`
       does this, and takes the intended tag as an argument:
       `scripts/check_version.sh v0.1.0`. CI runs it without the tag argument on
-      every push.
+      tags and pull requests.
 - [ ] Run all Rust quality checks.
 - [ ] Run the release-only Nix build and flake check.
 - [ ] Install and launch from a clean committed revision.
@@ -580,9 +602,11 @@ Before creating the first tag:
 - [ ] Publish checksums and release notes with every artifact.
 
 The first release does not need every planned package format. It is acceptable
-for `v0.1.0` to ship the hardened Nix flake and an AppImage, then add AUR,
-Debian, and RPM delivery incrementally. Every advertised artifact must,
-however, satisfy the same safety and desktop-integration expectations.
+for `v0.1.0` to ship the hardened Nix flake alone, then add nixpkgs, AUR, a
+source tarball on the GitHub release, and only then consider AppImage or
+Flatpak (see Distribution targets for the order and the reasons). Every
+advertised artifact must, however, satisfy the same safety and
+desktop-integration expectations.
 
 ## References
 
