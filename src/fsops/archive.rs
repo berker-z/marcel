@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 use rustix::process::{Pid, Signal, kill_process_group};
 
@@ -109,12 +110,9 @@ impl SevenZipBackend {
             command.current_dir(current_dir);
         }
 
-        let mut child = command.spawn().with_context(|| {
-            format!(
-                "Could not start archive backend “{}”",
-                self.program.display()
-            )
-        })?;
+        let mut child = command
+            .spawn()
+            .at("Could not start archive backend", &self.program)?;
         let stdout = child
             .stdout
             .take()
@@ -325,12 +323,7 @@ fn extract_archive_with<B: ArchiveBackend>(
     }
 
     let top_level = fs::read_dir(staging.path())
-        .with_context(|| {
-            format!(
-                "Could not inspect archive staging “{}”",
-                staging.path().display()
-            )
-        })?
+        .at("Could not inspect archive staging", staging.path())?
         .map(|entry| {
             entry
                 .map(|entry| entry.path())
@@ -346,12 +339,8 @@ fn extract_archive_with<B: ArchiveBackend>(
                     .context("Extracted item has no filename")?,
             );
             ensure_unoccupied(&destination)?;
-            rename_no_replace(source, &destination).with_context(|| {
-                format!(
-                    "Could not publish extracted item “{}”",
-                    destination.display()
-                )
-            })?;
+            rename_no_replace(source, &destination)
+                .at("Could not publish extracted item", &destination)?;
             destination
         }
         _ => {
@@ -403,8 +392,7 @@ fn create_zip_archive_with<B: ArchiveBackend>(
     }
     validate_preflight(&backend.list(&staged_archive, cancelled)?)?;
     ensure_unoccupied(destination)?;
-    rename_no_replace(&staged_archive, destination)
-        .with_context(|| format!("Could not publish ZIP “{}”", destination.display()))?;
+    rename_no_replace(&staged_archive, destination).at("Could not publish ZIP", destination)?;
     Ok(ArchiveOutcome {
         published: destination.to_path_buf(),
     })
@@ -414,12 +402,7 @@ fn archive_staging(parent: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(".marcel-archive-")
         .tempdir_in(parent)
-        .with_context(|| {
-            format!(
-                "Could not create private archive staging in “{}”",
-                parent.display()
-            )
-        })
+        .at("Could not create private archive staging in", parent)
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
@@ -518,9 +501,7 @@ fn walk_staged(
             Ok(listing) => listing,
             Err(error) if vanished(&error) => continue,
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("Could not inspect staging “{}”", directory.display())
-                });
+                return Err(error).at("Could not inspect staging", &directory);
             }
         };
         for entry in listing {
@@ -535,8 +516,7 @@ fn walk_staged(
                 Ok(metadata) => metadata,
                 Err(error) if vanished(&error) => continue,
                 Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("Could not inspect “{}”", path.display()));
+                    return Err(error).at("Could not inspect", &path);
                 }
             };
             let file_type = metadata.file_type();
@@ -579,9 +559,7 @@ fn validate_compression_sources(sources: &[PathBuf], cancelled: &AtomicBool) -> 
             );
         }
         if metadata.is_dir() {
-            for child in fs::read_dir(&path)
-                .with_context(|| format!("Could not read “{}”", path.display()))?
-            {
+            for child in fs::read_dir(&path).at("Could not read", &path)? {
                 pending.push(child.context("Could not read compression source")?.path());
             }
         } else if !metadata.is_file() {

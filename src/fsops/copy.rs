@@ -15,6 +15,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -98,15 +99,11 @@ pub(super) fn ensure_not_self_containing(
         // link resolving into the destination cannot recurse.
         return Ok(());
     }
-    let source_real = source
-        .canonicalize()
-        .with_context(|| format!("Could not resolve “{}”", source.display()))?;
+    let source_real = source.canonicalize().at("Could not resolve", source)?;
     let parent = destination
         .parent()
         .context("Destination has no parent directory")?;
-    let parent_real = parent
-        .canonicalize()
-        .with_context(|| format!("Could not resolve “{}”", parent.display()))?;
+    let parent_real = parent.canonicalize().at("Could not resolve", parent)?;
     let name = destination
         .file_name()
         .context("Destination has no file name")?;
@@ -133,12 +130,7 @@ fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(&format!(".marcel-copy-{}-{sequence}-", std::process::id()))
         .tempdir_in(parent)
-        .with_context(|| {
-            format!(
-                "Could not reserve a temporary copy directory in “{}”",
-                parent.display()
-            )
-        })
+        .at("Could not reserve a temporary copy directory in", parent)
 }
 
 /// One unit of copy work. Directories are visited twice so their metadata is
@@ -220,8 +212,7 @@ impl Copier<'_> {
         }
 
         if kind.is_dir() {
-            fs::create_dir(&destination)
-                .with_context(|| format!("Could not create “{}”", destination.display()))?;
+            fs::create_dir(&destination).at("Could not create", &destination)?;
             let created_index = self.created.push(&destination, &inspect(&destination)?);
             let children = sorted_children(&source)?;
             steps.push(CopyStep::FinishDirectory {
@@ -243,10 +234,8 @@ impl Copier<'_> {
             self.copy_regular_file(&source, &destination, &metadata)?;
             preserve_metadata(&source, &destination, &metadata)?;
         } else if kind.is_symlink() {
-            let target = fs::read_link(&source)
-                .with_context(|| format!("Could not read link “{}”", source.display()))?;
-            std::os::unix::fs::symlink(target, &destination)
-                .with_context(|| format!("Could not copy link “{}”", source.display()))?;
+            let target = fs::read_link(&source).at("Could not read link", &source)?;
+            std::os::unix::fs::symlink(target, &destination).at("Could not copy link", &source)?;
             preserve_supported_xattrs(&source, &destination)?;
         } else {
             bail!(
@@ -304,21 +293,20 @@ fn copy_file_cancellable(
     cancelled: &AtomicBool,
     progress: Option<&TransferProgress>,
 ) -> Result<()> {
-    let mut input =
-        fs::File::open(source).with_context(|| format!("Could not open “{}”", source.display()))?;
+    let mut input = fs::File::open(source).at("Could not open", source)?;
     let mut output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)
-        .with_context(|| format!("Could not create “{}”", destination.display()))?;
+        .at("Could not create", destination)?;
     if !try_copy_sparse(&mut input, &mut output, source, cancelled, progress)? {
         input
             .seek(io::SeekFrom::Start(0))
-            .with_context(|| format!("Could not rewind “{}”", source.display()))?;
+            .at("Could not rewind", source)?;
         output
             .set_len(0)
             .and_then(|()| output.seek(io::SeekFrom::Start(0)).map(|_| ()))
-            .with_context(|| format!("Could not restart “{}”", destination.display()))?;
+            .at("Could not restart", destination)?;
         copy_buffered(
             &mut input,
             &mut output,
@@ -328,9 +316,7 @@ fn copy_file_cancellable(
             progress,
         )?;
     }
-    output
-        .sync_all()
-        .with_context(|| format!("Could not finish “{}”", destination.display()))
+    output.sync_all().at("Could not finish", destination)
 }
 
 fn copy_buffered(
@@ -346,15 +332,13 @@ fn copy_buffered(
         if cancelled.load(Ordering::Acquire) {
             bail!("Operation cancelled");
         }
-        let read = input
-            .read(&mut buffer)
-            .with_context(|| format!("Could not read “{}”", source.display()))?;
+        let read = input.read(&mut buffer).at("Could not read", source)?;
         if read == 0 {
             return Ok(());
         }
         output
             .write_all(&buffer[..read])
-            .with_context(|| format!("Could not write “{}”", destination.display()))?;
+            .at("Could not write", destination)?;
         if let Some(progress) = progress {
             progress.complete_bytes(read as u64);
         }
@@ -376,17 +360,14 @@ fn try_copy_sparse(
         io::Errno,
     };
 
-    let length = input
-        .metadata()
-        .with_context(|| format!("Could not inspect “{}”", source.display()))?
-        .len();
+    let length = input.metadata().at("Could not inspect", source)?.len();
     if length == 0 {
         return Ok(false);
     }
     let finish = |output: &mut fs::File| {
         output
             .set_len(length)
-            .with_context(|| format!("Could not size sparse file “{}”", source.display()))?;
+            .at("Could not size sparse file", source)?;
         if let Some(progress) = progress {
             progress.complete_bytes(length);
         }
@@ -427,7 +408,7 @@ fn try_copy_sparse(
         input
             .seek(io::SeekFrom::Start(data))
             .and_then(|_| output.seek(io::SeekFrom::Start(data)))
-            .with_context(|| format!("Could not seek sparse file “{}”", source.display()))?;
+            .at("Could not seek sparse file", source)?;
 
         let mut remaining = hole.saturating_sub(data);
         while remaining > 0 {
@@ -438,10 +419,10 @@ fn try_copy_sparse(
                 .expect("chunk is bounded by the buffer length");
             input
                 .read_exact(&mut buffer[..chunk])
-                .with_context(|| format!("Could not read “{}”", source.display()))?;
-            output.write_all(&buffer[..chunk]).with_context(|| {
-                format!("Could not write sparse extent for “{}”", source.display())
-            })?;
+                .at("Could not read", source)?;
+            output
+                .write_all(&buffer[..chunk])
+                .at("Could not write sparse extent for", source)?;
             remaining -= chunk as u64;
         }
         cursor = hole;
@@ -450,12 +431,8 @@ fn try_copy_sparse(
 }
 
 fn preserve_metadata(source: &Path, destination: &Path, metadata: &fs::Metadata) -> Result<()> {
-    fs::set_permissions(destination, metadata.permissions()).with_context(|| {
-        format!(
-            "Could not preserve permissions on “{}”",
-            destination.display()
-        )
-    })?;
+    fs::set_permissions(destination, metadata.permissions())
+        .at("Could not preserve permissions on", destination)?;
     preserve_supported_xattrs(source, destination)?;
 
     let mut times = fs::FileTimes::new();
@@ -471,12 +448,7 @@ fn preserve_metadata(source: &Path, destination: &Path, metadata: &fs::Metadata)
     if has_times {
         fs::File::open(destination)
             .and_then(|file| file.set_times(times))
-            .with_context(|| {
-                format!(
-                    "Could not preserve timestamps on “{}”",
-                    destination.display()
-                )
-            })?;
+            .at("Could not preserve timestamps on", destination)?;
     }
     Ok(())
 }
@@ -486,8 +458,7 @@ fn preserve_supported_xattrs(source: &Path, destination: &Path) -> Result<()> {
         Ok(attributes) => attributes,
         Err(error) if xattrs_unsupported(&error) => return Ok(()),
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Could not list attributes on “{}”", source.display()));
+            return Err(error).at("Could not list attributes on", source);
         }
     };
 
@@ -562,9 +533,8 @@ fn plan_merge(source: &Path, destination: &Path) -> Result<MergePlan> {
     let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
     while let Some((source, destination)) = pending.pop() {
         let is_dir = inspect(&source)?.file_type().is_dir();
-        let occupant = describe_occupant(&destination).with_context(|| {
-            format!("Could not inspect destination “{}”", destination.display())
-        })?;
+        let occupant =
+            describe_occupant(&destination).at("Could not inspect destination", &destination)?;
 
         match (is_dir, occupant) {
             // Two directories meet: join them and keep walking.
@@ -656,9 +626,7 @@ pub(super) fn merge_directories(
             stopped = Some(MergeStop::Cancelled);
             break;
         }
-        if let Err(error) = fs::create_dir(directory)
-            .with_context(|| format!("Could not create “{}”", directory.display()))
-        {
+        if let Err(error) = fs::create_dir(directory).at("Could not create", directory) {
             stopped = Some(MergeStop::Failed(error));
             break;
         }

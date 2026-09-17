@@ -23,6 +23,7 @@ use std::{
     },
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -295,7 +296,7 @@ fn erase_root(root: &QuarantinedRoot, progress: &TransferProgress) -> Vec<PathFa
                     DeleteKind::Directory => fs::remove_dir(&entry.path),
                     DeleteKind::Other => fs::remove_file(&entry.path),
                 }
-                .with_context(|| format!("Could not permanently delete “{}”", entry.path.display()))
+                .at("Could not permanently delete", &entry.path)
             })
             .and_then(|()| {
                 progress.complete_item();
@@ -390,12 +391,7 @@ fn reserve_quarantine_path(original: &Path) -> Result<PathBuf> {
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "Could not inspect quarantine path “{}”",
-                        candidate.display()
-                    )
-                });
+                return Err(error).at("Could not inspect quarantine path", &candidate);
             }
         }
     }

@@ -14,6 +14,7 @@ use std::{
     },
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -63,7 +64,7 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<CommittedOperation>
 
 pub(super) fn create_directory_at(path: PathBuf) -> Result<CommittedOperation> {
     // Commit.
-    fs::create_dir(&path).with_context(|| format!("Could not create “{}”", path.display()))?;
+    fs::create_dir(&path).at("Could not create", &path)?;
     // Finalize: the directory exists. Refusing to record an unexpected result
     // costs undo, but must not report the creation as failed.
     let record = fs::symlink_metadata(&path)

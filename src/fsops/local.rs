@@ -9,6 +9,21 @@ use std::{ffi::OsString, fs, io, path::Path};
 
 use anyhow::{Context as _, Result, bail};
 
+/// Name the path an error is about, the way every message in this layer
+/// does: `Could not create “/home/me/photos”`.
+pub trait PathContext<T> {
+    fn at(self, message: &str, path: &Path) -> Result<T>;
+}
+
+impl<T, E> PathContext<T> for Result<T, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn at(self, message: &str, path: &Path) -> Result<T> {
+        self.with_context(|| format!("{message} “{}”", path.display()))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathOccupancy {
     Vacant,
@@ -34,14 +49,13 @@ pub fn ensure_unoccupied(path: &Path) -> Result<()> {
             path.display()
         ),
         Ok(PathOccupancy::Vacant) => Ok(()),
-        Err(error) => Err(error)
-            .with_context(|| format!("Could not inspect destination “{}”", path.display())),
+        Err(error) => Err(error).at("Could not inspect destination", path),
     }
 }
 
 /// `symlink_metadata` with the error every caller would otherwise spell out.
 pub fn inspect(path: &Path) -> Result<fs::Metadata> {
-    fs::symlink_metadata(path).with_context(|| format!("Could not inspect “{}”", path.display()))
+    fs::symlink_metadata(path).at("Could not inspect", path)
 }
 
 /// A directory's children in name order, fully read before any is used.
@@ -51,9 +65,9 @@ pub fn inspect(path: &Path) -> Result<fs::Metadata> {
 /// make `read_dir` yield an entry twice.
 pub fn sorted_children(path: &Path) -> Result<Vec<fs::DirEntry>> {
     let mut children = fs::read_dir(path)
-        .with_context(|| format!("Could not read “{}”", path.display()))?
+        .at("Could not read", path)?
         .collect::<io::Result<Vec<_>>>()
-        .with_context(|| format!("Could not read an entry in “{}”", path.display()))?;
+        .at("Could not read an entry in", path)?;
     children.sort_by_key(fs::DirEntry::file_name);
     Ok(children)
 }

@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -43,15 +44,13 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 if !metadata.file_type().is_dir() {
                     bail!("Cannot undo: “{}” is no longer a directory", path.display());
                 }
-                let mut entries = fs::read_dir(path)
-                    .with_context(|| format!("Cannot inspect “{}”", path.display()))?;
+                let mut entries = fs::read_dir(path).at("Cannot inspect", path)?;
                 if entries.next().is_some() {
                     bail!("Cannot undo: “{}” is no longer empty", path.display());
                 }
                 identity.validate(path, "undo")?;
                 // Commit: `remove_dir` either removes the directory or leaves it.
-                fs::remove_dir(path)
-                    .with_context(|| format!("Could not remove “{}”", path.display()))
+                fs::remove_dir(path).at("Could not remove", path)
             })();
             match prepared {
                 Ok(()) => MutationOutcome::Committed(CommittedOperation::new(

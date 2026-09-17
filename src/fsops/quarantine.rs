@@ -12,6 +12,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -184,12 +185,7 @@ pub(super) fn quarantine_for_replacement(path: &Path) -> Result<ReplacedItem> {
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "Could not inspect replacement quarantine “{}”",
-                        candidate.display()
-                    )
-                });
+                return Err(error).at("Could not inspect replacement quarantine", &candidate);
             }
         }
         rename_no_replace(path, &candidate)

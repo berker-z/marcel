@@ -19,6 +19,7 @@ use std::{
     sync::Arc,
 };
 
+use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -77,12 +78,7 @@ impl TrashRecord {
     /// thing that gets removed.
     fn remove_matching_info(&self) -> Result<()> {
         self.info_identity.validate(&self.info_path, "continue")?;
-        fs::remove_file(&self.info_path).with_context(|| {
-            format!(
-                "Could not remove Trash metadata “{}”",
-                self.info_path.display()
-            )
-        })
+        fs::remove_file(&self.info_path).at("Could not remove Trash metadata", &self.info_path)
     }
 }
 
@@ -487,9 +483,7 @@ pub fn restore_trash_records(
                     )
                 }
                 Ok(PathOccupancy::Vacant) => Ok(()),
-                Err(error) => Err(error).with_context(|| {
-                    format!("Could not inspect restore target “{}”", original.display())
-                }),
+                Err(error) => Err(error).at("Could not inspect restore target", original),
             }
         });
         if let Err(error) = prepared {
