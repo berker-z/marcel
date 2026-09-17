@@ -1,5 +1,7 @@
 use super::{
-    conflict::{ConflictPolicy, ConflictRequest, ConflictResponse},
+    conflict::{
+        ConflictDecision, ConflictPolicy, ConflictRequest, ConflictResolver, ConflictResponse,
+    },
     copy::{supported_xattr_name, xattrs_unsupported},
     identity::FileIdentity,
     journal::*,
@@ -9,14 +11,84 @@ use super::{
     transfer::*,
     *,
 };
-use std::time::{Duration, UNIX_EPOCH};
+use crate::testing::{Sandbox, no_cancel, read, seal, skip_as_root};
 use std::{
     ffi::OsStr,
     fs,
     io::{self, Read as _, Seek as _, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
+    time::{Duration, UNIX_EPOCH},
 };
+
+/// A transfer nobody can answer conflicts for.
+fn transfer(sources: &[PathBuf], destination: &Path, mode: TransferMode) -> TransferOutcome {
+    transfer_paths(sources, destination, mode, no_cancel())
+}
+
+fn copy(sources: &[PathBuf], destination: &Path) -> TransferOutcome {
+    transfer(sources, destination, TransferMode::Copy)
+}
+
+fn mv(sources: &[PathBuf], destination: &Path) -> TransferOutcome {
+    transfer(sources, destination, TransferMode::Move)
+}
+
+/// A resolver that answers every conflict the same way.
+struct AlwaysAnswers(ConflictDecision);
+
+impl ConflictResolver for AlwaysAnswers {
+    fn resolve(&self, _request: &ConflictRequest) -> ConflictDecision {
+        self.0.clone()
+    }
+}
+
+fn answering(decision: ConflictDecision) -> ConflictPolicy {
+    ConflictPolicy::interactive(Arc::new(AlwaysAnswers(decision)))
+}
+
+/// A transfer whose every conflict gets `decision`.
+fn transfer_deciding(
+    sources: &[PathBuf],
+    destination: &Path,
+    mode: TransferMode,
+    decision: ConflictDecision,
+) -> TransferOutcome {
+    transfer_paths_with_conflicts(
+        sources,
+        destination,
+        mode,
+        no_cancel(),
+        Arc::new(TransferProgress::default()),
+        &mut answering(decision),
+    )
+}
+
+fn replacing(sources: &[PathBuf], destination: &Path) -> TransferOutcome {
+    transfer_deciding(
+        sources,
+        destination,
+        TransferMode::Copy,
+        ConflictDecision::once(ConflictResponse::Replace),
+    )
+}
+
+fn budgeted(
+    sources: &[PathBuf],
+    destination: &Path,
+    mode: TransferMode,
+    budget: TransferBudget,
+) -> TransferOutcome {
+    Transfer::new(sources, destination, mode, no_cancel())
+        .with_budget(budget)
+        .run(&mut answering(ConflictDecision::once(
+            ConflictResponse::Replace,
+        )))
+}
+
+fn assert_clean(outcome: &TransferOutcome) {
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+}
 
 /// Unwrap a committed operation that the test expects to have retained
 /// undo. Failing here means bookkeeping was lost, not that the mutation
@@ -27,8 +99,11 @@ fn recorded(committed: CommittedOperation) -> OperationRecord {
         .expect("operation should have retained an undo record")
 }
 
-fn destinations(outcome: &TransferOutcome) -> Vec<PathBuf> {
-    outcome.completed_destinations()
+fn no_replacement_quarantines(directory: &Path) -> bool {
+    fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .all(|entry| !is_replacement_quarantine_name(&entry.file_name()))
 }
 
 /// A lexical prefix test misses a symlinked destination. Marcel then placed
@@ -37,21 +112,14 @@ fn destinations(outcome: &TransferOutcome) -> Vec<PathBuf> {
 /// roughly 156x the source size into the user's own directory.
 #[test]
 fn copy_refuses_a_destination_that_resolves_inside_the_source() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("src");
-    let sub = source.join("sub");
-    let alias = root.path().join("alias");
-    fs::create_dir_all(&sub).unwrap();
-    fs::write(sub.join("payload.bin"), vec![7_u8; 4096]).unwrap();
-    std::os::unix::fs::symlink(&sub, &alias).unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("src");
+    sandbox.file("src/sub/payload.bin", vec![7_u8; 4096]);
+    let alias = sandbox.path("alias");
+    std::os::unix::fs::symlink(source.join("sub"), &alias).unwrap();
     let before = tree_size(&source);
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&source),
-        &alias,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = copy(std::slice::from_ref(&source), &alias);
 
     assert_eq!(outcome.failures.len(), 1);
     assert!(
@@ -65,19 +133,13 @@ fn copy_refuses_a_destination_that_resolves_inside_the_source() {
 
 #[test]
 fn move_refuses_a_destination_that_resolves_inside_the_source() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("src");
-    let sub = source.join("sub");
-    let alias = root.path().join("alias");
-    fs::create_dir_all(&sub).unwrap();
-    std::os::unix::fs::symlink(&sub, &alias).unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("src");
+    sandbox.dir("src/sub");
+    let alias = sandbox.path("alias");
+    std::os::unix::fs::symlink(source.join("sub"), &alias).unwrap();
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&source),
-        &alias,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = mv(std::slice::from_ref(&source), &alias);
 
     assert_eq!(outcome.failures.len(), 1);
     assert!(source.is_dir());
@@ -85,38 +147,41 @@ fn move_refuses_a_destination_that_resolves_inside_the_source() {
 
 /// Snapshotting after the rename turned any directory containing a socket
 /// into a phantom failure: the move had happened, but the caller was told
-/// it had not.
+/// it had not. A move is a rename in both directions, so a tree Marcel could
+/// never copy or archive is still fully reversible.
 #[test]
-fn a_committed_move_is_never_reported_as_a_failure() {
-    use std::os::unix::net::UnixListener;
+fn a_moved_tree_holding_a_socket_is_reported_undoable_and_redoable() {
+    let sandbox = Sandbox::new();
+    let project = sandbox.dir("source/project");
+    let destination = sandbox.dir("destination");
+    sandbox.file("source/project/notes.txt", b"important");
+    let _listener = sandbox.socket("source/project/daemon.sock");
 
-    let root = tempfile::tempdir().unwrap();
-    let source_parent = root.path().join("source");
-    let destination = root.path().join("destination");
-    let project = source_parent.join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(project.join("notes.txt"), b"important").unwrap();
-    let _listener = UnixListener::bind(project.join("daemon.sock")).unwrap();
+    let outcome = mv(std::slice::from_ref(&project), &destination);
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&project),
-        &destination,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
-
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-    assert_eq!(destinations(&outcome), [destination.join("project")]);
-    assert!(!project.exists());
+    assert_clean(&outcome);
     assert_eq!(
-        fs::read(destination.join("project/notes.txt")).unwrap(),
-        b"important"
+        outcome.completed_destinations(),
+        [destination.join("project")]
     );
+    assert!(!project.exists());
+    assert_eq!(read(destination.join("project/notes.txt")), b"important");
     // A rename never inspects what the tree holds, so the socket costs
     // nothing: the move succeeds *and* stays undoable.
     assert!(!outcome.undo_unavailable);
-    assert!(outcome.operation.is_some());
+    let operation = outcome.operation.expect("a moved socket tree retains undo");
+
+    let redo_record = recorded(undo_operation(&operation).unwrap());
+    assert!(
+        project.join("daemon.sock").exists(),
+        "undo restored the tree"
+    );
+    assert_eq!(read(project.join("notes.txt")), b"important");
+    assert!(!destination.join("project").exists());
+
+    recorded(redo_operation(&redo_record).unwrap());
+    assert!(destination.join("project/daemon.sock").exists());
+    assert!(!project.exists());
 }
 
 /// A compensating rollback renames each root a second time, which bumps its
@@ -129,52 +194,38 @@ fn a_committed_move_is_never_reported_as_a_failure() {
 /// the same past the commit point, and only there.
 #[test]
 fn a_rolled_back_undo_discards_the_record_it_invalidated() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    if rustix::process::geteuid().is_root() {
-        // Permission bits do not constrain root, so the mid-loop failure
-        // this test depends on cannot be provoked.
+    if skip_as_root() {
         return;
     }
-
-    let root = tempfile::tempdir().unwrap();
+    let sandbox = Sandbox::new();
     // Two source parents, so one can be sealed without blocking the other.
     // `undo_operation` validates every transfer before renaming any, so an
     // obstacle it can see up front yields `Unchanged`; reaching the
     // rolled-back path needs a failure only the rename itself discovers.
-    let blocked = root.path().join("blocked");
-    let open = root.path().join("open");
-    let destination = root.path().join("destination");
-    for directory in [&blocked, &open, &destination] {
-        fs::create_dir(directory).unwrap();
-    }
-    fs::create_dir(blocked.join("first")).unwrap();
-    fs::write(blocked.join("first/data.txt"), b"first").unwrap();
-    fs::create_dir(open.join("second")).unwrap();
-    fs::write(open.join("second/data.txt"), b"second").unwrap();
+    let blocked = sandbox.dir("blocked");
+    let open = sandbox.dir("open");
+    let destination = sandbox.dir("destination");
+    sandbox.file("blocked/first/data.txt", b"first");
+    sandbox.file("open/second/data.txt", b"second");
 
-    let outcome = transfer_paths(
-        &[blocked.join("first"), open.join("second")],
-        &destination,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = mv(&[blocked.join("first"), open.join("second")], &destination);
     let operation = outcome.operation.expect("the move retains undo");
 
     // Undo walks transfers in reverse: "second" returns to `open` first and
     // commits, then "first" cannot be created back inside a read-only
     // parent. Stat still succeeds, so the preflight cannot catch it.
-    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();
+    seal(&blocked, true);
     let result = undo_operation(&operation);
-    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+    seal(&blocked, false);
 
     assert!(
         !result.keeps_history(),
         "a rolled-back undo must discard its record, got {result:?}"
     );
-    let MutationOutcome::Discarded { .. } = result else {
-        panic!("expected Discarded, got {result:?}");
-    };
+    assert!(
+        matches!(result, MutationOutcome::Discarded { .. }),
+        "{result:?}"
+    );
     // Compensation returned "second" to the destination, so the disk is
     // whole even though the record is gone.
     assert!(destination.join("first/data.txt").exists());
@@ -187,22 +238,14 @@ fn a_rolled_back_undo_discards_the_record_it_invalidated() {
 /// deliberately less blunt than Nautilus, which discards either way.
 #[test]
 fn an_undo_that_never_commits_keeps_its_record() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::create_dir(source_dir.join("only")).unwrap();
-    fs::write(source_dir.join("only").join("data.txt"), b"payload").unwrap();
+    let sandbox = Sandbox::new();
+    let only = sandbox.dir("source/only");
+    sandbox.file("source/only/data.txt", b"payload");
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&source_dir.join("only")),
-        &destination,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = mv(std::slice::from_ref(&only), &destination);
     let operation = outcome.operation.expect("the move retains undo");
-    fs::write(source_dir.join("only"), b"in the way").unwrap();
+    fs::write(&only, b"in the way").unwrap();
 
     let result = undo_operation(&operation);
 
@@ -213,88 +256,34 @@ fn an_undo_that_never_commits_keeps_its_record() {
     assert!(destination.join("only/data.txt").exists());
 
     // Clearing the obstacle makes the retained record work.
-    fs::remove_file(source_dir.join("only")).unwrap();
+    fs::remove_file(&only).unwrap();
     undo_operation(&operation).unwrap();
-    assert!(source_dir.join("only/data.txt").exists());
-}
-
-/// A move is a rename in both directions, so a tree Marcel could never
-/// copy or archive is still fully reversible. Rejecting such trees during
-/// snapshotting was a copy concern leaking into move bookkeeping, and it
-/// silently cost undo on the whole batch.
-#[test]
-fn a_moved_tree_holding_a_socket_is_undoable_and_redoable() {
-    use std::os::unix::net::UnixListener;
-
-    let root = tempfile::tempdir().unwrap();
-    let source_parent = root.path().join("source");
-    let destination = root.path().join("destination");
-    let project = source_parent.join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(project.join("notes.txt"), b"important").unwrap();
-    let _listener = UnixListener::bind(project.join("daemon.sock")).unwrap();
-
-    let outcome = transfer_paths(
-        std::slice::from_ref(&project),
-        &destination,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
-    let operation = outcome.operation.expect("a moved socket tree retains undo");
-
-    let redo_record = recorded(undo_operation(&operation).unwrap());
-    assert!(
-        project.join("daemon.sock").exists(),
-        "undo restored the tree"
-    );
-    assert_eq!(fs::read(project.join("notes.txt")).unwrap(), b"important");
-    assert!(!destination.join("project").exists());
-
-    recorded(redo_operation(&redo_record).unwrap());
-    assert!(destination.join("project/daemon.sock").exists());
-    assert!(!project.exists());
+    assert!(only.join("data.txt").exists());
 }
 
 /// Recording special files must not leak into paths whose undo deletes the
 /// tree: Marcel cannot recreate a socket, so an archive holding one stays
 /// success-without-undo rather than gaining an undo that would erase it.
 #[test]
-fn archive_sources_still_refuse_special_files() {
-    use std::os::unix::net::UnixListener;
-
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("payload");
-    fs::create_dir(&source).unwrap();
-    fs::write(source.join("notes.txt"), b"keep").unwrap();
-    let _listener = UnixListener::bind(source.join("daemon.sock")).unwrap();
+fn archive_sources_and_tree_removal_refuse_special_files() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("payload");
+    sandbox.file("payload/notes.txt", b"keep");
+    let _listener = sandbox.socket("payload/daemon.sock");
 
     let error = create_zip_operation(
         std::slice::from_ref(&source),
-        &root.path().join("payload.zip"),
-        Arc::new(AtomicBool::new(false)),
+        &sandbox.path("payload.zip"),
+        no_cancel(),
     )
     .expect_err("an archive cannot carry a socket");
-
     assert!(error.to_string().contains("Special files"), "{error}");
-    assert!(!root.path().join("payload.zip").exists());
-}
+    assert!(!sandbox.path("payload.zip").exists());
 
-#[test]
-fn undo_refuses_to_delete_a_tree_holding_a_special_file() {
-    use std::os::unix::net::UnixListener;
-
-    let root = tempfile::tempdir().unwrap();
-    let tree = root.path().join("output");
-    fs::create_dir(&tree).unwrap();
-    fs::write(tree.join("kept.txt"), b"keep").unwrap();
-    let _listener = UnixListener::bind(tree.join("daemon.sock")).unwrap();
-
-    let snapshots = snapshot_tree(&tree).expect("the rename walker records specials");
-
+    let snapshots = snapshot_tree(&source).expect("the rename walker records specials");
     assert!(remove_snapshotted_tree(&snapshots).is_err());
-    assert_eq!(fs::read(tree.join("kept.txt")).unwrap(), b"keep");
-    assert!(tree.join("daemon.sock").exists());
+    assert_eq!(read(source.join("notes.txt")), b"keep");
+    assert!(source.join("daemon.sock").exists());
 }
 
 /// Marcel runs transfers on `blocking` pool threads with Rust's 2 MiB
@@ -305,27 +294,20 @@ fn deep_directory_trees_do_not_exhaust_the_worker_stack() {
     let worker = std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
         .spawn(|| {
-            let root = tempfile::tempdir().unwrap();
-            let source = root.path().join("deep");
-            let destination = root.path().join("destination");
-            let mut current = source.clone();
-            fs::create_dir(&current).unwrap();
-            for _ in 0..1_500 {
-                current = current.join("d");
-                fs::create_dir(&current).unwrap();
-            }
-            fs::write(current.join("leaf.txt"), b"leaf").unwrap();
-            fs::create_dir(&destination).unwrap();
+            let sandbox = Sandbox::new();
+            let source = sandbox.dir("deep");
+            let leaf = sandbox.dir(&format!("deep{}", "/d".repeat(1_500)));
+            fs::write(leaf.join("leaf.txt"), b"leaf").unwrap();
+            let destination = sandbox.dir("destination");
 
             let outcome = transfer_paths_with_progress(
                 std::slice::from_ref(&source),
                 &destination,
                 TransferMode::Copy,
-                Arc::new(AtomicBool::new(false)),
+                no_cancel(),
                 Arc::new(TransferProgress::default()),
             );
-            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-
+            assert_clean(&outcome);
             // Permanent deletion walks the same shape.
             super::delete::delete_paths(
                 std::slice::from_ref(&source),
@@ -340,10 +322,7 @@ fn tree_size(root: &Path) -> u64 {
     let mut bytes = 0;
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        for entry in fs::read_dir(&directory).into_iter().flatten().flatten() {
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
                 continue;
             };
@@ -368,95 +347,88 @@ fn rejects_names_that_escape_the_parent_or_have_no_name() {
 
 #[test]
 fn create_never_overwrites_an_occupied_destination() {
-    let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("occupied"), b"keep me").unwrap();
+    let sandbox = Sandbox::new();
+    let occupied = sandbox.file("occupied", b"keep me");
 
-    assert!(create_directory(root.path(), "occupied").is_err());
-    assert_eq!(fs::read(root.path().join("occupied")).unwrap(), b"keep me");
+    assert!(create_directory(sandbox.root(), "occupied").is_err());
+    assert_eq!(read(occupied), b"keep me");
 }
 
 #[test]
 fn rename_is_no_replace_and_supports_undo_redo() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("draft.txt");
-    let destination = root.path().join("final.txt");
-    fs::write(&source, b"contents").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("draft.txt", b"contents");
+    let destination = sandbox.path("final.txt");
 
     let operation = recorded(rename_entry(&source, "final.txt").unwrap());
     assert!(!source.exists());
-    assert_eq!(fs::read(&destination).unwrap(), b"contents");
+    assert_eq!(read(&destination), b"contents");
     assert_eq!(
         operation.forward_directory_changes(),
         DirectoryChanges {
             removed: vec![source.clone()],
-            upserted: vec![destination.clone()],
+            upserted: vec![destination.clone()]
         }
     );
     assert_eq!(
         operation.reverse_directory_changes(),
         DirectoryChanges {
             removed: vec![destination.clone()],
-            upserted: vec![source.clone()],
+            upserted: vec![source.clone()]
         }
     );
 
     let redo_record = recorded(undo_operation(&operation).unwrap());
-    assert_eq!(fs::read(&source).unwrap(), b"contents");
+    assert_eq!(read(&source), b"contents");
     assert!(!destination.exists());
 
     let redone = recorded(redo_operation(&redo_record).unwrap());
     assert_eq!(redone.path(), destination);
-    assert_eq!(fs::read(&destination).unwrap(), b"contents");
+    assert_eq!(read(&destination), b"contents");
 }
 
-#[cfg(unix)]
 #[test]
 fn rename_accepts_an_invalid_utf8_source_identity() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
 
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join(OsString::from_vec(vec![b'n', 0xff]));
-    let destination = root.path().join("readable.txt");
+    let sandbox = Sandbox::new();
+    let source = sandbox.root().join(OsString::from_vec(vec![b'n', 0xff]));
     fs::write(&source, b"contents").unwrap();
 
     let operation = recorded(rename_entry(&source, "readable.txt").unwrap());
 
     assert!(!source.exists());
-    assert_eq!(operation.path(), destination);
-    assert_eq!(fs::read(destination).unwrap(), b"contents");
+    assert_eq!(operation.path(), sandbox.path("readable.txt"));
+    assert_eq!(read(sandbox.path("readable.txt")), b"contents");
 }
 
 #[test]
 fn rename_refuses_an_occupied_destination() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("occupied.txt");
-    fs::write(&source, b"source").unwrap();
-    fs::write(&destination, b"keep").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source.txt", b"source");
+    let destination = sandbox.file("occupied.txt", b"keep");
 
     assert!(rename_entry(&source, "occupied.txt").is_err());
-    assert_eq!(fs::read(&source).unwrap(), b"source");
-    assert_eq!(fs::read(&destination).unwrap(), b"keep");
+    assert_eq!(read(&source), b"source");
+    assert_eq!(read(&destination), b"keep");
 }
 
 #[test]
 fn rename_undo_refuses_a_modified_result() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("draft.txt");
-    let destination = root.path().join("final.txt");
-    fs::write(&source, b"original").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("draft.txt", b"original");
     let operation = recorded(rename_entry(&source, "final.txt").unwrap());
-    fs::write(&destination, b"modified").unwrap();
+    let destination = sandbox.file("final.txt", b"modified");
 
     assert!(undo_operation(&operation).is_err());
     assert!(!source.exists());
-    assert_eq!(fs::read(&destination).unwrap(), b"modified");
+    assert_eq!(read(&destination), b"modified");
 }
 
 #[test]
 fn create_undo_and_redo_validate_the_path() {
-    let root = tempfile::tempdir().unwrap();
-    let created = recorded(create_directory(root.path(), "photos").unwrap());
+    let sandbox = Sandbox::new();
+    let created = recorded(create_directory(sandbox.root(), "photos").unwrap());
 
     undo_operation(&created).unwrap();
     assert!(!created.path().exists());
@@ -466,36 +438,27 @@ fn create_undo_and_redo_validate_the_path() {
 }
 
 #[test]
-fn undo_refuses_a_non_empty_created_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let created = recorded(create_directory(root.path(), "work").unwrap());
+fn undo_refuses_a_non_empty_or_replaced_created_directory() {
+    let sandbox = Sandbox::new();
+    let created = recorded(create_directory(sandbox.root(), "work").unwrap());
     fs::write(created.path().join("important.txt"), b"data").unwrap();
-
     assert!(undo_operation(&created).is_err());
-    assert_eq!(
-        fs::read(created.path().join("important.txt")).unwrap(),
-        b"data"
-    );
-}
+    assert_eq!(read(created.path().join("important.txt")), b"data");
 
-#[test]
-fn undo_refuses_a_replacement_at_the_same_path() {
-    let root = tempfile::tempdir().unwrap();
-    let created = recorded(create_directory(root.path(), "replace-me").unwrap());
+    let created = recorded(create_directory(sandbox.root(), "replace-me").unwrap());
     fs::remove_dir(created.path()).unwrap();
     fs::create_dir(created.path()).unwrap();
-
     assert!(undo_operation(&created).is_err());
     assert!(created.path().is_dir());
 }
 
 #[test]
 fn history_is_bounded_and_new_work_clears_redo() {
-    let root = tempfile::tempdir().unwrap();
+    let sandbox = Sandbox::new();
     let mut journal = OperationJournal::new(2);
-    let first = recorded(create_directory(root.path(), "first").unwrap());
-    let second = recorded(create_directory(root.path(), "second").unwrap());
-    let third = recorded(create_directory(root.path(), "third").unwrap());
+    let first = recorded(create_directory(sandbox.root(), "first").unwrap());
+    let second = recorded(create_directory(sandbox.root(), "second").unwrap());
+    let third = recorded(create_directory(sandbox.root(), "third").unwrap());
     let _ = journal.record(first);
     let _ = journal.record(second.clone());
     let _ = journal.record(third.clone());
@@ -513,116 +476,75 @@ fn history_is_bounded_and_new_work_clears_redo() {
 
 #[test]
 fn recursive_copy_preserves_sources_and_supports_undo_redo() {
-    let root = tempfile::tempdir().unwrap();
-    let source_parent = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_parent).unwrap();
-    fs::create_dir(&destination).unwrap();
-    let album = source_parent.join("album");
-    fs::create_dir(&album).unwrap();
-    fs::write(album.join("notes.txt"), b"hello").unwrap();
+    let sandbox = Sandbox::new();
+    let album = sandbox.dir("source/album");
+    sandbox.file("source/album/notes.txt", b"hello");
     std::os::unix::fs::symlink("notes.txt", album.join("notes-link")).unwrap();
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&album),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-    assert_eq!(
-        fs::read(destination.join("album/notes.txt")).unwrap(),
-        b"hello"
-    );
+    let outcome = copy(std::slice::from_ref(&album), &destination);
+    assert_clean(&outcome);
+    assert_eq!(read(destination.join("album/notes.txt")), b"hello");
     assert_eq!(
         fs::read_link(destination.join("album/notes-link")).unwrap(),
         PathBuf::from("notes.txt")
     );
-    assert_eq!(fs::read(album.join("notes.txt")).unwrap(), b"hello");
+    assert_eq!(read(album.join("notes.txt")), b"hello");
 
     let operation = outcome.operation.unwrap();
     assert_eq!(
         operation.forward_directory_changes(),
-        DirectoryChanges {
-            removed: Vec::new(),
-            upserted: vec![destination.join("album")],
-        }
+        DirectoryChanges::upserted(vec![destination.join("album")])
     );
     let redo_record = recorded(undo_operation(&operation).unwrap());
     assert!(!destination.join("album").exists());
     let redone = recorded(redo_operation(&redo_record).unwrap());
-    assert_eq!(fs::read(redone.path().join("notes.txt")).unwrap(), b"hello");
+    assert_eq!(read(redone.path().join("notes.txt")), b"hello");
 }
 
 #[test]
 fn copy_never_overwrites_an_occupied_destination() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("destination");
-    fs::write(&source, b"new").unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(destination.join("source.txt"), b"keep").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source.txt", b"new");
+    let destination = sandbox.dir("destination");
+    sandbox.file("destination/source.txt", b"keep");
 
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = copy(&[source], &destination);
     assert_eq!(outcome.failures.len(), 1);
     assert!(outcome.operation.is_none());
-    assert_eq!(fs::read(destination.join("source.txt")).unwrap(), b"keep");
+    assert_eq!(read(destination.join("source.txt")), b"keep");
 }
 
-/// A resolver that answers every conflict the same way.
-struct AlwaysAnswers(super::conflict::ConflictDecision);
-
-impl super::conflict::ConflictResolver for AlwaysAnswers {
-    fn resolve(&self, _request: &ConflictRequest) -> super::conflict::ConflictDecision {
-        self.0.clone()
-    }
-}
-
-fn answering(decision: super::conflict::ConflictDecision) -> ConflictPolicy {
-    ConflictPolicy::interactive(Arc::new(AlwaysAnswers(decision)))
-}
-
-fn occupied_transfer_fixture() -> (tempfile::TempDir, Vec<PathBuf>, PathBuf) {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(source_dir.join("taken.txt"), b"new").unwrap();
-    fs::write(source_dir.join("free.txt"), b"free").unwrap();
-    fs::write(destination.join("taken.txt"), b"keep").unwrap();
-    let sources = vec![source_dir.join("taken.txt"), source_dir.join("free.txt")];
-    (root, sources, destination)
+/// Two sources, one of which collides at the destination.
+fn occupied_transfer_fixture() -> (Sandbox, Vec<PathBuf>, PathBuf) {
+    let sandbox = Sandbox::new();
+    let sources = vec![
+        sandbox.file("source/taken.txt", b"new"),
+        sandbox.file("source/free.txt", b"free"),
+    ];
+    sandbox.file("destination/taken.txt", b"keep");
+    let destination = sandbox.path("destination");
+    (sandbox, sources, destination)
 }
 
 /// Skipping is a deliberate outcome, not a failure, and it must not stop
 /// the sources that follow it.
 #[test]
 fn a_skipped_conflict_leaves_both_items_and_continues() {
-    let (_root, sources, destination) = occupied_transfer_fixture();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Skip,
-    ));
+    let (_sandbox, sources, destination) = occupied_transfer_fixture();
 
-    let outcome = transfer_paths_with_conflicts(
+    let outcome = transfer_deciding(
         &sources,
         &destination,
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        ConflictDecision::once(ConflictResponse::Skip),
     );
 
     assert_eq!(outcome.skipped, [sources[0].clone()]);
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert_eq!(outcome.completed.len(), 1);
-    assert_eq!(fs::read(destination.join("taken.txt")).unwrap(), b"keep");
-    assert_eq!(fs::read(destination.join("free.txt")).unwrap(), b"free");
+    assert_eq!(read(destination.join("taken.txt")), b"keep");
+    assert_eq!(read(destination.join("free.txt")), b"free");
     assert_eq!(outcome.accounted(), sources.len());
 }
 
@@ -630,46 +552,32 @@ fn a_skipped_conflict_leaves_both_items_and_continues() {
 /// never reached is accounted for rather than silently forgotten.
 #[test]
 fn cancelling_a_conflict_accounts_for_every_unattempted_source() {
-    let (_root, sources, destination) = occupied_transfer_fixture();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Cancel,
-    ));
+    let (_sandbox, sources, destination) = occupied_transfer_fixture();
 
-    let outcome = transfer_paths_with_conflicts(
+    let outcome = transfer_deciding(
         &sources,
         &destination,
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        ConflictDecision::once(ConflictResponse::Cancel),
     );
 
     assert_eq!(outcome.cancelled, sources);
     assert!(outcome.completed.is_empty());
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert!(!destination.join("free.txt").exists());
     assert_eq!(outcome.accounted(), sources.len());
 }
 
 #[test]
 fn renaming_resolves_a_conflict_without_touching_the_occupant() {
-    let (_root, sources, destination) = occupied_transfer_fixture();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Rename(OsStr::new("renamed.txt").to_os_string()),
-    ));
+    let (_sandbox, sources, destination) = occupied_transfer_fixture();
+    let rename = ConflictDecision::once(ConflictResponse::Rename("renamed.txt".into()));
 
-    let outcome = transfer_paths_with_conflicts(
-        &sources,
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = transfer_deciding(&sources, &destination, TransferMode::Copy, rename);
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-    assert_eq!(fs::read(destination.join("taken.txt")).unwrap(), b"keep");
-    assert_eq!(fs::read(destination.join("renamed.txt")).unwrap(), b"new");
+    assert_clean(&outcome);
+    assert_eq!(read(destination.join("taken.txt")), b"keep");
+    assert_eq!(read(destination.join("renamed.txt")), b"new");
     assert_eq!(outcome.accounted(), sources.len());
 }
 
@@ -677,19 +585,10 @@ fn renaming_resolves_a_conflict_without_touching_the_occupant() {
 /// resolver cannot smuggle a path separator past the destination directory.
 #[test]
 fn a_rename_response_cannot_escape_the_destination_directory() {
-    let (_root, sources, destination) = occupied_transfer_fixture();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Rename(OsStr::new("../escaped.txt").to_os_string()),
-    ));
+    let (_sandbox, sources, destination) = occupied_transfer_fixture();
+    let rename = ConflictDecision::once(ConflictResponse::Rename("../escaped.txt".into()));
 
-    let outcome = transfer_paths_with_conflicts(
-        &sources,
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = transfer_deciding(&sources, &destination, TransferMode::Copy, rename);
 
     assert_eq!(outcome.failures.len(), 1);
     assert!(
@@ -703,48 +602,45 @@ fn a_rename_response_cannot_escape_the_destination_directory() {
 
 /// A crash cannot run the exit path, so the remnants it leaves have to be
 /// reclaimed later. A dead owner's quarantine can never be restored, which
-/// makes it unreachable garbage rather than data anyone might want.
+/// makes it unreachable garbage rather than data anyone might want — but a
+/// live owner (this process, or its parent) can still restore its own, and
+/// recovery remnants are never anyone's to sweep.
 #[test]
-fn quarantines_from_dead_processes_are_reclaimed_and_live_ones_are_left() {
-    let root = tempfile::tempdir().unwrap();
+fn the_abandoned_sweep_reclaims_only_dead_owners_undo_storage() {
+    let sandbox = Sandbox::new();
     // Process id 0 is never a real process, so it stands in for a Marcel
     // that is gone.
-    let abandoned = root.path().join(".marcel-replaced-0-0-report.txt");
-    let live = root.path().join(format!(
-        ".marcel-replaced-{}-0-report.txt",
-        std::process::id()
-    ));
-    let ordinary = root.path().join("report.txt");
-    for path in [&abandoned, &live, &ordinary] {
-        fs::write(path, b"payload").unwrap();
-    }
+    let abandoned = sandbox.file(".marcel-replaced-0-0-report.txt", b"overwritten");
+    let mine = sandbox.file(
+        &format!(".marcel-replaced-{}-0-report.txt", std::process::id()),
+        b"payload",
+    );
+    let parents = sandbox.file(
+        &format!(
+            ".marcel-replaced-{}-0-report.txt",
+            std::os::unix::process::parent_id()
+        ),
+        b"payload",
+    );
+    let preserved = sandbox.file(".marcel-recovered-0-report.txt", b"ORIGINAL");
+    let ordinary = sandbox.file("report.txt", b"payload");
 
-    let released = reclaim_abandoned_quarantines(root.path());
+    assert_eq!(reclaim_abandoned_quarantines(sandbox.root()), 1);
 
-    assert_eq!(released, 1);
-    assert!(!abandoned.exists(), "a dead owner's quarantine is garbage");
     assert!(
-        live.exists(),
+        !abandoned.exists(),
+        "a dead owner's undo storage is garbage"
+    );
+    assert!(
+        mine.exists(),
         "this process can still undo, so its quarantine stays"
     );
+    assert!(
+        parents.exists(),
+        "liveness is consulted, not equality with this process"
+    );
+    assert_eq!(read(&preserved), b"ORIGINAL");
     assert!(ordinary.exists(), "user data is never touched");
-}
-
-/// A live second Marcel can still restore its own replacements, so its
-/// quarantines must survive another instance listing the same directory.
-#[test]
-fn a_running_owners_quarantine_is_never_reclaimed() {
-    let root = tempfile::tempdir().unwrap();
-    // The test process itself is a live owner that is not this process id
-    // only in the sense that the check must consult liveness, not equality.
-    let parent = std::os::unix::process::parent_id();
-    let live = root
-        .path()
-        .join(format!(".marcel-replaced-{parent}-0-report.txt"));
-    fs::write(&live, b"payload").unwrap();
-
-    assert_eq!(reclaim_abandoned_quarantines(root.path()), 0);
-    assert!(live.exists());
 }
 
 /// The defect this pair of names exists to prevent: a transfer that fails
@@ -752,28 +648,15 @@ fn a_running_owners_quarantine_is_never_reclaimed() {
 /// is holding the user's only copy in storage a later Marcel would sweep.
 #[test]
 fn a_failed_restoration_preserves_the_original_in_recovery_storage() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(source_dir.join("report.txt"), b"NEW").unwrap();
-    fs::write(destination.join("report.txt"), b"ORIGINAL").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source/report.txt", b"NEW");
+    sandbox.file("destination/report.txt", b"ORIGINAL");
+    let destination = sandbox.path("destination");
 
     // One name, three renames: the quarantine succeeds because it targets a
     // hidden name, then publication and restoration both fail.
     let _fault = fault::fail_renames_to("report.txt");
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("report.txt")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&source), &destination);
 
     assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
     let message = &outcome.failures[0].message;
@@ -793,47 +676,26 @@ fn a_failed_restoration_preserves_the_original_in_recovery_storage() {
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
     assert_eq!(preserved.len(), 1, "{preserved:?}");
-    assert_eq!(fs::read(&preserved[0]).unwrap(), b"ORIGINAL");
-}
-
-/// Recovery storage exists precisely because no rule can prove it is
-/// unwanted, so the sweep that reclaims abandoned undo storage must not
-/// touch it at any process id.
-#[test]
-fn the_abandoned_sweep_leaves_recovery_remnants_alone() {
-    let root = tempfile::tempdir().unwrap();
-    let preserved = root.path().join(".marcel-recovered-0-report.txt");
-    let abandoned = root.path().join(".marcel-replaced-0-0-report.txt");
-    fs::write(&preserved, b"ORIGINAL").unwrap();
-    fs::write(&abandoned, b"overwritten").unwrap();
-
-    assert_eq!(reclaim_abandoned_quarantines(root.path()), 1);
-    assert!(
-        !abandoned.exists(),
-        "a dead owner's undo storage is garbage"
-    );
-    assert_eq!(fs::read(&preserved).unwrap(), b"ORIGINAL");
+    assert_eq!(read(&preserved[0]), b"ORIGINAL");
 }
 
 /// Marcel created the quarantine path by atomic rename, which says who held
 /// it then and nothing about who holds it at eviction.
 #[test]
 fn quarantine_deletion_refuses_an_object_it_did_not_record() {
-    let root = tempfile::tempdir().unwrap();
-    let quarantine = root.path().join(".marcel-replaced-1-0-report.txt");
-    fs::write(&quarantine, b"ORIGINAL").unwrap();
-    let identity = FileIdentity::read(&quarantine).unwrap();
+    let sandbox = Sandbox::new();
+    let quarantine = sandbox.file(".marcel-replaced-1-0-report.txt", b"ORIGINAL");
     let item = ReplacedItem {
-        path: root.path().join("report.txt"),
+        path: sandbox.path("report.txt"),
         quarantine: quarantine.clone(),
-        identity,
+        identity: FileIdentity::read(&quarantine).unwrap(),
     };
 
     // Someone else takes the name in the meantime.
     fs::remove_file(&quarantine).unwrap();
     fs::write(&quarantine, b"SOMEONE ELSE'S").unwrap();
     erase_replacement_quarantine(&item);
-    assert_eq!(fs::read(&quarantine).unwrap(), b"SOMEONE ELSE'S");
+    assert_eq!(read(&quarantine), b"SOMEONE ELSE'S");
 
     // The object it actually recorded is released as before.
     let recorded = ReplacedItem {
@@ -848,37 +710,19 @@ fn quarantine_deletion_refuses_an_object_it_did_not_record() {
 /// would have allowed fails.
 #[test]
 fn a_replacement_of_a_name_near_the_length_limit_succeeds() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
+    let sandbox = Sandbox::new();
     let long = "l".repeat(250);
-    fs::write(source_dir.join(&long), b"NEW").unwrap();
-    fs::write(destination.join(&long), b"ORIGINAL").unwrap();
+    let source = sandbox.file(&format!("source/{long}"), b"NEW");
+    let replaced = sandbox.file(&format!("destination/{long}"), b"ORIGINAL");
 
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join(&long)),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&source), &sandbox.path("destination"));
 
-    assert!(outcome.failures.is_empty(), "{outcome:?}");
-    assert_eq!(fs::read(destination.join(&long)).unwrap(), b"NEW");
-
+    assert_clean(&outcome);
+    assert_eq!(read(&replaced), b"NEW");
     // And the replacement is still reversible.
     undo_operation(&outcome.operation.expect("a replacement records undo")).unwrap();
-    assert_eq!(fs::read(destination.join(&long)).unwrap(), b"ORIGINAL");
-}
+    assert_eq!(read(&replaced), b"ORIGINAL");
 
-#[test]
-fn a_quarantine_name_stays_within_the_length_limit() {
     let name = quarantined_name(".marcel-replaced-4194304-", 9, OsStr::new(&"é".repeat(200)));
     use std::os::unix::ffi::OsStrExt as _;
     assert!(name.as_bytes().len() <= MAX_NAME_BYTES, "{name:?}");
@@ -893,16 +737,14 @@ fn a_quarantine_name_stays_within_the_length_limit() {
 /// a record Undo is entitled to delete.
 #[test]
 fn an_identity_refresh_refuses_an_object_it_did_not_commit() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("published.txt");
-    fs::write(&path, b"committed").unwrap();
+    let sandbox = Sandbox::new();
+    let path = sandbox.file("published.txt", b"committed");
     let mut snapshots = snapshot_tree(&path).unwrap();
 
     // The same path, a different object, published the way anything is
     // published atomically. Both files exist at once, so the replacement
     // cannot be handed the inode number the original still holds.
-    let replacement = root.path().join("elsewhere.txt");
-    fs::write(&replacement, b"someone else's").unwrap();
+    let replacement = sandbox.file("elsewhere.txt", b"someone else's");
     fs::rename(&replacement, &path).unwrap();
     assert!(
         !refresh_snapshot_identities(&mut snapshots),
@@ -923,8 +765,8 @@ fn marcel_working_names_are_recognized_without_catching_user_data() {
     ] {
         assert!(is_internal_working_name(OsStr::new(name)), "{name}");
     }
+    // Recovery guidance points the user straight at the first of these.
     for name in [
-        // Recovery guidance points the user straight at these.
         ".marcel-delete-1-0-report.txt",
         "report.txt",
         ".hidden",
@@ -939,31 +781,18 @@ fn marcel_working_names_are_recognized_without_catching_user_data() {
 /// nobody would ever collect.
 #[test]
 fn evicting_a_record_releases_the_data_it_was_holding() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(source_dir.join("report.txt"), b"replacement").unwrap();
-    fs::write(destination.join("report.txt"), b"the original").unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("report.txt")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source/report.txt", b"replacement");
+    sandbox.file("destination/report.txt", b"the original");
+    let destination = sandbox.path("destination");
+    let outcome = replacing(std::slice::from_ref(&source), &destination);
     let replacing = outcome.operation.expect("a replacement retains undo");
     assert!(!no_replacement_quarantines(&destination));
 
     let mut journal = OperationJournal::new(1);
     assert!(journal.record(replacing).is_empty());
     // A second record displaces the first, which can now never be undone.
-    let evicted = journal.record(recorded(create_directory(root.path(), "later").unwrap()));
+    let evicted = journal.record(recorded(create_directory(sandbox.root(), "later").unwrap()));
 
     assert_eq!(evicted.len(), 1);
     for record in &evicted {
@@ -974,48 +803,26 @@ fn evicting_a_record_releases_the_data_it_was_holding() {
         "an unreachable record must not keep holding disk"
     );
     // The replacement itself is untouched; only its way back is gone.
-    assert_eq!(
-        fs::read(destination.join("report.txt")).unwrap(),
-        b"replacement"
-    );
+    assert_eq!(read(destination.join("report.txt")), b"replacement");
 }
 
 /// The whole promise of replacement: what it displaced comes back. Nautilus
 /// overwrites in place, so its undo cannot do this at all.
 #[test]
 fn undoing_a_replacement_puts_the_displaced_file_back() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(source_dir.join("report.txt"), b"replacement").unwrap();
-    fs::write(destination.join("report.txt"), b"the original").unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source/report.txt", b"replacement");
+    let replaced = sandbox.file("destination/report.txt", b"the original");
+    let destination = sandbox.path("destination");
 
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("report.txt")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&source), &destination);
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert!(!outcome.undo_unavailable);
+    assert_eq!(read(&replaced), b"replacement");
+    undo_operation(&outcome.operation.expect("a replacement retains undo")).unwrap();
     assert_eq!(
-        fs::read(destination.join("report.txt")).unwrap(),
-        b"replacement"
-    );
-    let operation = outcome.operation.expect("a replacement retains undo");
-
-    undo_operation(&operation).unwrap();
-
-    assert_eq!(
-        fs::read(destination.join("report.txt")).unwrap(),
+        read(&replaced),
         b"the original",
         "undo must restore what the replacement displaced"
     );
@@ -1026,33 +833,19 @@ fn undoing_a_replacement_puts_the_displaced_file_back() {
 /// rather than leaving the destination empty.
 #[test]
 fn a_failed_replacement_restores_what_it_displaced() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
+    let sandbox = Sandbox::new();
     // A socket cannot be copied, so the transfer fails after the
     // destination has already been moved aside.
-    let source = source_dir.join("payload");
-    fs::create_dir(&source).unwrap();
-    let _listener = std::os::unix::net::UnixListener::bind(source.join("daemon.sock")).unwrap();
-    fs::write(destination.join("payload"), b"the original").unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
+    let source = sandbox.dir("source/payload");
+    let _listener = sandbox.socket("source/payload/daemon.sock");
+    let replaced = sandbox.file("destination/payload", b"the original");
+    let destination = sandbox.path("destination");
 
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&source), &destination);
 
     assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
     assert_eq!(
-        fs::read(destination.join("payload")).unwrap(),
+        read(&replaced),
         b"the original",
         "a failed replacement must not consume the original"
     );
@@ -1063,38 +856,28 @@ fn a_failed_replacement_restores_what_it_displaced() {
 /// being reversible, and the quarantine is released rather than held.
 #[test]
 fn an_oversized_replacement_succeeds_without_undo() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(source_dir.join("blob.bin"), b"replacement").unwrap();
-    fs::write(destination.join("blob.bin"), vec![0_u8; 4096]).unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-
-    let outcome = Transfer::new(
-        std::slice::from_ref(&source_dir.join("blob.bin")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_budget(TransferBudget {
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source/blob.bin", b"replacement");
+    let replaced = sandbox.file("destination/blob.bin", vec![0_u8; 4096]);
+    let destination = sandbox.path("destination");
+    let budget = TransferBudget {
         replacement_undo_byte_limit: 1024,
         ..TransferBudget::default()
-    })
-    .run(&mut policy);
+    };
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    let outcome = budgeted(
+        std::slice::from_ref(&source),
+        &destination,
+        TransferMode::Copy,
+        budget,
+    );
+
+    assert_clean(&outcome);
     assert!(
         outcome.undo_unavailable,
         "an oversized replacement cannot be undone"
     );
-    assert_eq!(
-        fs::read(destination.join("blob.bin")).unwrap(),
-        b"replacement"
-    );
+    assert_eq!(read(&replaced), b"replacement");
     assert!(
         no_replacement_quarantines(&destination),
         "an unreachable quarantine must be released, not left on disk"
@@ -1105,83 +888,52 @@ fn an_oversized_replacement_succeeds_without_undo() {
 /// destination already holds, even when the source has nothing to add.
 #[test]
 fn merging_an_empty_directory_keeps_the_destination_intact() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("shared")).unwrap();
-    fs::create_dir_all(destination.join("shared")).unwrap();
-    fs::write(destination.join("shared/keep.txt"), b"keep").unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::for_all(
-        ConflictResponse::Replace,
-    ));
+    let sandbox = Sandbox::new();
+    let shared = sandbox.dir("source/shared");
+    let kept = sandbox.file("destination/shared/keep.txt", b"keep");
+    let merge_all = ConflictDecision::for_all(ConflictResponse::Replace);
 
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("shared")),
-        &destination,
+    let outcome = transfer_deciding(
+        std::slice::from_ref(&shared),
+        &sandbox.path("destination"),
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        merge_all,
     );
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-    assert_eq!(
-        fs::read(destination.join("shared/keep.txt")).unwrap(),
-        b"keep"
-    );
+    assert_clean(&outcome);
+    assert_eq!(read(&kept), b"keep");
     // Nothing was added, so there is nothing to undo.
     assert!(outcome.operation.is_none());
-}
-
-fn no_replacement_quarantines(directory: &Path) -> bool {
-    fs::read_dir(directory)
-        .unwrap()
-        .flatten()
-        .all(|entry| !is_replacement_quarantine_name(&entry.file_name()))
 }
 
 /// Renaming everything keeps every source, each beside the item it
 /// collided with, without a single item being lost or overwritten.
 #[test]
 fn renaming_all_keeps_every_colliding_source() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    for name in ["a.txt", "b.txt"] {
-        fs::write(source_dir.join(name), b"new").unwrap();
-        fs::write(destination.join(name), b"existing").unwrap();
-    }
+    let sandbox = Sandbox::new();
+    let sources = vec![
+        sandbox.file("source/a.txt", b"new"),
+        sandbox.file("source/b.txt", b"new"),
+    ];
+    sandbox.file("destination/a.txt", b"existing");
+    sandbox.file("destination/b.txt", b"existing");
     // Already occupied, so "a.txt" has to land past it.
-    fs::write(destination.join("a (2).txt"), b"existing too").unwrap();
-    let sources = vec![source_dir.join("a.txt"), source_dir.join("b.txt")];
-    let mut policy = answering(super::conflict::ConflictDecision::for_all(
-        ConflictResponse::AutoRename,
-    ));
+    sandbox.file("destination/a (2).txt", b"existing too");
+    let destination = sandbox.path("destination");
+    let rename_all = ConflictDecision::for_all(ConflictResponse::AutoRename);
 
-    let outcome = transfer_paths_with_conflicts(
-        &sources,
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = transfer_deciding(&sources, &destination, TransferMode::Copy, rename_all);
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert_eq!(outcome.completed.len(), 2);
     assert_eq!(outcome.accounted(), sources.len());
     // Nothing that was already there changed.
-    assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"existing");
-    assert_eq!(fs::read(destination.join("b.txt")).unwrap(), b"existing");
-    assert_eq!(
-        fs::read(destination.join("a (2).txt")).unwrap(),
-        b"existing too"
-    );
+    assert_eq!(read(destination.join("a.txt")), b"existing");
+    assert_eq!(read(destination.join("b.txt")), b"existing");
+    assert_eq!(read(destination.join("a (2).txt")), b"existing too");
     // Both sources arrived beside them.
-    assert_eq!(fs::read(destination.join("a (3).txt")).unwrap(), b"new");
-    assert_eq!(fs::read(destination.join("b (2).txt")).unwrap(), b"new");
+    assert_eq!(read(destination.join("a (3).txt")), b"new");
+    assert_eq!(read(destination.join("b (2).txt")), b"new");
 }
 
 /// Merging is the union of two trees: the destination keeps everything it
@@ -1189,114 +941,64 @@ fn renaming_all_keeps_every_colliding_source() {
 /// undo exact rather than approximate.
 #[test]
 fn merging_adds_what_is_missing_and_keeps_what_is_there() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
+    let sandbox = Sandbox::new();
     // Source tree: a colliding file, a new file, a colliding subdirectory
     // holding a new file, and a wholly new subdirectory.
-    fs::create_dir_all(source_dir.join("photos/holiday")).unwrap();
-    fs::create_dir_all(source_dir.join("photos/new-album")).unwrap();
-    fs::write(source_dir.join("photos/shared.txt"), b"NEW").unwrap();
-    fs::write(source_dir.join("photos/only-in-source.txt"), b"NEW").unwrap();
-    fs::write(source_dir.join("photos/holiday/beach.txt"), b"NEW").unwrap();
-    fs::write(source_dir.join("photos/new-album/cover.txt"), b"NEW").unwrap();
+    let photos = sandbox.dir("source/photos");
+    sandbox.file("source/photos/shared.txt", b"NEW");
+    sandbox.file("source/photos/only-in-source.txt", b"NEW");
+    sandbox.file("source/photos/holiday/beach.txt", b"NEW");
+    sandbox.file("source/photos/new-album/cover.txt", b"NEW");
     // Destination tree: the same directory, one colliding file, one of its
     // own, and the colliding subdirectory with its own contents.
-    fs::create_dir_all(destination.join("photos/holiday")).unwrap();
-    fs::write(destination.join("photos/shared.txt"), b"ORIGINAL").unwrap();
-    fs::write(
-        destination.join("photos/only-in-destination.txt"),
-        b"ORIGINAL",
-    )
-    .unwrap();
-    fs::write(destination.join("photos/holiday/sunset.txt"), b"ORIGINAL").unwrap();
+    sandbox.file("destination/photos/shared.txt", b"ORIGINAL");
+    sandbox.file("destination/photos/only-in-destination.txt", b"ORIGINAL");
+    sandbox.file("destination/photos/holiday/sunset.txt", b"ORIGINAL");
+    let merged = sandbox.path("destination/photos");
 
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("photos")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&photos), &sandbox.path("destination"));
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-    let merged = destination.join("photos");
-    // Everything the destination already had is untouched.
-    assert_eq!(fs::read(merged.join("shared.txt")).unwrap(), b"ORIGINAL");
-    assert_eq!(
-        fs::read(merged.join("only-in-destination.txt")).unwrap(),
-        b"ORIGINAL"
-    );
-    assert_eq!(
-        fs::read(merged.join("holiday/sunset.txt")).unwrap(),
-        b"ORIGINAL"
-    );
-    // Everything it lacked has arrived, at every depth.
-    assert_eq!(fs::read(merged.join("only-in-source.txt")).unwrap(), b"NEW");
-    assert_eq!(fs::read(merged.join("holiday/beach.txt")).unwrap(), b"NEW");
-    assert_eq!(
-        fs::read(merged.join("new-album/cover.txt")).unwrap(),
-        b"NEW"
-    );
+    assert_clean(&outcome);
+    let untouched = || {
+        assert_eq!(read(merged.join("shared.txt")), b"ORIGINAL");
+        assert_eq!(read(merged.join("only-in-destination.txt")), b"ORIGINAL");
+        assert_eq!(read(merged.join("holiday/sunset.txt")), b"ORIGINAL");
+    };
+    // Everything the destination already had is untouched, and everything
+    // it lacked has arrived, at every depth.
+    untouched();
+    assert_eq!(read(merged.join("only-in-source.txt")), b"NEW");
+    assert_eq!(read(merged.join("holiday/beach.txt")), b"NEW");
+    assert_eq!(read(merged.join("new-album/cover.txt")), b"NEW");
 
     // Undo removes exactly what arrived and nothing else.
-    let operation = outcome.operation.expect("a merge retains undo");
-    undo_operation(&operation).unwrap();
-
-    assert_eq!(fs::read(merged.join("shared.txt")).unwrap(), b"ORIGINAL");
-    assert_eq!(
-        fs::read(merged.join("only-in-destination.txt")).unwrap(),
-        b"ORIGINAL"
-    );
-    assert_eq!(
-        fs::read(merged.join("holiday/sunset.txt")).unwrap(),
-        b"ORIGINAL"
-    );
+    undo_operation(&outcome.operation.expect("a merge retains undo")).unwrap();
+    untouched();
     assert!(!merged.join("only-in-source.txt").exists());
     assert!(!merged.join("holiday/beach.txt").exists());
     assert!(!merged.join("new-album").exists());
     // The source is a copy source, so it is left exactly as it was.
-    assert_eq!(
-        fs::read(source_dir.join("photos/shared.txt")).unwrap(),
-        b"NEW"
-    );
+    assert_eq!(read(photos.join("shared.txt")), b"NEW");
 }
 
 /// Undo of a merge validates each item on its own, so something added
 /// inside the merged tree afterwards is left alone rather than deleted.
 #[test]
 fn undoing_a_merge_leaves_later_additions_alone() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("photos")).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
-    fs::write(source_dir.join("photos/arrived.txt"), b"NEW").unwrap();
+    let sandbox = Sandbox::new();
+    let photos = sandbox.dir("source/photos");
+    sandbox.file("source/photos/arrived.txt", b"NEW");
+    sandbox.dir("destination/photos");
 
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("photos")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&photos), &sandbox.path("destination"));
     let operation = outcome.operation.expect("a merge retains undo");
     // Someone adds a file to the merged directory afterwards.
-    let later = destination.join("photos/added-later.txt");
-    fs::write(&later, b"MINE").unwrap();
+    let later = sandbox.file("destination/photos/added-later.txt", b"MINE");
 
     undo_operation(&operation).unwrap();
 
-    assert!(!destination.join("photos/arrived.txt").exists());
-    assert_eq!(fs::read(&later).unwrap(), b"MINE");
+    assert!(!sandbox.path("destination/photos/arrived.txt").exists());
+    assert_eq!(read(&later), b"MINE");
 }
 
 /// The merge's removals commit one at a time, so an undo that will refuse
@@ -1305,30 +1007,20 @@ fn undoing_a_merge_leaves_later_additions_alone() {
 /// record that could never validate again.
 #[test]
 fn copy_undo_with_a_merge_refuses_a_modified_output_before_removing_anything() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("new_item")).unwrap();
-    fs::create_dir_all(source_dir.join("photos")).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
-    fs::write(source_dir.join("new_item/inside.txt"), b"NEW").unwrap();
-    fs::write(source_dir.join("photos/arrived.txt"), b"NEW").unwrap();
+    let sandbox = Sandbox::new();
+    sandbox.file("source/new_item/inside.txt", b"NEW");
+    sandbox.file("source/photos/arrived.txt", b"NEW");
+    sandbox.dir("destination/photos");
+    let sources = [
+        sandbox.path("source/new_item"),
+        sandbox.path("source/photos"),
+    ];
 
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        &[source_dir.join("new_item"), source_dir.join("photos")],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(&sources, &sandbox.path("destination"));
     let operation = outcome.operation.expect("the transfer retains undo");
     // Someone adds a file to the copied output afterwards, so its
     // recorded tree no longer matches the disk.
-    fs::write(destination.join("new_item/added-later.txt"), b"MINE").unwrap();
+    sandbox.file("destination/new_item/added-later.txt", b"MINE");
 
     let result = undo_operation(&operation);
 
@@ -1337,7 +1029,7 @@ fn copy_undo_with_a_merge_refuses_a_modified_output_before_removing_anything() {
         "a refusal raised before anything was removed must stay retryable: {result:?}"
     );
     assert_eq!(
-        fs::read(destination.join("photos/arrived.txt")).unwrap(),
+        read(sandbox.path("destination/photos/arrived.txt")),
         b"NEW",
         "the merge's additions must survive a refused undo"
     );
@@ -1349,57 +1041,41 @@ fn copy_undo_with_a_merge_refuses_a_modified_output_before_removing_anything() {
 /// validate again.
 #[test]
 fn copy_undo_that_removed_merge_additions_discards_rather_than_claiming_no_effect() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    if rustix::process::geteuid().is_root() {
-        // Permission bits do not constrain root, so the removal failure
-        // this test depends on cannot be provoked.
+    if skip_as_root() {
         return;
     }
+    let sandbox = Sandbox::new();
+    let sources = [
+        sandbox.file("source/new_item.txt", b"NEW"),
+        sandbox.dir("source/photos"),
+    ];
+    sandbox.file("source/photos/arrived.txt", b"NEW");
+    sandbox.dir("destination/photos");
+    let destination = sandbox.path("destination");
 
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(&source_dir).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
-    fs::write(source_dir.join("new_item.txt"), b"NEW").unwrap();
-    fs::create_dir(source_dir.join("photos")).unwrap();
-    fs::write(source_dir.join("photos/arrived.txt"), b"NEW").unwrap();
-
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        &[source_dir.join("new_item.txt"), source_dir.join("photos")],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(&sources, &destination);
     let operation = outcome.operation.expect("the transfer retains undo");
 
     // The merge's additions can still be removed, but the copied output
     // cannot leave its now read-only parent.
-    fs::set_permissions(&destination, fs::Permissions::from_mode(0o555)).unwrap();
+    seal(&destination, true);
     let result = undo_operation(&operation);
-    fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
+    seal(&destination, false);
 
     let MutationOutcome::Discarded { changes, .. } = result else {
         panic!("an undo that removed the merge's additions must discard: {result:?}");
     };
+    let arrived = destination.join("photos/arrived.txt");
     assert!(
-        changes
-            .removed
-            .contains(&destination.join("photos/arrived.txt")),
+        changes.removed.contains(&arrived),
         "the removals that committed must be reported: {changes:?}"
     );
     assert!(
-        !destination.join("photos/arrived.txt").exists(),
+        !arrived.exists(),
         "this scenario depends on the merge's additions being removed"
     );
     assert_eq!(
-        fs::read(destination.join("new_item.txt")).unwrap(),
+        read(destination.join("new_item.txt")),
         b"NEW",
         "the copied output could not be removed and must survive"
     );
@@ -1410,47 +1086,36 @@ fn copy_undo_that_removed_merge_additions_discards_rather_than_claiming_no_effec
 /// while half a merge sits in the destination with no way to take it back.
 #[test]
 fn a_merge_stopped_by_failure_records_what_it_added() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("photos/album")).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
-    fs::write(destination.join("photos/keep.txt"), b"ORIGINAL").unwrap();
-    fs::write(source_dir.join("photos/arrives.txt"), b"NEW").unwrap();
-    fs::write(source_dir.join("photos/blocked.txt"), b"NEW").unwrap();
-    fs::write(source_dir.join("photos/album/inside.txt"), b"NEW").unwrap();
+    let sandbox = Sandbox::new();
+    let photos = sandbox.dir("source/photos");
+    sandbox.file("source/photos/arrives.txt", b"NEW");
+    sandbox.file("source/photos/blocked.txt", b"NEW");
+    sandbox.file("source/photos/album/inside.txt", b"NEW");
+    let kept = sandbox.file("destination/photos/keep.txt", b"ORIGINAL");
+    let merged = sandbox.path("destination/photos");
 
     // Publishing this one leaf fails, after the merge has already created a
     // directory and published a file.
     let _fault = fault::fail_renames_to("blocked.txt");
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("photos")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
-    );
+    let outcome = replacing(std::slice::from_ref(&photos), &sandbox.path("destination"));
 
     assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
     assert!(outcome.completed.is_empty(), "{outcome:?}");
-    let merged = destination.join("photos");
-    assert_eq!(fs::read(merged.join("arrives.txt")).unwrap(), b"NEW");
+    assert_eq!(read(merged.join("arrives.txt")), b"NEW");
     assert!(merged.join("album").is_dir());
 
     // The partial merge is describable, so Undo can take back exactly what
     // arrived and leave what the destination already had.
-    let operation = outcome
-        .operation
-        .expect("a partial merge still records its additions");
-    undo_operation(&operation).unwrap();
+    undo_operation(
+        &outcome
+            .operation
+            .expect("a partial merge still records its additions"),
+    )
+    .unwrap();
 
     assert!(!merged.join("arrives.txt").exists());
     assert!(!merged.join("album").exists());
-    assert_eq!(fs::read(merged.join("keep.txt")).unwrap(), b"ORIGINAL");
+    assert_eq!(read(&kept), b"ORIGINAL");
 }
 
 /// Cancelling is an answer, not a fault. A merge that reports cancellation
@@ -1458,25 +1123,18 @@ fn a_merge_stopped_by_failure_records_what_it_added() {
 /// continue attempts work they just stopped.
 #[test]
 fn a_cancelled_merge_is_reported_as_cancellation() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("photos")).unwrap();
-    fs::create_dir(source_dir.join("later")).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
-    fs::write(source_dir.join("photos/arrives.txt"), b"NEW").unwrap();
+    let sandbox = Sandbox::new();
+    let sources = vec![sandbox.dir("source/photos"), sandbox.dir("source/later")];
+    sandbox.file("source/photos/arrives.txt", b"NEW");
+    sandbox.dir("destination/photos");
 
-    let mut policy = answering(super::conflict::ConflictDecision::for_all(
-        ConflictResponse::Replace,
-    ));
-    let sources = vec![source_dir.join("photos"), source_dir.join("later")];
     let outcome = transfer_paths_with_conflicts(
         &sources,
-        &destination,
+        &sandbox.path("destination"),
         TransferMode::Copy,
         Arc::new(AtomicBool::new(true)),
         Arc::new(TransferProgress::default()),
-        &mut policy,
+        &mut answering(ConflictDecision::for_all(ConflictResponse::Replace)),
     );
 
     assert!(
@@ -1484,43 +1142,43 @@ fn a_cancelled_merge_is_reported_as_cancellation() {
         "cancelling is not a failure: {outcome:?}"
     );
     assert_eq!(outcome.cancelled, sources, "{outcome:?}");
-    assert!(!destination.join("photos/arrives.txt").exists());
+    assert!(!sandbox.path("destination/photos/arrives.txt").exists());
 }
 
 /// The snapshot budget bounds one operation, so a merge cannot help itself
-/// to a fresh allowance per leaf. Past it the merge still happens and says
-/// it cannot be undone.
+/// to a fresh allowance per leaf — and a move never refuses for its sake,
+/// since a rename does not care how big the tree is. Past it the work still
+/// happens and says it cannot be undone.
 #[test]
-fn a_merge_past_the_snapshot_budget_succeeds_without_undo() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("photos")).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
+fn work_past_the_snapshot_budget_succeeds_without_undo() {
+    let sandbox = Sandbox::new();
+    let photos = sandbox.dir("source/photos");
+    let album = sandbox.dir("source/album");
+    let plain = sandbox.dir("source/plain");
     for index in 0..4 {
-        fs::write(source_dir.join(format!("photos/{index}.txt")), b"NEW").unwrap();
+        sandbox.file(&format!("source/photos/{index}.txt"), b"NEW");
+        sandbox.file(&format!("source/album/{index}.txt"), b"payload");
     }
-
-    let mut policy = answering(super::conflict::ConflictDecision::once(
-        ConflictResponse::Replace,
-    ));
-    let outcome = Transfer::new(
-        std::slice::from_ref(&source_dir.join("photos")),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_budget(TransferBudget {
+    sandbox.file("source/plain/one", b"1");
+    sandbox.file("source/plain/two", b"2");
+    sandbox.dir("destination/photos");
+    let destination = sandbox.path("destination");
+    let budget = TransferBudget {
         undo_snapshot_limit: 2,
         ..TransferBudget::default()
-    })
-    .run(&mut policy);
+    };
 
-    assert!(outcome.failures.is_empty(), "{outcome:?}");
-    assert_eq!(outcome.completed.len(), 1, "{outcome:?}");
+    let merged = budgeted(
+        std::slice::from_ref(&photos),
+        &destination,
+        TransferMode::Copy,
+        budget,
+    );
+    assert_clean(&merged);
+    assert_eq!(merged.completed.len(), 1, "{merged:?}");
     assert!(
-        outcome.undo_unavailable,
-        "a merge past the budget is not undoable: {outcome:?}"
+        merged.undo_unavailable,
+        "a merge past the budget is not undoable: {merged:?}"
     );
     for index in 0..4 {
         assert!(
@@ -1528,78 +1186,55 @@ fn a_merge_past_the_snapshot_budget_succeeds_without_undo() {
             "the merge still happens"
         );
     }
-}
 
-/// Moving had no snapshot budget at all, so one rename could hold an
-/// arbitrarily large record. Bounding it must never refuse the move: a
-/// rename does not care how big the tree is, and refusing would be a worse
-/// answer than losing undo.
-#[test]
-fn a_move_past_the_snapshot_budget_succeeds_without_undo() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("album")).unwrap();
-    fs::create_dir(&destination).unwrap();
-    for index in 0..4 {
-        fs::write(source_dir.join(format!("album/{index}.txt")), b"payload").unwrap();
-    }
-
-    let outcome = Transfer::new(
-        std::slice::from_ref(&source_dir.join("album")),
+    let moved = budgeted(
+        std::slice::from_ref(&album),
         &destination,
         TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_budget(TransferBudget {
-        undo_snapshot_limit: 2,
-        ..TransferBudget::default()
-    })
-    .run(&mut ConflictPolicy::refusing());
-
-    assert!(outcome.failures.is_empty(), "{outcome:?}");
-    assert_eq!(outcome.completed.len(), 1, "{outcome:?}");
+        budget,
+    );
+    assert_clean(&moved);
+    assert_eq!(moved.completed.len(), 1, "{moved:?}");
     assert!(
-        outcome.undo_unavailable,
-        "a move past the budget is not undoable: {outcome:?}"
+        moved.undo_unavailable,
+        "a move past the budget is not undoable: {moved:?}"
     );
-    assert!(outcome.operation.is_none(), "{outcome:?}");
-    assert!(!source_dir.join("album").exists(), "the move still happens");
-    assert_eq!(
-        fs::read(destination.join("album/0.txt")).unwrap(),
-        b"payload"
+    assert!(moved.operation.is_none(), "{moved:?}");
+    assert!(!album.exists(), "the move still happens");
+    assert_eq!(read(destination.join("album/0.txt")), b"payload");
+
+    let copied = budgeted(
+        std::slice::from_ref(&plain),
+        &destination,
+        TransferMode::Copy,
+        budget,
     );
+    assert_clean(&copied);
+    assert!(copied.undo_unavailable);
+    assert!(copied.operation.is_none());
+    assert_eq!(read(destination.join("plain/one")), b"1");
+    assert_eq!(read(destination.join("plain/two")), b"2");
 }
 
 /// Moving cannot express a merge yet, so it refuses rather than discarding
 /// the tree the user expected to be joined.
 #[test]
 fn moving_a_directory_onto_a_directory_is_refused() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir_all(source_dir.join("photos")).unwrap();
-    fs::create_dir_all(destination.join("photos")).unwrap();
-    fs::write(destination.join("photos/keep.txt"), b"keep").unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::for_all(
-        ConflictResponse::Replace,
-    ));
+    let sandbox = Sandbox::new();
+    let photos = sandbox.dir("source/photos");
+    let kept = sandbox.file("destination/photos/keep.txt", b"keep");
+    let merge_all = ConflictDecision::for_all(ConflictResponse::Replace);
 
-    let outcome = transfer_paths_with_conflicts(
-        std::slice::from_ref(&source_dir.join("photos")),
-        &destination,
+    let outcome = transfer_deciding(
+        std::slice::from_ref(&photos),
+        &sandbox.path("destination"),
         TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        merge_all,
     );
 
     assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
-    assert_eq!(
-        fs::read(destination.join("photos/keep.txt")).unwrap(),
-        b"keep"
-    );
-    assert!(source_dir.join("photos").exists());
+    assert_eq!(read(&kept), b"keep");
+    assert!(photos.exists());
 }
 
 /// Dropping a selection onto the folder it already lives in asks for
@@ -1607,30 +1242,23 @@ fn moving_a_directory_onto_a_directory_is_refused() {
 /// reporting it as skipped would claim they declined something.
 #[test]
 fn moving_an_item_where_it_already_is_does_nothing() {
-    let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("folder");
-    fs::create_dir(&folder).unwrap();
-    let source = folder.join("report.txt");
-    fs::write(&source, b"payload").unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::for_all(
-        ConflictResponse::Replace,
-    ));
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("folder/report.txt", b"payload");
+    let replace_all = ConflictDecision::for_all(ConflictResponse::Replace);
 
-    let outcome = transfer_paths_with_conflicts(
+    let outcome = transfer_deciding(
         std::slice::from_ref(&source),
-        &folder,
+        &sandbox.path("folder"),
         TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        replace_all,
     );
 
     assert_eq!(outcome.already_in_place, std::slice::from_ref(&source));
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert!(outcome.skipped.is_empty());
     assert!(outcome.completed.is_empty());
     assert!(outcome.operation.is_none());
-    assert_eq!(fs::read(&source).unwrap(), b"payload");
+    assert_eq!(read(&source), b"payload");
     assert_eq!(outcome.accounted(), 1);
 }
 
@@ -1638,43 +1266,36 @@ fn moving_an_item_where_it_already_is_does_nothing() {
 /// and it has one sensible answer, so it is answered rather than asked.
 #[test]
 fn copying_an_item_into_its_own_folder_duplicates_it_without_asking() {
-    let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("folder");
-    fs::create_dir(&folder).unwrap();
-    let source = folder.join("report.txt");
-    fs::write(&source, b"payload").unwrap();
-    // A resolver that would panic if consulted: this must not ask.
-    let mut policy = ConflictPolicy::interactive(Arc::new(AlwaysAnswers(
-        super::conflict::ConflictDecision::once(ConflictResponse::Cancel),
-    )));
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("folder/report.txt", b"payload");
+    let folder = sandbox.path("folder");
+    // A resolver that would abandon the transfer if consulted: this must
+    // not ask.
+    let would_cancel = ConflictDecision::once(ConflictResponse::Cancel);
 
-    let outcome = transfer_paths_with_conflicts(
+    let outcome = transfer_deciding(
         std::slice::from_ref(&source),
         &folder,
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        would_cancel.clone(),
     );
 
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert_eq!(outcome.completed.len(), 1);
-    assert_eq!(fs::read(&source).unwrap(), b"payload");
+    assert_eq!(read(&source), b"payload");
     assert_eq!(
-        fs::read(folder.join("report (2).txt")).unwrap(),
+        read(folder.join("report (2).txt")),
         b"payload",
         "the duplicate lands beside the original"
     );
     // Duplicating again steps past the name it just created.
-    let outcome = transfer_paths_with_conflicts(
+    let outcome = transfer_deciding(
         std::slice::from_ref(&source),
         &folder,
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        would_cancel,
     );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&outcome);
     assert!(folder.join("report (3).txt").exists());
 }
 
@@ -1684,64 +1305,46 @@ fn copying_an_item_into_its_own_folder_duplicates_it_without_asking() {
 /// destroys the source, and duplicating is what was asked for.
 #[test]
 fn a_hardlink_to_the_source_is_recognized_as_the_same_object() {
-    let root = tempfile::tempdir().unwrap();
-    let source_dir = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_dir).unwrap();
-    fs::create_dir(&destination).unwrap();
-    let source = source_dir.join("report.pdf");
-    fs::write(&source, b"original").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source/report.pdf", b"original");
+    let destination = sandbox.dir("destination");
     // Same inode, different directory, same basename: the transfer would
     // land exactly on its own source.
     fs::hard_link(&source, destination.join("report.pdf")).unwrap();
-    let mut policy = answering(super::conflict::ConflictDecision::for_all(
-        ConflictResponse::Replace,
-    ));
+    let replace_all = ConflictDecision::for_all(ConflictResponse::Replace);
 
-    let moved = transfer_paths_with_conflicts(
+    let moved = transfer_deciding(
         std::slice::from_ref(&source),
         &destination,
         TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        replace_all.clone(),
     );
-
     assert_eq!(moved.failures.len(), 1, "{moved:?}");
     assert!(
         moved.failures[0].message.contains("over itself"),
         "{:?}",
         moved.failures
     );
-    assert_eq!(fs::read(&source).unwrap(), b"original");
+    assert_eq!(read(&source), b"original");
 
-    let copied = transfer_paths_with_conflicts(
+    let copied = transfer_deciding(
         std::slice::from_ref(&source),
         &destination,
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(TransferProgress::default()),
-        &mut policy,
+        replace_all,
     );
-
-    assert!(copied.failures.is_empty(), "{:?}", copied.failures);
-    assert_eq!(fs::read(&source).unwrap(), b"original");
+    assert_clean(&copied);
+    assert_eq!(read(&source), b"original");
     // The existing link is untouched and the duplicate lands beside it.
-    assert_eq!(
-        fs::read(destination.join("report.pdf")).unwrap(),
-        b"original"
-    );
-    assert_eq!(
-        fs::read(destination.join("report (2).pdf")).unwrap(),
-        b"original"
-    );
+    assert_eq!(read(destination.join("report.pdf")), b"original");
+    assert_eq!(read(destination.join("report (2).pdf")), b"original");
 }
 
 /// Cancelling the operation through the cancel flag must also account for
-/// the sources it never reached.
+/// the sources it never reached, and publishes nothing.
 #[test]
 fn a_cancelled_transfer_accounts_for_every_requested_source() {
-    let (_root, sources, destination) = occupied_transfer_fixture();
+    let (_sandbox, sources, destination) = occupied_transfer_fixture();
 
     let outcome = transfer_paths(
         &sources,
@@ -1752,70 +1355,45 @@ fn a_cancelled_transfer_accounts_for_every_requested_source() {
 
     assert_eq!(outcome.cancelled, sources);
     assert_eq!(outcome.accounted(), sources.len());
+    assert!(outcome.operation.is_none());
+    assert!(!destination.join("free.txt").exists());
 }
 
 #[test]
 fn copy_undo_refuses_a_modified_output() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("destination");
-    fs::write(&source, b"original").unwrap();
-    fs::create_dir(&destination).unwrap();
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    let operation = outcome.operation.unwrap();
-    fs::write(destination.join("source.txt"), b"changed").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source.txt", b"original");
+    let destination = sandbox.dir("destination");
+    let operation = copy(&[source], &destination).operation.unwrap();
+    let changed = sandbox.file("destination/source.txt", b"changed");
 
     assert!(undo_operation(&operation).is_err());
-    assert_eq!(
-        fs::read(destination.join("source.txt")).unwrap(),
-        b"changed"
-    );
+    assert_eq!(read(&changed), b"changed");
 }
 
 #[test]
 fn copy_undo_refuses_added_children_without_partially_removing_output() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source).unwrap();
-    fs::write(source.join("original.txt"), b"original").unwrap();
-    fs::create_dir(&destination).unwrap();
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    let operation = outcome.operation.unwrap();
-    let copied = destination.join("source");
-    fs::write(copied.join("added-later.txt"), b"keep").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    sandbox.file("source/original.txt", b"original");
+    let destination = sandbox.dir("destination");
+    let operation = copy(&[source], &destination).operation.unwrap();
+    let added = sandbox.file("destination/source/added-later.txt", b"keep");
 
     assert!(undo_operation(&operation).is_err());
-    assert_eq!(fs::read(copied.join("original.txt")).unwrap(), b"original");
-    assert_eq!(fs::read(copied.join("added-later.txt")).unwrap(), b"keep");
+    assert_eq!(read(destination.join("source/original.txt")), b"original");
+    assert_eq!(read(&added), b"keep");
 }
 
 #[test]
 fn copy_redo_refuses_new_source_children_without_publishing_output() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source).unwrap();
-    fs::write(source.join("original.txt"), b"original").unwrap();
-    fs::create_dir(&destination).unwrap();
-    let outcome = transfer_paths(
-        std::slice::from_ref(&source),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    sandbox.file("source/original.txt", b"original");
+    let destination = sandbox.dir("destination");
+    let outcome = copy(std::slice::from_ref(&source), &destination);
     let redo_record = recorded(undo_operation(&outcome.operation.unwrap()).unwrap());
-    fs::write(source.join("added-later.txt"), b"new").unwrap();
+    sandbox.file("source/added-later.txt", b"new");
 
     assert!(redo_operation(&redo_record).is_err());
     assert!(!destination.join("source").exists());
@@ -1823,88 +1401,55 @@ fn copy_redo_refuses_new_source_children_without_publishing_output() {
 
 #[test]
 fn move_supports_identity_checked_undo_and_redo() {
-    let root = tempfile::tempdir().unwrap();
-    let source_parent = root.path().join("source");
-    let destination = root.path().join("destination");
-    fs::create_dir(&source_parent).unwrap();
-    fs::create_dir(&destination).unwrap();
-    let source = source_parent.join("move-me.txt");
-    fs::write(&source, b"contents").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source/move-me.txt", b"contents");
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&source),
-        &destination,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    let outcome = mv(std::slice::from_ref(&source), &destination);
+    assert_clean(&outcome);
     let operation = outcome.operation.unwrap();
     assert!(!source.exists());
     assert_eq!(
         operation.forward_directory_changes(),
         DirectoryChanges {
             removed: vec![source.clone()],
-            upserted: vec![destination.join("move-me.txt")],
+            upserted: vec![destination.join("move-me.txt")]
         }
     );
 
     let redo_record = recorded(undo_operation(&operation).unwrap());
-    assert_eq!(fs::read(&source).unwrap(), b"contents");
+    assert_eq!(read(&source), b"contents");
     let redone = recorded(redo_operation(&redo_record).unwrap());
-    assert_eq!(fs::read(redone.path()).unwrap(), b"contents");
+    assert_eq!(read(redone.path()), b"contents");
     assert!(!source.exists());
 }
 
 #[test]
 fn move_refuses_to_put_a_directory_inside_itself() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    let descendant = source.join("descendant");
-    fs::create_dir(&source).unwrap();
-    fs::create_dir(&descendant).unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    let descendant = sandbox.dir("source/descendant");
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&source),
-        &descendant,
-        TransferMode::Move,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = mv(std::slice::from_ref(&source), &descendant);
     assert_eq!(outcome.failures.len(), 1);
     assert!(source.is_dir());
 }
 
 #[test]
-fn cancelled_transfer_does_not_publish_an_output() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("destination");
-    fs::write(&source, b"contents").unwrap();
-    fs::create_dir(&destination).unwrap();
-    let cancelled = Arc::new(AtomicBool::new(true));
-
-    let outcome = transfer_paths(&[source], &destination, TransferMode::Copy, cancelled);
-    assert!(outcome.operation.is_none());
-    assert!(!destination.join("source.txt").exists());
-}
-
-#[test]
 fn copy_reports_item_and_byte_progress() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("destination");
-    fs::write(&source, b"marcel").unwrap();
-    fs::create_dir(&destination).unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source.txt", b"marcel");
     let progress = Arc::new(TransferProgress::default());
 
     let outcome = transfer_paths_with_progress(
         &[source],
-        &destination,
+        &sandbox.dir("destination"),
         TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
+        no_cancel(),
         progress.clone(),
     );
 
-    assert!(outcome.failures.is_empty());
+    assert_clean(&outcome);
     assert_eq!(
         progress.snapshot(),
         TransferProgressSnapshot {
@@ -1922,17 +1467,11 @@ fn copy_reports_item_and_byte_progress() {
 fn copy_preserves_file_and_directory_modes_and_times() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = tempfile::tempdir().unwrap();
-    let source_parent = root.path().join("source");
-    let destination = root.path().join("destination");
-    let tree = source_parent.join("tree");
-    let file = tree.join("script.sh");
-    fs::create_dir_all(&tree).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(&file, b"#!/bin/sh\n").unwrap();
+    let sandbox = Sandbox::new();
+    let tree = sandbox.dir("source/tree");
+    let file = sandbox.file("source/tree/script.sh", b"#!/bin/sh\n");
     fs::set_permissions(&tree, fs::Permissions::from_mode(0o750)).unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
-
     let accessed = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
     let modified = UNIX_EPOCH + Duration::from_secs(1_650_000_123);
     let times = fs::FileTimes::new()
@@ -1940,19 +1479,12 @@ fn copy_preserves_file_and_directory_modes_and_times() {
         .set_modified(modified);
     fs::File::open(&file).unwrap().set_times(times).unwrap();
     fs::File::open(&tree).unwrap().set_times(times).unwrap();
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&tree),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&copy(std::slice::from_ref(&tree), &destination));
 
-    let copied_tree = destination.join("tree");
-    let copied_file = copied_tree.join("script.sh");
-    let tree_metadata = fs::metadata(copied_tree).unwrap();
-    let file_metadata = fs::metadata(copied_file).unwrap();
+    let tree_metadata = fs::metadata(destination.join("tree")).unwrap();
+    let file_metadata = fs::metadata(destination.join("tree/script.sh")).unwrap();
     assert_eq!(tree_metadata.permissions().mode() & 0o7777, 0o750);
     assert_eq!(file_metadata.permissions().mode() & 0o7777, 0o640);
     assert_eq!(tree_metadata.modified().unwrap(), modified);
@@ -1962,23 +1494,15 @@ fn copy_preserves_file_and_directory_modes_and_times() {
 
 #[test]
 fn copy_preserves_supported_user_xattrs() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("destination");
-    fs::write(&source, b"contents").unwrap();
-    fs::create_dir(&destination).unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source.txt", b"contents");
     if let Err(error) = xattr::set(&source, "user.marcel-copy-test", b"kept") {
         assert!(xattrs_unsupported(&error));
         return;
     }
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&copy(&[source], &destination));
     assert_eq!(
         xattr::get(destination.join("source.txt"), "user.marcel-copy-test")
             .unwrap()
@@ -1991,12 +1515,10 @@ fn copy_preserves_supported_user_xattrs() {
 fn copy_preserves_posix_access_acl_xattr_when_supported() {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source.txt");
-    let destination = root.path().join("destination");
-    fs::write(&source, b"contents").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("source.txt", b"contents");
     fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
-    fs::create_dir(&destination).unwrap();
+    let destination = sandbox.dir("destination");
 
     let mut acl = 2_u32.to_le_bytes().to_vec();
     for (tag, permissions, id) in [
@@ -2025,13 +1547,7 @@ fn copy_preserves_posix_access_acl_xattr_when_supported() {
         .unwrap()
         .expect("ACL fixture disappeared");
 
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&copy(&[source], &destination));
     assert_eq!(
         xattr::get(destination.join("source.txt"), "system.posix_acl_access").unwrap(),
         Some(expected)
@@ -2042,28 +1558,21 @@ fn copy_preserves_posix_access_acl_xattr_when_supported() {
 fn copy_preserves_hardlinks_within_a_directory_tree() {
     use std::os::unix::fs::MetadataExt as _;
 
-    let root = tempfile::tempdir().unwrap();
-    let source_parent = root.path().join("source");
-    let destination = root.path().join("destination");
-    let tree = source_parent.join("tree");
-    fs::create_dir_all(&tree).unwrap();
-    fs::create_dir(&destination).unwrap();
-    fs::write(tree.join("first"), b"shared").unwrap();
+    let sandbox = Sandbox::new();
+    let tree = sandbox.dir("source/tree");
+    sandbox.file("source/tree/first", b"shared");
     fs::hard_link(tree.join("first"), tree.join("second")).unwrap();
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        std::slice::from_ref(&tree),
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    let outcome = copy(std::slice::from_ref(&tree), &destination);
+    assert_clean(&outcome);
 
     let first = fs::metadata(destination.join("tree/first")).unwrap();
     let second = fs::metadata(destination.join("tree/second")).unwrap();
-    assert_eq!(first.dev(), second.dev());
-    assert_eq!(first.ino(), second.ino());
-    assert_eq!(first.nlink(), 2);
+    assert_eq!(
+        (first.dev(), first.ino(), first.nlink()),
+        (second.dev(), second.ino(), 2)
+    );
     recorded(undo_operation(&outcome.operation.unwrap()).unwrap());
     assert!(!destination.join("tree").exists());
 }
@@ -2072,10 +1581,8 @@ fn copy_preserves_hardlinks_within_a_directory_tree() {
 fn copy_preserves_sparse_layout_when_extents_are_available() {
     use std::os::unix::fs::MetadataExt as _;
 
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("sparse.bin");
-    let destination = root.path().join("destination");
-    fs::create_dir(&destination).unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.path("sparse.bin");
     let mut file = fs::File::create(&source).unwrap();
     file.set_len(16 * 1024 * 1024).unwrap();
     file.write_all(b"start").unwrap();
@@ -2086,45 +1593,29 @@ fn copy_preserves_sparse_layout_when_extents_are_available() {
     if source_metadata.blocks() * 512 >= source_metadata.len() {
         return;
     }
+    let destination = sandbox.dir("destination");
 
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_clean(&copy(&[source], &destination));
 
     let copied = destination.join("sparse.bin");
     let copied_metadata = fs::metadata(&copied).unwrap();
     assert_eq!(copied_metadata.len(), source_metadata.len());
     assert!(copied_metadata.blocks() * 512 < copied_metadata.len());
     let mut copied_file = fs::File::open(copied).unwrap();
-    let mut start = [0; 5];
+    let (mut start, mut end) = ([0; 5], [0; 4]);
     copied_file.read_exact(&mut start).unwrap();
     copied_file.seek(io::SeekFrom::End(-4)).unwrap();
-    let mut end = [0; 4];
     copied_file.read_exact(&mut end).unwrap();
-    assert_eq!(&start, b"start");
-    assert_eq!(&end, b"end!");
+    assert_eq!((&start, &end), (b"start", b"end!"));
 }
 
 #[test]
 fn copy_rejects_special_files_without_publishing_them() {
-    use std::os::unix::net::UnixListener;
+    let sandbox = Sandbox::new();
+    let _listener = sandbox.socket("socket");
+    let destination = sandbox.dir("destination");
 
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("socket");
-    let destination = root.path().join("destination");
-    fs::create_dir(&destination).unwrap();
-    let _listener = UnixListener::bind(&source).unwrap();
-
-    let outcome = transfer_paths(
-        &[source],
-        &destination,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    );
+    let outcome = copy(&[sandbox.path("socket")], &destination);
     assert_eq!(outcome.failures.len(), 1);
     assert!(outcome.operation.is_none());
     assert!(!destination.join("socket").exists());
@@ -2132,41 +1623,16 @@ fn copy_rejects_special_files_without_publishing_them() {
 
 #[test]
 fn xattr_policy_includes_user_and_posix_acl_namespaces_only() {
-    assert!(supported_xattr_name(OsStr::new("user.comment")));
-    assert!(supported_xattr_name(OsStr::new("system.posix_acl_access")));
-    assert!(supported_xattr_name(OsStr::new("system.posix_acl_default")));
-    assert!(!supported_xattr_name(OsStr::new("security.selinux")));
-    assert!(!supported_xattr_name(OsStr::new("trusted.overlay")));
-}
-
-#[test]
-fn overflowing_snapshot_budget_keeps_the_copy_but_omits_excess_records() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    fs::create_dir(&source).unwrap();
-    fs::write(source.join("one"), b"1").unwrap();
-    fs::write(source.join("two"), b"2").unwrap();
-
-    let destination_parent = root.path().join("destination");
-    fs::create_dir(&destination_parent).unwrap();
-    let outcome = Transfer::new(
-        &[source],
-        &destination_parent,
-        TransferMode::Copy,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_budget(TransferBudget {
-        undo_snapshot_limit: 2,
-        ..TransferBudget::default()
-    })
-    .run(&mut ConflictPolicy::refusing());
-
-    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-    assert!(outcome.undo_unavailable);
-    assert!(outcome.operation.is_none());
-    let destination = destination_parent.join("source");
-    assert_eq!(fs::read(destination.join("one")).unwrap(), b"1");
-    assert_eq!(fs::read(destination.join("two")).unwrap(), b"2");
+    for name in [
+        "user.comment",
+        "system.posix_acl_access",
+        "system.posix_acl_default",
+    ] {
+        assert!(supported_xattr_name(OsStr::new(name)), "{name}");
+    }
+    for name in ["security.selinux", "trusted.overlay"] {
+        assert!(!supported_xattr_name(OsStr::new(name)), "{name}");
+    }
 }
 
 #[test]
@@ -2174,18 +1640,12 @@ fn archive_create_and_extract_support_identity_validated_undo_redo() {
     if super::archive::SevenZipBackend::discover().is_err() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("report.txt");
-    let archive = root.path().join("report.zip");
-    fs::write(&source, b"archive history").unwrap();
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("report.txt", b"archive history");
+    let archive = sandbox.path("report.zip");
 
     let created = recorded(
-        create_zip_operation(
-            std::slice::from_ref(&source),
-            &archive,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap(),
+        create_zip_operation(std::slice::from_ref(&source), &archive, no_cancel()).unwrap(),
     );
     assert!(archive.is_file());
     let undone = recorded(undo_operation(&created).unwrap());
@@ -2194,17 +1654,16 @@ fn archive_create_and_extract_support_identity_validated_undo_redo() {
     assert!(archive.is_file());
 
     fs::remove_file(&source).unwrap();
-    let extracted =
-        recorded(extract_archive_operation(&archive, Arc::new(AtomicBool::new(false))).unwrap());
-    assert_eq!(fs::read(&source).unwrap(), b"archive history");
+    let extracted = recorded(extract_archive_operation(&archive, no_cancel()).unwrap());
+    assert_eq!(read(&source), b"archive history");
     let undone = recorded(undo_operation(&extracted).unwrap());
     assert!(!source.exists());
     let redone = recorded(redo_operation(&undone).unwrap());
-    assert_eq!(fs::read(redone.path()).unwrap(), b"archive history");
+    assert_eq!(read(redone.path()), b"archive history");
 
     fs::write(redone.path(), b"changed").unwrap();
     assert!(undo_operation(&redone).is_err());
-    assert_eq!(fs::read(redone.path()).unwrap(), b"changed");
+    assert_eq!(read(redone.path()), b"changed");
 
     // Keep the compiler and test honest that the recreated record remains
     // a normal archive operation rather than a special test-only path.

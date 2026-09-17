@@ -678,57 +678,23 @@ fn map_backing_to_original(records: &[TrashRecord], path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
+    use crate::testing::{Sandbox, read, seal, skip_as_root};
 
-    #[test]
-    fn missing_home_trash_is_created_rather_than_failing_the_operation() {
-        // The `trash` crate creates `files/` and `info/` on demand but not the
-        // directory holding them, and resolving the Trash folders fails when it
-        // is absent — so on an account that has never trashed anything, every
-        // Trash operation failed until this directory existed.
-        let temp = tempfile::tempdir().unwrap();
-        let trash_dir = temp.path().join("Trash");
-        assert!(!trash_dir.exists());
-
-        ensure_trash_dir(&trash_dir);
-        assert!(trash_dir.is_dir());
-
-        // Idempotent, and it must not disturb what an existing Trash holds.
-        fs::create_dir_all(trash_dir.join("files")).unwrap();
-        File::create(trash_dir.join("files/kept.txt")).unwrap();
-        ensure_trash_dir(&trash_dir);
-        assert!(trash_dir.join("files/kept.txt").is_file());
-    }
-
-    #[test]
-    fn an_unwritable_parent_leaves_the_trash_directory_to_the_caller() {
-        // Best effort by design: the resolution that follows reports why it
-        // could not proceed, which beats an error raised here about a directory
-        // the user never asked for.
-        let temp = tempfile::tempdir().unwrap();
-        let blocked = temp.path().join("file-not-a-dir");
-        File::create(&blocked).unwrap();
-
-        ensure_trash_dir(&blocked.join("Trash"));
-        assert!(blocked.is_file());
-    }
-
-    fn seeded_record(root: &Path, original_parent: &Path, name: &str) -> TrashRecord {
-        let info_dir = root.join("info");
-        let files_dir = root.join("files");
-        fs::create_dir_all(&info_dir).unwrap();
-        fs::create_dir_all(&files_dir).unwrap();
-        let info_path = info_dir.join(format!("{name}.trashinfo"));
-        fs::write(
-            &info_path,
+    /// A Trash holding one entry for `name`, once at `original_parent`.
+    fn seeded_record(
+        sandbox: &Sandbox,
+        trash: &str,
+        original_parent: &Path,
+        name: &str,
+    ) -> TrashRecord {
+        let info_path = sandbox.file(
+            &format!("{trash}/info/{name}.trashinfo"),
             format!(
                 "[Trash Info]\nPath={}\nDeletionDate=2026-07-29T12:00:00\n",
                 original_parent.join(name).display()
             ),
-        )
-        .unwrap();
-        let backing_path = files_dir.join(name);
-        fs::write(&backing_path, b"payload").unwrap();
+        );
+        let backing_path = sandbox.file(&format!("{trash}/files/{name}"), b"payload");
         TrashRecord {
             original_path: original_parent.join(name),
             info_identity: FileIdentity::read(&info_path).unwrap(),
@@ -737,6 +703,45 @@ mod tests {
             backing_path,
             original_parent: original_parent.to_path_buf(),
         }
+    }
+
+    /// One note in the Trash, originally from `original/`.
+    fn one_note() -> (Sandbox, PathBuf, TrashRecord) {
+        let sandbox = Sandbox::new();
+        let original_parent = sandbox.dir("original");
+        let record = seeded_record(&sandbox, "Trash", &original_parent, "note.txt");
+        (sandbox, original_parent, record)
+    }
+
+    #[test]
+    fn missing_home_trash_is_created_rather_than_failing_the_operation() {
+        // The `trash` crate creates `files/` and `info/` on demand but not the
+        // directory holding them, and resolving the Trash folders fails when it
+        // is absent — so on an account that has never trashed anything, every
+        // Trash operation failed until this directory existed.
+        let sandbox = Sandbox::new();
+        let trash_dir = sandbox.path("Trash");
+        assert!(!trash_dir.exists());
+
+        ensure_trash_dir(&trash_dir);
+        assert!(trash_dir.is_dir());
+
+        // Idempotent, and it must not disturb what an existing Trash holds.
+        let kept = sandbox.file("Trash/files/kept.txt", b"");
+        ensure_trash_dir(&trash_dir);
+        assert!(kept.is_file());
+    }
+
+    #[test]
+    fn an_unwritable_parent_leaves_the_trash_directory_to_the_caller() {
+        // Best effort by design: the resolution that follows reports why it
+        // could not proceed, which beats an error raised here about a directory
+        // the user never asked for.
+        let sandbox = Sandbox::new();
+        let blocked = sandbox.file("file-not-a-dir", b"");
+
+        ensure_trash_dir(&blocked.join("Trash"));
+        assert!(blocked.is_file());
     }
 
     #[test]
@@ -767,13 +772,12 @@ mod tests {
     /// recognize the Trash under either of them.
     #[test]
     fn a_trash_root_reached_through_a_symlink_is_still_refused() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("Trash");
-        fs::create_dir_all(root.join("files")).unwrap();
-        fs::write(root.join("files/note.txt"), b"trashed").unwrap();
-        std::os::unix::fs::symlink(&root, temp.path().join("shortcut")).unwrap();
+        let sandbox = Sandbox::new();
+        let root = sandbox.path("Trash");
+        sandbox.file("Trash/files/note.txt", b"trashed");
+        std::os::unix::fs::symlink(&root, sandbox.path("shortcut")).unwrap();
 
-        let through_link = temp.path().join("shortcut/files/note.txt");
+        let through_link = sandbox.path("shortcut/files/note.txt");
         assert!(
             paths_overlap_trash_root(&through_link, &root),
             "the same object under another spelling is still in the Trash"
@@ -781,7 +785,7 @@ mod tests {
 
         // The object itself is never resolved: deleting a link that points into
         // the Trash removes the link, which is safe and must stay allowed.
-        let elsewhere = temp.path().join("pointer");
+        let elsewhere = sandbox.path("pointer");
         std::os::unix::fs::symlink(root.join("files/note.txt"), &elsewhere).unwrap();
         assert!(!paths_overlap_trash_root(&elsewhere, &root));
     }
@@ -798,17 +802,11 @@ mod tests {
 
     #[test]
     fn restore_is_no_replace_and_removes_matching_metadata() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("original");
-        fs::create_dir(&original_parent).unwrap();
-        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        let (_sandbox, original_parent, record) = one_note();
 
         let restored = restore_trash_records(std::slice::from_ref(&record)).unwrap();
 
-        assert_eq!(
-            fs::read(original_parent.join("note.txt")).unwrap(),
-            b"payload"
-        );
+        assert_eq!(read(original_parent.join("note.txt")), b"payload");
         assert!(!record.backing_path.exists());
         assert!(!record.info_path.exists());
         assert!(restored.undoable);
@@ -822,11 +820,8 @@ mod tests {
     /// record describes, so the caller may keep the history entry and retry.
     #[test]
     fn a_restore_refused_before_committing_stays_retryable() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("original");
-        fs::create_dir(&original_parent).unwrap();
-        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
-        File::create(original_parent.join("note.txt")).unwrap();
+        let (sandbox, _, record) = one_note();
+        sandbox.file("original/note.txt", b"");
 
         let failure = restore_trash_records(std::slice::from_ref(&record))
             .expect_err("an occupied destination must refuse");
@@ -845,33 +840,25 @@ mod tests {
     /// caller must discard it.
     #[test]
     fn a_restore_that_rolls_back_reports_a_committed_failure() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        if rustix::process::geteuid().is_root() {
-            // Permission bits do not constrain root, so the mid-loop failure
-            // this test depends on cannot be provoked.
+        if skip_as_root() {
             return;
         }
-
-        let temp = tempfile::tempdir().unwrap();
-        let trash = temp.path().join("Trash");
+        let sandbox = Sandbox::new();
         // Two original parents, so one can be sealed without blocking the
         // other. The preflight stats each destination and validates each
         // record before the first rename, so an obstacle it can see yields an
         // unchanged failure; reaching the rolled-back path needs one only the
         // rename itself discovers.
-        let open = temp.path().join("open");
-        let sealed = temp.path().join("sealed");
-        fs::create_dir(&open).unwrap();
-        fs::create_dir(&sealed).unwrap();
-        let first = seeded_record(&trash, &open, "first.txt");
-        let second = seeded_record(&trash, &sealed, "second.txt");
+        let open = sandbox.dir("open");
+        let sealed = sandbox.dir("sealed");
+        let first = seeded_record(&sandbox, "Trash", &open, "first.txt");
+        let second = seeded_record(&sandbox, "Trash", &sealed, "second.txt");
 
         // "first" restores into a writable parent and commits; "second" cannot
         // be created inside a read-only parent, though stat still succeeds.
-        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o555)).unwrap();
+        seal(&sealed, true);
         let failure = restore_trash_records(&[first.clone(), second]);
-        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+        seal(&sealed, false);
 
         let failure = failure.expect_err("a read-only parent must fail the restore");
         assert!(
@@ -887,9 +874,8 @@ mod tests {
 
     #[test]
     fn restore_refuses_to_recreate_a_missing_original_parent() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("missing");
-        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        let sandbox = Sandbox::new();
+        let record = seeded_record(&sandbox, "Trash", &sandbox.path("missing"), "note.txt");
 
         assert!(restore_trash_records(std::slice::from_ref(&record)).is_err());
         assert!(record.backing_path.exists());
@@ -897,10 +883,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_a_replaced_trash_payload() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("original");
-        fs::create_dir(&original_parent).unwrap();
-        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        let (_sandbox, original_parent, record) = one_note();
         fs::remove_file(&record.backing_path).unwrap();
         fs::write(&record.backing_path, b"replacement").unwrap();
 
@@ -910,10 +893,7 @@ mod tests {
 
     #[test]
     fn permanent_purge_removes_payload_and_matching_metadata() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("original");
-        fs::create_dir(&original_parent).unwrap();
-        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        let (_sandbox, original_parent, record) = one_note();
 
         let outcome = purge_trash_records(
             std::slice::from_ref(&record),
@@ -942,11 +922,10 @@ mod tests {
     /// the listing when only one was purged.
     #[test]
     fn purging_one_of_two_entries_sharing_an_original_names_only_the_purged_one() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("original");
-        fs::create_dir(&original_parent).unwrap();
-        let first = seeded_record(&temp.path().join("TrashA"), &original_parent, "note.txt");
-        let second = seeded_record(&temp.path().join("TrashB"), &original_parent, "note.txt");
+        let sandbox = Sandbox::new();
+        let original_parent = sandbox.dir("original");
+        let first = seeded_record(&sandbox, "TrashA", &original_parent, "note.txt");
+        let second = seeded_record(&sandbox, "TrashB", &original_parent, "note.txt");
         assert_eq!(first.original_path(), second.original_path());
 
         let outcome = purge_trash_records(
@@ -968,14 +947,11 @@ mod tests {
 
     #[test]
     fn metadata_cleanup_refuses_a_replaced_trash_info_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let original_parent = temp.path().join("original");
-        fs::create_dir(&original_parent).unwrap();
-        let record = seeded_record(&temp.path().join("Trash"), &original_parent, "note.txt");
+        let (_sandbox, _, record) = one_note();
         fs::remove_file(&record.info_path).unwrap();
         fs::write(&record.info_path, b"replacement").unwrap();
 
         assert!(record.remove_matching_info().is_err());
-        assert_eq!(fs::read(&record.info_path).unwrap(), b"replacement");
+        assert_eq!(read(&record.info_path), b"replacement");
     }
 }

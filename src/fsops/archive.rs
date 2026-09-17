@@ -840,13 +840,15 @@ fn validate_archive_path(value: &str) -> Result<()> {
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::testing::{Sandbox, no_cancel, read};
 
+    /// What the fake backend leaves in the staging directory.
     #[derive(Clone, Copy)]
-    enum FakeExtraction {
+    enum Fake {
         One,
         Multiple,
         Symlink,
@@ -854,11 +856,7 @@ mod tests {
         OversizedSparse,
     }
 
-    struct FakeBackend {
-        extraction: FakeExtraction,
-    }
-
-    impl ArchiveBackend for FakeBackend {
+    impl ArchiveBackend for Fake {
         fn list(&self, _archive: &Path, _cancelled: Arc<AtomicBool>) -> Result<Vec<ArchiveEntry>> {
             Ok(vec![ArchiveEntry {
                 path: PathBuf::from("file.txt"),
@@ -873,17 +871,17 @@ mod tests {
             destination: &Path,
             _cancelled: Arc<AtomicBool>,
         ) -> Result<()> {
-            match self.extraction {
-                FakeExtraction::One => fs::write(destination.join("file.txt"), b"test")?,
-                FakeExtraction::Multiple => {
+            match self {
+                Fake::One => fs::write(destination.join("file.txt"), b"test")?,
+                Fake::Multiple => {
                     fs::write(destination.join("one.txt"), b"one")?;
                     fs::write(destination.join("two.txt"), b"two")?;
                 }
-                FakeExtraction::Symlink => {
+                Fake::Symlink => {
                     std::os::unix::fs::symlink("../outside", destination.join("link"))?;
                 }
-                FakeExtraction::Empty => {}
-                FakeExtraction::OversizedSparse => {
+                Fake::Empty => {}
+                Fake::OversizedSparse => {
                     let file = fs::File::create(destination.join("dishonest.bin"))?;
                     file.set_len(MAX_EXPANDED_BYTES + 1)?;
                 }
@@ -902,50 +900,60 @@ mod tests {
         }
     }
 
-    fn executable(path: &Path) {
-        fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    fn extract(fake: Fake, archive: &Path) -> Result<ArchiveOutcome> {
+        extract_archive_with(&fake, archive, no_cancel())
+    }
+
+    /// The real 7-Zip, when the environment has one.
+    fn official_backend() -> Option<(SevenZipBackend, PathBuf)> {
+        let program = find_on_path("7zz", env::var_os("PATH").as_deref())?;
+        Some((SevenZipBackend::from_program(program.clone()), program))
+    }
+
+    /// Have 7-Zip itself build `archive` of `kind` from `member`, then
+    /// remove the member so extraction has to recreate it.
+    fn seven_zip_pack(program: &Path, sandbox: &Sandbox, kind: &str, archive: &str, member: &str) {
+        let status = Command::new(program)
+            .current_dir(sandbox.root())
+            .args(["a", &format!("-t{kind}"), archive, member])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let member = sandbox.path(member);
+        if member.is_dir() {
+            fs::remove_dir_all(member).unwrap();
+        } else {
+            fs::remove_file(member).unwrap();
+        }
     }
 
     #[test]
     fn discovery_order_is_override_private_7zz_then_7z() {
-        let root = tempfile::tempdir().unwrap();
-        let override_program = root.path().join("override");
-        let prefix = root.path().join("prefix");
-        let current_exe = prefix.join("bin/marcel-rs");
-        let private = prefix.join("libexec/marcel/7zz");
-        let path_dir = root.path().join("path");
-        fs::create_dir_all(private.parent().unwrap()).unwrap();
-        fs::create_dir_all(&path_dir).unwrap();
-        executable(&override_program);
-        executable(&private);
-        executable(&path_dir.join("7zz"));
-        executable(&path_dir.join("7z"));
+        let sandbox = Sandbox::new();
+        let override_program = sandbox.script("override", "exit 0");
+        let current_exe = sandbox.path("prefix/bin/marcel-rs");
+        let private = sandbox.script("prefix/libexec/marcel/7zz", "exit 0");
+        let path_dir = sandbox.dir("path");
+        sandbox.script("path/7zz", "exit 0");
+        sandbox.script("path/7z", "exit 0");
         let path = env::join_paths([&path_dir]).unwrap();
-
-        assert_eq!(
+        let discover = |override_program: Option<&Path>| {
             discover_with(
-                Some(override_program.as_os_str().to_owned()),
+                override_program.map(|program| program.as_os_str().to_owned()),
                 &current_exe,
-                Some(path.clone())
+                Some(path.clone()),
             )
-            .unwrap(),
-            override_program
-        );
-        assert_eq!(
-            discover_with(None, &current_exe, Some(path.clone())).unwrap(),
-            private
-        );
+            .unwrap()
+        };
+
+        assert_eq!(discover(Some(&override_program)), override_program);
+        assert_eq!(discover(None), private);
         fs::remove_file(&private).unwrap();
-        assert_eq!(
-            discover_with(None, &current_exe, Some(path.clone())).unwrap(),
-            path_dir.join("7zz")
-        );
+        assert_eq!(discover(None), path_dir.join("7zz"));
         fs::remove_file(path_dir.join("7zz")).unwrap();
-        assert_eq!(
-            discover_with(None, &current_exe, Some(path)).unwrap(),
-            path_dir.join("7z")
-        );
+        assert_eq!(discover(None), path_dir.join("7z"));
     }
 
     #[test]
@@ -1010,10 +1018,10 @@ Folder = -
         );
         assert!(is_supported_archive(Path::new("BOOKS.CBZ")));
         assert!(!is_supported_archive(Path::new("notes.txt")));
-        assert!(!is_supported_archive_with(Path::new("books.cbr"), false));
-        assert!(!is_supported_archive_with(Path::new("archive.rar"), false));
-        assert!(is_supported_archive_with(Path::new("books.cbr"), true));
-        assert!(is_supported_archive_with(Path::new("archive.rar"), true));
+        for name in ["books.cbr", "archive.rar"] {
+            assert!(!is_supported_archive_with(Path::new(name), false));
+            assert!(is_supported_archive_with(Path::new(name), true));
+        }
     }
 
     #[test]
@@ -1036,93 +1044,38 @@ Folder = -
 
     #[test]
     fn extraction_tidies_one_or_multiple_top_level_items_without_overwrite() {
-        let root = tempfile::tempdir().unwrap();
-        let archive = root.path().join("bundle.zip");
-        fs::write(&archive, b"archive").unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let sandbox = Sandbox::new();
+        let archive = sandbox.file("bundle.zip", b"archive");
 
-        let outcome = extract_archive_with(
-            &FakeBackend {
-                extraction: FakeExtraction::One,
-            },
-            &archive,
-            cancelled.clone(),
-        )
-        .unwrap();
-        assert_eq!(outcome.published, root.path().join("file.txt"));
-        assert_eq!(fs::read(&outcome.published).unwrap(), b"test");
+        let outcome = extract(Fake::One, &archive).unwrap();
+        assert_eq!(outcome.published, sandbox.path("file.txt"));
+        assert_eq!(read(&outcome.published), b"test");
 
         fs::remove_file(&outcome.published).unwrap();
-        let outcome = extract_archive_with(
-            &FakeBackend {
-                extraction: FakeExtraction::Multiple,
-            },
-            &archive,
-            cancelled.clone(),
-        )
-        .unwrap();
-        assert_eq!(outcome.published, root.path().join("bundle"));
-        assert_eq!(fs::read(outcome.published.join("one.txt")).unwrap(), b"one");
+        let outcome = extract(Fake::Multiple, &archive).unwrap();
+        assert_eq!(outcome.published, sandbox.path("bundle"));
+        assert_eq!(read(outcome.published.join("one.txt")), b"one");
 
         fs::remove_dir_all(&outcome.published).unwrap();
-        fs::write(root.path().join("file.txt"), b"occupied").unwrap();
-        assert!(
-            extract_archive_with(
-                &FakeBackend {
-                    extraction: FakeExtraction::One,
-                },
-                &archive,
-                cancelled,
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read(root.path().join("file.txt")).unwrap(), b"occupied");
+        let occupied = sandbox.file("file.txt", b"occupied");
+        assert!(extract(Fake::One, &archive).is_err());
+        assert_eq!(read(occupied), b"occupied");
     }
 
     #[test]
-    fn extracted_symlinks_are_rejected_and_staging_is_cleaned() {
-        let root = tempfile::tempdir().unwrap();
-        let archive = root.path().join("links.zip");
-        fs::write(&archive, b"archive").unwrap();
-        let error = extract_archive_with(
-            &FakeBackend {
-                extraction: FakeExtraction::Symlink,
-            },
-            &archive,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap_err();
+    fn unsafe_extractions_are_rejected_and_staging_is_cleaned() {
+        let sandbox = Sandbox::new();
+        let archive = sandbox.file("unsafe.zip", b"archive");
+
+        let error = extract(Fake::Symlink, &archive).unwrap_err();
         assert!(error.to_string().contains("symbolic link"));
-        assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".marcel-archive-")
-        }));
-    }
-
-    #[test]
-    fn empty_and_dishonestly_oversized_extractions_are_rejected() {
-        let root = tempfile::tempdir().unwrap();
-        let archive = root.path().join("unsafe.zip");
-        fs::write(&archive, b"archive").unwrap();
-        for extraction in [FakeExtraction::Empty, FakeExtraction::OversizedSparse] {
-            assert!(
-                extract_archive_with(
-                    &FakeBackend { extraction },
-                    &archive,
-                    Arc::new(AtomicBool::new(false)),
-                )
-                .is_err()
-            );
+        for fake in [Fake::Empty, Fake::OversizedSparse] {
+            assert!(extract(fake, &archive).is_err());
         }
         assert_eq!(
-            fs::read_dir(root.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .count(),
-            1
+            sandbox.names(""),
+            ["unsafe.zip"],
+            "staging must be cleaned up"
         );
     }
 
@@ -1144,43 +1097,32 @@ Folder = -
 
     #[test]
     fn compression_stages_validates_and_publishes_without_overwrite() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("report.txt");
-        let destination = root.path().join("report.zip");
-        fs::write(&source, b"report").unwrap();
-        let backend = FakeBackend {
-            extraction: FakeExtraction::One,
+        let sandbox = Sandbox::new();
+        let source = sandbox.file("report.txt", b"report");
+        let destination = sandbox.path("report.zip");
+        let create = || {
+            create_zip_archive_with(
+                &Fake::One,
+                std::slice::from_ref(&source),
+                &destination,
+                no_cancel(),
+            )
         };
 
-        let outcome = create_zip_archive_with(
-            &backend,
-            std::slice::from_ref(&source),
-            &destination,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
+        let outcome = create().unwrap();
         assert_eq!(outcome.published, destination);
-        assert_eq!(fs::read(&destination).unwrap(), b"fake zip");
+        assert_eq!(read(&destination), b"fake zip");
 
-        let error = create_zip_archive_with(
-            &backend,
-            &[source],
-            &destination,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap_err();
+        let error = create().unwrap_err();
         assert!(error.to_string().contains("already exists"));
-        assert_eq!(fs::read(&destination).unwrap(), b"fake zip");
+        assert_eq!(read(&destination), b"fake zip");
     }
 
     #[test]
     fn cancellation_terminates_the_archive_process_group() {
-        let root = tempfile::tempdir().unwrap();
-        let program = root.path().join("slow-7zz");
-        fs::write(&program, "#!/bin/sh\nsleep 30\n").unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        let backend = SevenZipBackend::from_program(program);
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let sandbox = Sandbox::new();
+        let backend = SevenZipBackend::from_program(sandbox.script("slow-7zz", "sleep 30"));
+        let cancelled = no_cancel();
         let cancel_for_thread = cancelled.clone();
         let trigger = thread::spawn(move || {
             thread::sleep(Duration::from_millis(60));
@@ -1196,131 +1138,69 @@ Folder = -
 
     #[test]
     fn official_backend_round_trips_zip_when_available() {
-        let Some(program) = find_on_path("7zz", env::var_os("PATH").as_deref()) else {
+        let Some((backend, _)) = official_backend() else {
             return;
         };
-        let backend = SevenZipBackend::from_program(program);
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("report.txt");
-        let archive = root.path().join("report.zip");
-        fs::write(&source, b"round trip").unwrap();
+        let sandbox = Sandbox::new();
+        let source = sandbox.file("report.txt", b"round trip");
+        let archive = sandbox.path("report.zip");
 
         create_zip_archive_with(
             &backend,
             std::slice::from_ref(&source),
             &archive,
-            Arc::new(AtomicBool::new(false)),
+            no_cancel(),
         )
         .unwrap();
         fs::remove_file(&source).unwrap();
-        let outcome =
-            extract_archive_with(&backend, &archive, Arc::new(AtomicBool::new(false))).unwrap();
+        let outcome = extract_archive_with(&backend, &archive, no_cancel()).unwrap();
 
         assert_eq!(outcome.published, source);
-        assert_eq!(fs::read(outcome.published).unwrap(), b"round trip");
+        assert_eq!(read(outcome.published), b"round trip");
     }
 
+    /// A `.tar.gz` unwraps one layer, to the tar's members; a native `.7z`
+    /// extracts directly.
     #[test]
-    fn official_backend_unwraps_one_compound_tar_layer_when_available() {
-        let Some(program) = find_on_path("7zz", env::var_os("PATH").as_deref()) else {
+    fn official_backend_extracts_compound_tar_and_native_7z_when_available() {
+        let Some((backend, program)) = official_backend() else {
             return;
         };
-        let backend = SevenZipBackend::from_program(program.clone());
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("payload.txt");
-        let tar = root.path().join("bundle.tar");
-        let archive = root.path().join("bundle.tar.gz");
-        fs::write(&source, b"compound tar").unwrap();
-        let status = Command::new(&program)
-            .current_dir(root.path())
-            .args(["a", "-ttar"])
-            .arg(&tar)
-            .arg("payload.txt")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let status = Command::new(program)
-            .current_dir(root.path())
-            .args(["a", "-tgzip"])
-            .arg(&archive)
-            .arg("bundle.tar")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        fs::remove_file(&source).unwrap();
-        fs::remove_file(&tar).unwrap();
+        let sandbox = Sandbox::new();
+        let payload = sandbox.file("payload.txt", b"compound tar");
+        seven_zip_pack(&program, &sandbox, "tar", "bundle.tar", "payload.txt");
+        seven_zip_pack(&program, &sandbox, "gzip", "bundle.tar.gz", "bundle.tar");
+        let native = sandbox.file("native.txt", b"native 7z");
+        seven_zip_pack(&program, &sandbox, "7z", "native.7z", "native.txt");
 
-        let outcome =
-            extract_archive_with(&backend, &archive, Arc::new(AtomicBool::new(false))).unwrap();
-        assert_eq!(outcome.published, source);
-        assert_eq!(fs::read(outcome.published).unwrap(), b"compound tar");
-    }
-
-    #[test]
-    fn official_backend_extracts_native_7z_when_available() {
-        let Some(program) = find_on_path("7zz", env::var_os("PATH").as_deref()) else {
-            return;
-        };
-        let backend = SevenZipBackend::from_program(program.clone());
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("native.txt");
-        let archive = root.path().join("native.7z");
-        fs::write(&source, b"native 7z").unwrap();
-        let status = Command::new(program)
-            .current_dir(root.path())
-            .args(["a", "-t7z"])
-            .arg(&archive)
-            .arg("native.txt")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        fs::remove_file(&source).unwrap();
-
-        let outcome =
-            extract_archive_with(&backend, &archive, Arc::new(AtomicBool::new(false))).unwrap();
-        assert_eq!(outcome.published, source);
-        assert_eq!(fs::read(outcome.published).unwrap(), b"native 7z");
+        for (archive, member, contents) in [
+            ("bundle.tar.gz", &payload, b"compound tar".as_slice()),
+            ("native.7z", &native, b"native 7z"),
+        ] {
+            let outcome =
+                extract_archive_with(&backend, &sandbox.path(archive), no_cancel()).unwrap();
+            assert_eq!(&outcome.published, member);
+            assert_eq!(read(outcome.published), contents);
+        }
     }
 
     #[test]
     fn official_backend_creates_zip_from_directory_and_multiselection_when_available() {
-        let Some(program) = find_on_path("7zz", env::var_os("PATH").as_deref()) else {
+        let Some((backend, _)) = official_backend() else {
             return;
         };
-        let backend = SevenZipBackend::from_program(program);
-        let root = tempfile::tempdir().unwrap();
-        let folder = root.path().join("folder");
-        let loose = root.path().join("loose.txt");
-        let archive = root.path().join("selection.zip");
-        fs::create_dir(&folder).unwrap();
-        fs::write(folder.join("nested.txt"), b"nested").unwrap();
-        fs::write(&loose, b"loose").unwrap();
+        let sandbox = Sandbox::new();
+        sandbox.file("folder/nested.txt", b"nested");
+        let sources = [sandbox.path("folder"), sandbox.file("loose.txt", b"loose")];
+        let archive = sandbox.path("selection.zip");
 
-        create_zip_archive_with(
-            &backend,
-            &[folder, loose],
-            &archive,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
-        let entries = backend
-            .list(&archive, Arc::new(AtomicBool::new(false)))
-            .unwrap();
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.path == Path::new("folder/nested.txt"))
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.path == Path::new("loose.txt"))
-        );
+        create_zip_archive_with(&backend, &sources, &archive, no_cancel()).unwrap();
+        let entries = backend.list(&archive, no_cancel()).unwrap();
+        for member in ["folder/nested.txt", "loose.txt"] {
+            assert!(
+                entries.iter().any(|entry| entry.path == Path::new(member)),
+                "{member}"
+            );
+        }
     }
 }

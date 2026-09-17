@@ -26,4 +26,7 @@ pub mod surface;
 pub mod theme;
 pub mod window;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 pub use app::{Marcel, init_key_bindings};

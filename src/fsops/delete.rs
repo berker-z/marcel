@@ -470,25 +470,31 @@ fn failed_after_rollback(
     }
     DeleteOutcome::failed(path, message)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{Sandbox, read};
+
+    fn delete(paths: &[PathBuf]) -> DeleteOutcome {
+        delete_paths(paths, Arc::new(TransferProgress::default()))
+    }
+
+    fn key(path: &Path) -> ObjectKey {
+        ObjectKey::of(&fs::symlink_metadata(path).unwrap())
+    }
 
     /// Removing one hard link moves the shared inode's ctime, which used to
     /// make the plan's own first removal invalidate the entry for the second.
     /// Copy preserves hard links, so a tree like this is one paste away.
     #[test]
     fn a_tree_holding_two_links_to_one_file_is_deleted_completely() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("tree");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("first"), b"shared").unwrap();
+        let sandbox = Sandbox::new();
+        let target = sandbox.dir("tree");
+        sandbox.file("tree/first", b"shared");
         fs::hard_link(target.join("first"), target.join("second")).unwrap();
 
-        let outcome = delete_paths(
-            std::slice::from_ref(&target),
-            Arc::new(TransferProgress::default()),
-        );
+        let outcome = delete(std::slice::from_ref(&target));
 
         assert!(outcome.failures.is_empty(), "{outcome:?}");
         assert!(!target.exists());
@@ -499,16 +505,14 @@ mod tests {
     /// tell: only the key the caller carried across can.
     #[test]
     fn a_trash_backing_that_changed_since_it_was_checked_is_refused() {
-        let temp = tempfile::tempdir().unwrap();
-        let backing = temp.path().join("payload.txt");
-        fs::write(&backing, b"the object the purge approved").unwrap();
-        let approved = ObjectKey::of(&fs::symlink_metadata(&backing).unwrap());
+        let sandbox = Sandbox::new();
+        let backing = sandbox.file("payload.txt", b"the object the purge approved");
+        let approved = key(&backing);
 
         // Something else takes the path afterwards, published the way anything
         // is published atomically. Both files exist at once, so the replacement
         // cannot be handed the inode number the original still holds.
-        let replacement = temp.path().join("elsewhere.txt");
-        fs::write(&replacement, b"someone else's data").unwrap();
+        let replacement = sandbox.file("elsewhere.txt", b"someone else's data");
         fs::rename(&replacement, &backing).unwrap();
 
         let outcome = delete_trash_backings(
@@ -518,12 +522,11 @@ mod tests {
 
         assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
         assert!(outcome.completed.is_empty(), "{outcome:?}");
-        assert_eq!(fs::read(&backing).unwrap(), b"someone else's data");
+        assert_eq!(read(&backing), b"someone else's data");
 
         // The payload it actually approved is deleted as before.
-        let approved = ObjectKey::of(&fs::symlink_metadata(&backing).unwrap());
         let outcome = delete_trash_backings(
-            &[(backing.clone(), approved)],
+            &[(backing.clone(), key(&backing))],
             Arc::new(TransferProgress::default()),
         );
         assert!(outcome.failures.is_empty(), "{outcome:?}");
@@ -532,13 +535,11 @@ mod tests {
 
     #[test]
     fn permanently_deletes_files_directories_and_symlinks_without_following() {
-        let temp = tempfile::tempdir().unwrap();
-        let outside = temp.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        fs::write(outside.join("keep.txt"), b"keep").unwrap();
-        let target = temp.path().join("target");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("file.txt"), b"delete").unwrap();
+        let sandbox = Sandbox::new();
+        let outside = sandbox.dir("outside");
+        let kept = sandbox.file("outside/keep.txt", b"keep");
+        let target = sandbox.dir("target");
+        sandbox.file("target/file.txt", b"delete");
         std::os::unix::fs::symlink(&outside, target.join("link")).unwrap();
         let progress = Arc::new(TransferProgress::default());
 
@@ -552,42 +553,33 @@ mod tests {
         );
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert!(!target.exists());
-        assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+        assert_eq!(read(kept), b"keep");
         let snapshot = progress.snapshot();
         assert_eq!(snapshot.completed_items, snapshot.total_items);
     }
 
     #[test]
     fn occupied_quarantine_names_do_not_overwrite() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("note.txt");
-        fs::write(&target, b"delete").unwrap();
-        let collision = temp
-            .path()
-            .join(format!(".marcel-delete-{}-0-note.txt", std::process::id()));
-        fs::write(&collision, b"keep").unwrap();
-
-        let outcome = delete_paths(
-            std::slice::from_ref(&target),
-            Arc::new(TransferProgress::default()),
+        let sandbox = Sandbox::new();
+        let target = sandbox.file("note.txt", b"delete");
+        let collision = sandbox.file(
+            &format!(".marcel-delete-{}-0-note.txt", std::process::id()),
+            b"keep",
         );
 
+        let outcome = delete(std::slice::from_ref(&target));
+
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        assert_eq!(fs::read(collision).unwrap(), b"keep");
+        assert_eq!(read(collision), b"keep");
     }
 
     #[test]
     fn nested_selected_paths_are_deleted_once_by_their_top_level_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("target");
-        fs::create_dir(&target).unwrap();
-        let child = target.join("child.txt");
-        fs::write(&child, b"delete").unwrap();
+        let sandbox = Sandbox::new();
+        let target = sandbox.dir("target");
+        let child = sandbox.file("target/child.txt", b"delete");
 
-        let outcome = delete_paths(
-            &[target.clone(), child],
-            Arc::new(TransferProgress::default()),
-        );
+        let outcome = delete(&[target.clone(), child]);
 
         assert_eq!(outcome.completed, [target], "{:#?}", outcome.failures);
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
@@ -595,18 +587,15 @@ mod tests {
 
     #[test]
     fn ancestor_replacement_cannot_redirect_deletion_through_a_symlink() {
-        let temp = tempfile::tempdir().unwrap();
-        let quarantine = temp.path().join("quarantine");
-        let child_dir = quarantine.join("child");
-        let outside = temp.path().join("outside");
-        fs::create_dir_all(&child_dir).unwrap();
-        fs::create_dir(&outside).unwrap();
-        fs::write(outside.join("keep.txt"), b"keep").unwrap();
-        let root_identity = DeleteIdentity::of(&fs::symlink_metadata(&quarantine).unwrap());
-        let child_identity = DeleteIdentity::of(&fs::symlink_metadata(&child_dir).unwrap());
+        let sandbox = Sandbox::new();
+        let quarantine = sandbox.dir("quarantine");
+        let child_dir = sandbox.dir("quarantine/child");
+        let outside = sandbox.dir("outside");
+        let kept = sandbox.file("outside/keep.txt", b"keep");
+        let identity = |path: &Path| DeleteIdentity::of(&fs::symlink_metadata(path).unwrap());
         let directories = HashMap::from([
-            (quarantine.clone(), root_identity),
-            (child_dir.clone(), child_identity),
+            (quarantine.clone(), identity(&quarantine)),
+            (child_dir.clone(), identity(&child_dir)),
         ]);
         fs::remove_dir(&child_dir).unwrap();
         std::os::unix::fs::symlink(&outside, &child_dir).unwrap();
@@ -614,6 +603,6 @@ mod tests {
         assert!(
             validate_ancestors(&child_dir.join("keep.txt"), &quarantine, &directories).is_err()
         );
-        assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+        assert_eq!(read(kept), b"keep");
     }
 }

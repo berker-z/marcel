@@ -476,8 +476,11 @@ fn group_revealed_items(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>, De
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        desktop::picker::{PickerMode, PickerResponse},
+        testing::Sandbox,
+    };
     use std::{process::Command, time::Duration};
-    use tempfile::tempdir;
 
     /// The defect this rule exists to prevent: running `marcel` while Marcel is
     /// already open navigated the window the user was reading, or — with no
@@ -510,17 +513,26 @@ mod tests {
         Url::from_file_path(path).unwrap().into()
     }
 
+    fn canonical(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap()
+    }
+
+    fn revealed(directory: &Path, items: &[&Path]) -> RevealedLocation {
+        RevealedLocation {
+            directory: canonical(directory),
+            items: items.iter().map(|item| canonical(item)).collect(),
+        }
+    }
+
     #[test]
     fn show_folders_accepts_directories_and_rejects_regular_files() {
-        let temp = tempdir().unwrap();
-        let folder = temp.path().join("folder");
-        let file = temp.path().join("file.txt");
-        fs::create_dir(&folder).unwrap();
-        fs::write(&file, b"hello").unwrap();
+        let sandbox = Sandbox::new();
+        let folder = sandbox.dir("folder");
+        let file = sandbox.file("file.txt", b"hello");
 
         assert_eq!(
             validate_uri_request(UriRequestKind::ShowFolders, &[uri(&folder)]).unwrap(),
-            DesktopRequest::ShowFolders(vec![folder.canonicalize().unwrap()])
+            DesktopRequest::ShowFolders(vec![canonical(&folder)])
         );
         assert!(
             validate_uri_request(UriRequestKind::ShowFolders, &[uri(&file)])
@@ -532,17 +544,10 @@ mod tests {
 
     #[test]
     fn show_items_groups_targets_by_parent_in_first_seen_order() {
-        let temp = tempdir().unwrap();
-        let first_folder = temp.path().join("first");
-        let second_folder = temp.path().join("second");
-        fs::create_dir(&first_folder).unwrap();
-        fs::create_dir(&second_folder).unwrap();
-        let first = first_folder.join("one");
-        let second = second_folder.join("two");
-        let third = first_folder.join("three");
-        fs::write(&first, b"1").unwrap();
-        fs::write(&second, b"2").unwrap();
-        fs::write(&third, b"3").unwrap();
+        let sandbox = Sandbox::new();
+        let first = sandbox.file("first/one", b"1");
+        let second = sandbox.file("second/two", b"2");
+        let third = sandbox.file("first/three", b"3");
 
         assert_eq!(
             validate_uri_request(
@@ -551,37 +556,23 @@ mod tests {
             )
             .unwrap(),
             DesktopRequest::ShowItems(vec![
-                RevealedLocation {
-                    directory: first_folder.canonicalize().unwrap(),
-                    items: vec![first.canonicalize().unwrap(), third.canonicalize().unwrap()],
-                },
-                RevealedLocation {
-                    directory: second_folder.canonicalize().unwrap(),
-                    items: vec![second.canonicalize().unwrap()],
-                },
+                revealed(&sandbox.path("first"), &[&first, &third]),
+                revealed(&sandbox.path("second"), &[&second]),
             ])
         );
     }
 
     #[test]
     fn open_keeps_each_requested_location() {
-        let temp = tempdir().unwrap();
-        let folder = temp.path().join("folder");
-        let file = temp.path().join("file.txt");
-        fs::create_dir(&folder).unwrap();
-        fs::write(&file, b"hello").unwrap();
+        let sandbox = Sandbox::new();
+        let folder = sandbox.dir("folder");
+        let file = sandbox.file("file.txt", b"hello");
 
         assert_eq!(
             validate_uri_request(UriRequestKind::Open, &[uri(&folder), uri(&file)]).unwrap(),
             DesktopRequest::Open(vec![
-                RevealedLocation {
-                    directory: folder.canonicalize().unwrap(),
-                    items: Vec::new(),
-                },
-                RevealedLocation {
-                    directory: temp.path().canonicalize().unwrap(),
-                    items: vec![file.canonicalize().unwrap()],
-                },
+                revealed(&folder, &[]),
+                revealed(sandbox.root(), &[&file]),
             ])
         );
     }
@@ -623,13 +614,35 @@ mod tests {
             .arg("--")
             .arg(std::env::current_exe().expect("test executable must have a path"))
             .arg("--exact")
-            .arg("desktop_integration::tests::private_session_bus_child")
+            .arg(concat!(module_path!(), "::private_session_bus_child"))
             .arg("--nocapture")
             .env(PRIVATE_BUS_CHILD, "1")
             .status()
             .expect("dbus-run-session must be available in Marcel's development environment");
 
         assert!(status.success(), "private session-bus child failed");
+    }
+
+    /// Wait for the bus to release the application name, then own it.
+    async fn become_primary(roles: BusRoles) -> Result<DesktopRuntime, Option<String>> {
+        let mut last_error = None;
+        for _ in 0..80 {
+            match acquire_or_forward_with_roles(None, roles).await {
+                InstanceStartup::Primary(runtime) => return Ok(runtime),
+                InstanceStartup::Forwarded => {}
+                InstanceStartup::Unavailable(error) => last_error = Some(error),
+            }
+            smol::Timer::after(Duration::from_millis(25)).await;
+        }
+        Err(last_error)
+    }
+
+    async fn owns_name(bus: &zbus::fdo::DBusProxy<'_>, name: &str) -> bool {
+        bus.list_names()
+            .await
+            .expect("bus names must be readable")
+            .iter()
+            .any(|owned| owned.as_str() == name)
     }
 
     #[test]
@@ -653,40 +666,32 @@ mod tests {
             let bus = zbus::fdo::DBusProxy::new(&client)
                 .await
                 .expect("bus proxy must initialize");
-            let owned_names = bus.list_names().await.expect("bus names must be readable");
             assert!(
-                owned_names
-                    .iter()
-                    .any(|name| name.as_str() == APPLICATION_ID),
+                owns_name(&bus, APPLICATION_ID).await,
                 "primary must own Marcel's application name"
             );
             assert!(
-                owned_names
-                    .iter()
-                    .all(|name| name.as_str() != "org.freedesktop.FileManager1"),
+                !owns_name(&bus, FILE_MANAGER_BUS_NAME).await,
                 "the ordinary process must not claim the generic file-manager name"
             );
 
-            let temp = tempdir().expect("fixture directory must be created");
-            let folder = temp.path().join("folder");
-            let file = folder.join("file.txt");
-            fs::create_dir(&folder).expect("fixture folder must be created");
-            fs::write(&file, b"hello").expect("fixture file must be created");
+            let sandbox = Sandbox::new();
+            let file = sandbox.file("folder/file.txt", b"hello");
+            let location = revealed(&sandbox.path("folder"), &[&file]);
 
             assert!(matches!(
                 acquire_or_forward(Some(vec![uri(&file)])).await,
                 InstanceStartup::Forwarded
             ));
             assert_eq!(
-                receive_request(&requests).await,
-                DesktopRequest::Open(vec![RevealedLocation {
-                    directory: folder.canonicalize().unwrap(),
-                    items: vec![file.canonicalize().unwrap()],
-                }])
+                receive(&requests).await,
+                DesktopRequest::Open(vec![location.clone()])
             );
 
-            let application = zbus::Proxy::new(
-                &client,
+            let proxy = |name: &'static str, path: &'static str, interface: &'static str| {
+                zbus::Proxy::new(&client, name, path, interface)
+            };
+            let application = proxy(
                 APPLICATION_ID,
                 APPLICATION_OBJECT_PATH,
                 "org.freedesktop.Application",
@@ -697,10 +702,9 @@ mod tests {
                 .call::<_, _, ()>("Activate", &(HashMap::<String, OwnedValue>::new(),))
                 .await
                 .expect("warm activation must succeed");
-            assert_eq!(receive_request(&requests).await, DesktopRequest::Activate);
+            assert_eq!(receive(&requests).await, DesktopRequest::Activate);
 
-            let file_manager = zbus::Proxy::new(
-                &client,
+            let file_manager = proxy(
                 APPLICATION_ID,
                 FILE_MANAGER_OBJECT_PATH,
                 "org.freedesktop.FileManager1",
@@ -722,40 +726,22 @@ mod tests {
                 .await
                 .expect("ShowItems must accept a local file");
             assert_eq!(
-                receive_request(&requests).await,
-                DesktopRequest::ShowItems(vec![RevealedLocation {
-                    directory: folder.canonicalize().unwrap(),
-                    items: vec![file.canonicalize().unwrap()],
-                }])
+                receive(&requests).await,
+                DesktopRequest::ShowItems(vec![location])
             );
 
             drop(primary);
-            let mut last_error = None;
-            let mut replacement = None;
-            for _ in 0..80 {
-                match acquire_or_forward_with_roles(None, FILE_MANAGER_ROLE).await {
-                    InstanceStartup::Primary(runtime) => {
-                        replacement = Some(runtime);
-                        break;
-                    }
-                    InstanceStartup::Forwarded => {}
-                    InstanceStartup::Unavailable(error) => last_error = Some(error),
-                }
-                smol::Timer::after(Duration::from_millis(25)).await;
-            }
-            let replacement = replacement.unwrap_or_else(|| {
-                panic!("application name was not released after primary exit: {last_error:?}")
-            });
+            let replacement = become_primary(FILE_MANAGER_ROLE)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("application name was not released after primary exit: {error:?}")
+                });
             assert!(
                 replacement.requests().is_empty(),
-                "replacement primary must start with an empty queue; last error: {last_error:?}"
+                "replacement primary must start with an empty queue"
             );
             assert!(
-                bus.list_names()
-                    .await
-                    .expect("bus names must remain readable")
-                    .iter()
-                    .any(|name| name.as_str() == FILE_MANAGER_BUS_NAME),
+                owns_name(&bus, FILE_MANAGER_BUS_NAME).await,
                 "the opt-in primary must own the generic file-manager name"
             );
 
@@ -771,21 +757,9 @@ mod tests {
                 .request_name(FILE_MANAGER_BUS_NAME)
                 .await
                 .expect("foreign file manager must own the generic name");
-            let mut standalone = None;
-            for _ in 0..80 {
-                match acquire_or_forward_with_roles(None, FILE_MANAGER_ROLE).await {
-                    InstanceStartup::Primary(runtime) => {
-                        standalone = Some(runtime);
-                        break;
-                    }
-                    InstanceStartup::Forwarded | InstanceStartup::Unavailable(_) => {}
-                }
-                smol::Timer::after(Duration::from_millis(25)).await;
-            }
-            assert!(
-                standalone.is_some(),
-                "Marcel must start as primary while another file manager owns {FILE_MANAGER_BUS_NAME}"
-            );
+            let standalone = become_primary(FILE_MANAGER_ROLE).await.unwrap_or_else(|_| {
+                panic!("Marcel must start as primary while another file manager owns {FILE_MANAGER_BUS_NAME}")
+            });
             let owner = bus
                 .get_name_owner(zbus::names::BusName::try_from(FILE_MANAGER_BUS_NAME).unwrap())
                 .await
@@ -802,29 +776,15 @@ mod tests {
             // The portal backend role: the frontend's method call blocks
             // until a window answers, and its `Close` withdraws the request.
             drop(standalone);
-            let mut backend = None;
-            for _ in 0..80 {
-                match acquire_or_forward_with_roles(None, FILE_CHOOSER_ROLE).await {
-                    InstanceStartup::Primary(runtime) => {
-                        backend = Some(runtime);
-                        break;
-                    }
-                    InstanceStartup::Forwarded | InstanceStartup::Unavailable(_) => {}
-                }
-                smol::Timer::after(Duration::from_millis(25)).await;
-            }
-            let backend = backend.expect("the portal backend variant must start as primary");
+            let backend = become_primary(FILE_CHOOSER_ROLE)
+                .await
+                .expect("the portal backend variant must start as primary");
             let pickers = backend.pickers();
             assert!(
-                bus.list_names()
-                    .await
-                    .expect("bus names must remain readable")
-                    .iter()
-                    .any(|name| name.as_str() == file_chooser::FILE_CHOOSER_BUS_NAME),
+                owns_name(&bus, file_chooser::FILE_CHOOSER_BUS_NAME).await,
                 "the opt-in primary must own the portal backend name"
             );
-            let chooser = zbus::Proxy::new(
-                &client,
+            let chooser = proxy(
                 file_chooser::FILE_CHOOSER_BUS_NAME,
                 file_chooser::PORTAL_OBJECT_PATH,
                 "org.freedesktop.impl.portal.FileChooser",
@@ -860,13 +820,13 @@ mod tests {
 
             // Answered by a window.
             let call = call_open_file("/org/freedesktop/portal/desktop/request/test/1");
-            let request = receive_picker(&pickers).await;
+            let request = receive(&pickers).await;
             assert_eq!(backend.replies().pending(), 1);
             assert_eq!(request.title, "Pick something");
-            assert_eq!(request.mode, crate::desktop::picker::PickerMode::OpenFiles);
+            assert_eq!(request.mode, PickerMode::OpenFiles);
             request
                 .reply
-                .send(crate::desktop::picker::PickerResponse::Chosen {
+                .send(PickerResponse::Chosen {
                     paths: vec![file.clone()],
                     filter: None,
                 })
@@ -892,9 +852,8 @@ mod tests {
             // Request object exists for exactly as long as the call.
             let handle = "/org/freedesktop/portal/desktop/request/test/2";
             let call = call_open_file(handle);
-            let request = receive_picker(&pickers).await;
-            let request_object = zbus::Proxy::new(
-                &client,
+            let request = receive(&pickers).await;
+            let request_object = proxy(
                 file_chooser::FILE_CHOOSER_BUS_NAME,
                 handle,
                 "org.freedesktop.impl.portal.Request",
@@ -912,7 +871,7 @@ mod tests {
                 .expect("the window must be told the request was withdrawn");
             request
                 .reply
-                .send(crate::desktop::picker::PickerResponse::Closed)
+                .send(PickerResponse::Closed)
                 .await
                 .expect("the backend must still be waiting");
             let (code, _) = call.await.expect("a withdrawn OpenFile still replies");
@@ -925,35 +884,21 @@ mod tests {
             // A request nobody ever showed — the window failed to open — is
             // reported as an error, not as the user cancelling.
             let call = call_open_file("/org/freedesktop/portal/desktop/request/test/3");
-            let request = receive_picker(&pickers).await;
+            let request = receive(&pickers).await;
             drop(request);
             let (code, _) = call.await.expect("a dropped request still replies");
             assert_eq!(code, file_chooser::RESPONSE_OTHER);
         });
     }
 
-    async fn receive_request(requests: &Receiver<DesktopRequest>) -> DesktopRequest {
+    /// The next message on `channel`, or a panic once the bus has clearly
+    /// stopped delivering.
+    async fn receive<T>(channel: &Receiver<T>) -> T {
         smol::future::race(
-            async {
-                requests
-                    .recv()
-                    .await
-                    .expect("request channel must stay open")
-            },
+            async { channel.recv().await.expect("channel must stay open") },
             async {
                 smol::Timer::after(Duration::from_secs(3)).await;
-                panic!("timed out waiting for a desktop request")
-            },
-        )
-        .await
-    }
-
-    async fn receive_picker(pickers: &Receiver<PickerRequest>) -> PickerRequest {
-        smol::future::race(
-            async { pickers.recv().await.expect("picker channel must stay open") },
-            async {
-                smol::Timer::after(Duration::from_secs(3)).await;
-                panic!("timed out waiting for a picker request")
+                panic!("timed out waiting for a request")
             },
         )
         .await
