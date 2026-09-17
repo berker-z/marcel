@@ -43,10 +43,11 @@ pub enum TransferMode {
 }
 
 impl TransferMode {
-    pub fn verb(self) -> &'static str {
+    /// The past tense, for a report.
+    pub fn done(self) -> &'static str {
         match self {
-            Self::Copy => "copy",
-            Self::Move => "move",
+            Self::Copy => "Copied",
+            Self::Move => "Moved",
         }
     }
 }

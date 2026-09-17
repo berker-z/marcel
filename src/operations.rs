@@ -531,17 +531,9 @@ impl OperationCoordinator {
         if self.begin(None).is_none() {
             return;
         }
-        self.run(
-            origin,
-            cx,
-            move || create_directory(&parent, &name),
-            move |this, result, cx| {
-                Some(match result {
-                    Ok(committed) => this.report_committed(committed, "Created folder", origin, cx),
-                    Err(error) => Report::Error(error.to_string()),
-                })
-            },
-        );
+        self.run_committing(origin, cx, "Created folder", move || {
+            create_directory(&parent, &name)
+        });
     }
 
     pub fn start_compress(
@@ -551,29 +543,21 @@ impl OperationCoordinator {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        if sources.is_empty() {
+            return;
+        }
         let card = ProgressCard {
             kind: OperationProgressKind::Compress,
             source_count: sources.len(),
             detail: format!("to {}", destination.display()),
             cancellable: true,
         };
-        if sources.is_empty() {
-            return;
-        }
         let Some(started) = self.begin_prepared(card) else {
             return;
         };
-        self.run(
-            origin,
-            cx,
-            move || create_zip_operation(&sources, &destination, started.cancel),
-            move |this, result, cx| {
-                Some(match result {
-                    Ok(committed) => this.report_committed(committed, "Created ZIP", origin, cx),
-                    Err(error) => Report::Error(error.to_string()),
-                })
-            },
-        );
+        self.run_committing(origin, cx, "Created ZIP", move || {
+            create_zip_operation(&sources, &destination, started.cancel)
+        });
     }
 
     pub fn start_extract(
@@ -591,17 +575,9 @@ impl OperationCoordinator {
         let Some(started) = self.begin_prepared(card) else {
             return;
         };
-        self.run(
-            origin,
-            cx,
-            move || extract_archive_operation(&archive, started.cancel),
-            move |this, result, cx| {
-                Some(match result {
-                    Ok(committed) => this.report_committed(committed, "Extracted", origin, cx),
-                    Err(error) => Report::Error(error.to_string()),
-                })
-            },
-        );
+        self.run_committing(origin, cx, "Extracted", move || {
+            extract_archive_operation(&archive, started.cancel)
+        });
     }
 
     /// An archive shows "preparing" on the card until its backend reports.
@@ -609,6 +585,23 @@ impl OperationCoordinator {
         let started = self.begin(Some(card))?;
         started.progress.set_preparing(true);
         Some(started)
+    }
+
+    /// Run a single-path mutation whose failure leaves the disk untouched:
+    /// success is worded as `verb “name”`, failure as the error.
+    fn run_committing(
+        &mut self,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+        verb: &'static str,
+        work: impl FnOnce() -> anyhow::Result<CommittedOperation> + Send + 'static,
+    ) {
+        self.run(origin, cx, work, move |this, result, cx| {
+            Some(match result {
+                Ok(committed) => this.report_committed(committed, verb, origin, cx),
+                Err(error) => Report::Error(error.to_string()),
+            })
+        });
     }
 
     pub fn start_undo(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
@@ -976,16 +969,13 @@ impl OperationCoordinator {
                     return None;
                 }
                 Some(if outcome.failures.is_empty() {
-                    let verb = match mode {
-                        TransferMode::Copy => "Copied",
-                        TransferMode::Move => "Moved",
-                    };
                     let skipped = match outcome.skipped.len() {
                         0 => String::new(),
                         count => format!(", skipped {count}"),
                     };
                     Report::Success(format!(
-                        "{verb} {} item(s){skipped}{}",
+                        "{} {} item(s){skipped}{}",
+                        mode.done(),
                         outcome.completed.len(),
                         history_note(HistoryDirection::Undo, !outcome.undo_unavailable)
                     ))
@@ -1086,20 +1076,25 @@ fn ask_about_conflict(
         // own surrounding element, which a button with its own handler never
         // delivers — so every answer was sent while the dialog stayed on
         // screen, and the next conflict opened another one on top of it.
-        let answer_button = |id: &'static str, label: &'static str, response: ConflictResponse| {
-            let answer = answer.clone();
-            Button::new(id)
-                .label(label)
-                .outline()
-                .on_click(move |_, window, cx| {
-                    answer(response.clone());
-                    window.close_dialog(cx);
-                })
+        let answer_button =
+            |id: &'static str,
+             label: &'static str,
+             respond: Box<dyn Fn(&App) -> ConflictResponse>| {
+                let answer = answer.clone();
+                Button::new(id)
+                    .label(label)
+                    .outline()
+                    .on_click(move |_, window, cx| {
+                        answer(respond(cx));
+                        window.close_dialog(cx);
+                    })
+            };
+        let fixed = |response: ConflictResponse| -> Box<dyn Fn(&App) -> ConflictResponse> {
+            Box::new(move |_| response.clone())
         };
         let toggle = apply_to_all.clone();
         let redraw = coordinator.clone();
-        let rename = answer.clone();
-        let replace = answer.clone();
+        let typed_name = input.clone();
 
         dialog
             .title(if request.destination_is_directory {
@@ -1145,42 +1140,35 @@ fn ask_about_conflict(
                     .child(answer_button(
                         "conflict-cancel",
                         "Cancel",
-                        ConflictResponse::Cancel,
+                        fixed(ConflictResponse::Cancel),
                     ))
                     .child(answer_button(
                         "conflict-skip",
                         "Skip",
-                        ConflictResponse::Skip,
+                        fixed(ConflictResponse::Skip),
+                    ))
+                    .child(answer_button(
+                        "conflict-rename",
+                        "Rename",
+                        // A typed name cannot answer later conflicts, so
+                        // applying to all means Marcel picks the names.
+                        Box::new(move |cx| {
+                            if applies_to_all {
+                                ConflictResponse::AutoRename
+                            } else {
+                                ConflictResponse::Rename(OsString::from(
+                                    typed_name.read(cx).value().trim().to_string(),
+                                ))
+                            }
+                        }),
                     ))
                     .child(
-                        Button::new("conflict-rename")
-                            .label("Rename")
-                            .outline()
-                            .on_click({
-                                let input = input.clone();
-                                move |_, window, cx| {
-                                    // A typed name cannot answer later
-                                    // conflicts, so applying to all means
-                                    // Marcel picks the names.
-                                    rename(if applies_to_all {
-                                        ConflictResponse::AutoRename
-                                    } else {
-                                        ConflictResponse::Rename(OsString::from(
-                                            input.read(cx).value().trim().to_string(),
-                                        ))
-                                    });
-                                    window.close_dialog(cx);
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("conflict-replace")
-                            .label(if is_merge { "Merge" } else { "Replace" })
-                            .with_variant(ButtonVariant::Danger)
-                            .on_click(move |_, window, cx| {
-                                replace(ConflictResponse::Replace);
-                                window.close_dialog(cx);
-                            }),
+                        answer_button(
+                            "conflict-replace",
+                            if is_merge { "Merge" } else { "Replace" },
+                            fixed(ConflictResponse::Replace),
+                        )
+                        .with_variant(ButtonVariant::Danger),
                     ),
             )
             .overlay_closable(false)
