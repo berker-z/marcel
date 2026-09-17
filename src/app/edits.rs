@@ -354,6 +354,39 @@ impl Marcel {
         );
     }
 
+    pub(super) fn open_new_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("File name"));
+        self.ask_name(
+            window,
+            cx,
+            NameDialog { title: "New File", input, action: "Create" },
+            |_| Ok(()),
+            |this, name, window, cx| {
+                let parent = this.directory.current_dir.clone();
+                this.with_operations(window, cx, |ops, origin, cx| {
+                    ops.start_create_file(parent, name, origin, cx);
+                });
+            },
+        );
+    }
+
+    /// Copy the selection beside itself. The transfer picks the free names.
+    pub(super) fn start_duplicate_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sources = self.selected_paths();
+        if sources.is_empty() {
+            return;
+        }
+        self.ui.entry_menu = None;
+        let destination = self.directory.current_dir.clone();
+        self.with_operations(window, cx, |ops, origin, cx| {
+            ops.start_duplicate(sources, destination, origin, cx);
+        });
+    }
+
     pub(super) fn open_compress_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sources = self.selected_paths();
         let Some(first) = sources.first() else {

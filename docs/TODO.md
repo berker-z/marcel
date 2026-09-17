@@ -156,10 +156,13 @@ release gate that contradicts the release notes is a bookkeeping bug rather than
 a missing feature. Adding conventional checkbox actions does not make a first
 release better than finishing its acceptance evidence does.
 
-So they join everything else—X11 outbound drag, desktop clipboard integration,
-Duplicate, Move To, cross-filesystem conflict UI, remote locations, broader
-preference persistence, custom sorting, media playback, and deeper coordinator
-extraction—as post-MVP work rather than a reason to hold the first release.
+So they joined everything else—X11 outbound drag, desktop clipboard
+integration, Duplicate, Move To, cross-filesystem conflict UI, remote
+locations, broader preference persistence, custom sorting, media playback, and
+deeper coordinator extraction—as post-MVP work rather than a reason to hold the
+first release. Properties, New File, and Duplicate have since landed
+([Sprint 25](sprints/025-conventional-actions.md)); the rest of that list
+still stands.
 
 ## Recommended delivery order
 
@@ -180,10 +183,8 @@ manual acceptance phase are intentionally parked, not current commitments.
 4. Complete the distribution-hardening checklist below and test the flake
    install on a clean minimal NixOS environment.
 5. Cut `v0.1.0` and prepare the nixpkgs package.
-6. Close Sprint 14's remaining Properties surface without changing the user's
-   default directory handler merely by installing Marcel.
-7. Add New File.
-8. Add Duplicate and Move To.
+6. Add Move To. New File, Duplicate, and Properties landed in
+   [Sprint 25](sprints/025-conventional-actions.md).
 9. Finish X11 source support and manual acceptance for the implemented
    bilateral native desktop drag-and-drop, then add desktop clipboard
    interoperability.
@@ -222,8 +223,8 @@ The packaging contract, current dependency caveats, target formats, and
   its MIME association declaratively.
 - [x] Implement `org.freedesktop.FileManager1` navigation support for
   `ShowItems` and `ShowFolders`.
-- [ ] Route `ShowItemProperties` through the planned shared read-only
-  Properties presentation.
+- [x] Route `ShowItemProperties` through the shared read-only Properties
+  dialog ([Sprint 25](sprints/025-conventional-actions.md)).
 - [x] Use one primary Marcel process per graphical session. Later CLI, desktop,
   and D-Bus requests must be routed to it without blocking GPUI's foreground
   executor.
@@ -338,8 +339,8 @@ The packaging contract, current dependency caveats, target formats, and
   in-progress rename across them. A churning directory (a build tree) can loop
   full reloads today, each one clearing the user's selection
   ([`review-2026-08-20.md`](review-2026-08-20.md)).
-- [ ] Implement New File and directory Properties behind their shared
-  commands.
+- [x] Implement New File, Duplicate, and Properties behind their shared
+  commands ([Sprint 25](sprints/025-conventional-actions.md)).
 - [x] Implement Open in Terminal through the shared current-directory command,
   preferring `xdg-terminal-exec`, then `TERMINAL`, then explicit
   working-directory fallbacks.

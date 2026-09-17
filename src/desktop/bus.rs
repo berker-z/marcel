@@ -49,9 +49,10 @@ impl DesktopRequest {
     ///
     /// A reveal may. "Show me where this file is" is a request about a view
     /// that already exists — it is the one case where reusing the window in
-    /// front of the user is the answer rather than a shortcut.
+    /// front of the user is the answer rather than a shortcut. Properties is
+    /// a dialog, and a dialog goes on the window the user is looking at.
     pub fn may_reuse_a_window(&self) -> bool {
-        matches!(self, Self::ShowItems(_) | Self::ShowFolders(_))
+        matches!(self, Self::ShowItems(_) | Self::ShowFolders(_) | Self::ShowItemProperties(_))
     }
 }
 
@@ -255,10 +256,10 @@ impl FileManagerService {
 
     async fn show_item_properties(
         &self,
-        _uris: Vec<String>,
+        uris: Vec<String>,
         _startup_id: String,
     ) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported("Marcel Properties is not implemented yet".to_string()))
+        validate_and_enqueue(&self.requests, UriRequestKind::ShowItemProperties, uris).await
     }
 }
 
@@ -416,6 +417,10 @@ mod tests {
         assert!(!DesktopRequest::Activate.may_reuse_a_window());
         assert!(DesktopRequest::ShowItems(vec![location()]).may_reuse_a_window());
         assert!(DesktopRequest::ShowFolders(vec![PathBuf::from("/folder")]).may_reuse_a_window());
+        assert!(
+            DesktopRequest::ShowItemProperties(vec![PathBuf::from("/folder/file")])
+                .may_reuse_a_window()
+        );
     }
 
     const PRIVATE_BUS_CHILD: &str = "MARCEL_PRIVATE_BUS_TEST_CHILD";

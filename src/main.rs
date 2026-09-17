@@ -133,8 +133,33 @@ fn handle_desktop_request(request: DesktopRequest, fallback_path: &std::path::Pa
             may_reuse,
             cx,
         ),
-        DesktopRequest::ShowItemProperties(_) => {}
+        DesktopRequest::ShowItemProperties(paths) => show_properties(paths, may_reuse, cx),
     }
+}
+
+/// Open the Properties dialog for `paths` on the window the user is looking
+/// at, or on a new one at the first item's folder when there is none.
+fn show_properties(paths: Vec<std::path::PathBuf>, may_reuse: bool, cx: &mut App) {
+    let registry = window::global(cx);
+    let target = registry.read(cx).current(cx).filter(|_| may_reuse).or_else(|| {
+        let directory = paths
+            .first()
+            .and_then(|path| path.parent())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        window::open(directory, cx).ok()
+    });
+    let Some(target) = target else {
+        return;
+    };
+    // Through the untyped handle: the typed one leases the root view for the
+    // closure, and opening a dialog needs to update that same root.
+    let handle: gpui::AnyWindowHandle = target.handle.into();
+    let _ = handle.update(cx, |_, window, cx| {
+        target.view.update(cx, |view, cx| view.open_properties(paths, window, cx));
+        window.activate_window();
+    });
+    cx.activate(true);
 }
 
 /// Show each location, in a window each, reusing one for the first if allowed.

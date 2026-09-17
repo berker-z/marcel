@@ -68,7 +68,7 @@ knows about, and a documented one that no longer works is worse.
 Shortcuts are registered in two places, so check both before editing the list:
 
 - The `browser_commands!` table in `src/app/actions.rs` declares every command
-  once: its GPUI action, its binding if it has one, and the `BrowserCommand`
+  once: its GPUI action, its key bindings if it has any, and the `BrowserCommand`
   menus and toolbar buttons dispatch through. Enablement lives in
   `command_enabled` and behaviour in `execute`, in the same file.
 - `on_window_key_down` in the same file handles the ones that must keep working

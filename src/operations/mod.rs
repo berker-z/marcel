@@ -40,7 +40,7 @@ use crate::{
         CommittedOperation, CompletedTransfer, DirectoryChanges, HistoryDirection, MutationOutcome,
         OperationJournal, OperationRecord, TransferMode, TransferProgress,
         conflict::{ConflictPolicy, PromptingResolver},
-        create_directory, create_zip_operation,
+        create_directory, create_file, create_zip_operation,
         delete::{DeleteOutcome, delete_paths},
         extract_archive_operation,
         quarantine::erase_replacement_quarantine,
@@ -504,6 +504,33 @@ impl OperationCoordinator {
         self.run_committing(origin, cx, "Created folder", move || create_directory(&parent, &name));
     }
 
+    pub fn start_create_file(
+        &mut self,
+        parent: PathBuf,
+        name: String,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        if self.begin(None).is_none() {
+            return;
+        }
+        self.run_committing(origin, cx, "Created", move || create_file(&parent, &name));
+    }
+
+    /// Copy the selection into the folder it lives in.
+    ///
+    /// The transfer already answers "copy this onto itself" by choosing a
+    /// free name, so Duplicate is that transfer with no question to ask.
+    pub fn start_duplicate(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_transfer(sources, destination, TransferMode::Copy, None, origin, cx);
+    }
+
     pub fn start_compress(
         &mut self,
         sources: Vec<PathBuf>,
@@ -942,6 +969,8 @@ fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> 
             format!("Undid creation of “{name}”")
         }
         (OperationRecord::CreateDirectory { .. }, true) => format!("Recreated folder “{name}”"),
+        (OperationRecord::CreateFile { .. }, false) => format!("Undid creation of “{name}”"),
+        (OperationRecord::CreateFile { .. }, true) => format!("Recreated “{name}”"),
         (OperationRecord::Copy { .. }, false) => "Undid copy".to_string(),
         (OperationRecord::Copy { .. }, true) => "Repeated copy".to_string(),
         (OperationRecord::Move { .. }, false) => "Undid move".to_string(),

@@ -424,6 +424,51 @@ fn undo_refuses_a_non_empty_or_replaced_created_directory() {
 }
 
 #[test]
+fn create_file_is_empty_no_replace_and_supports_undo_redo() {
+    let sandbox = Sandbox::new();
+    let occupied = sandbox.file("notes.txt", b"keep me");
+    assert!(create_file(sandbox.root(), "notes.txt").is_err());
+    assert_eq!(read(&occupied), b"keep me");
+
+    let created = recorded(create_file(sandbox.root(), "todo.txt").unwrap());
+    assert_eq!(created.path(), sandbox.path("todo.txt"));
+    assert_eq!(read(created.path()), b"");
+    assert_eq!(
+        created.forward_directory_changes(),
+        DirectoryChanges::upserted(vec![created.path().to_path_buf()])
+    );
+
+    let redo_record = recorded(undo_operation(&created).unwrap());
+    assert!(!created.path().exists());
+
+    let redone = recorded(redo_operation(&redo_record).unwrap());
+    assert_eq!(read(redone.path()), b"");
+}
+
+/// Once the user has typed into the file it is theirs, and an undo that
+/// deleted it would destroy work rather than reverse a creation.
+#[test]
+fn undo_refuses_a_written_or_replaced_created_file() {
+    let sandbox = Sandbox::new();
+    let created = recorded(create_file(sandbox.root(), "draft.md").unwrap());
+    fs::write(created.path(), b"# Draft").unwrap();
+    assert!(undo_operation(&created).is_err());
+    assert_eq!(read(created.path()), b"# Draft");
+
+    let created = recorded(create_file(sandbox.root(), "replaced").unwrap());
+    fs::remove_file(created.path()).unwrap();
+    fs::write(created.path(), b"").unwrap();
+    assert!(undo_operation(&created).is_err());
+    assert!(created.path().is_file());
+
+    let created = recorded(create_file(sandbox.root(), "now-a-folder").unwrap());
+    fs::remove_file(created.path()).unwrap();
+    fs::create_dir(created.path()).unwrap();
+    assert!(undo_operation(&created).is_err());
+    assert!(created.path().is_dir());
+}
+
+#[test]
 fn history_is_bounded_and_new_work_clears_redo() {
     let sandbox = Sandbox::new();
     let mut journal = OperationJournal::new(2);

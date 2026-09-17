@@ -24,6 +24,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 async-channel = "2.5"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 globset = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }

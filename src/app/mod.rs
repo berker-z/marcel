@@ -10,9 +10,10 @@
 //! - `navigation`: loading a folder or the Trash, watching it, moving
 //!   through history, and folding operation effects back into the listing.
 //! - `edits`: the window's side of every mutation — clipboard, rename, new
-//!   folder, trash, delete, compress, extract, drag moves.
+//!   folder and file, duplicate, trash, delete, compress, extract, drag moves.
 //! - `pointer`: marquee selection, drag and drop, and edge autoscroll.
 //! - `preview`: what the preview pane loads and how it draws it.
+//! - `properties`: the Properties dialog and the view that fills it in.
 //! - `picker`: the handful of things a file-chooser window does differently.
 //! - `sidebar`, `browser`, `location`, `menu`, `dialogs`: the surfaces.
 //!
@@ -31,6 +32,7 @@ mod navigation;
 mod picker;
 mod pointer;
 mod preview;
+mod properties;
 mod sidebar;
 mod state;
 

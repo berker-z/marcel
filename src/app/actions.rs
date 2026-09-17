@@ -24,13 +24,13 @@ use super::{DIRECTORY_ROW_HEIGHT, GRID_ROW_HEIGHT, Marcel, state::ViewMode};
 pub const BROWSER_KEY_CONTEXT: &str = "MarcelBrowser";
 
 /// Declares the browser's commands once: the GPUI action for each, its key
-/// binding if it has one, and the `BrowserCommand` variant menus and
+/// bindings if it has any, and the `BrowserCommand` variant menus and
 /// toolbar buttons use to reach the same code.
 ///
 /// `on_window_key_down` handles the few keys that must keep working while
 /// another surface holds focus (Ctrl+L, Ctrl+F, Escape in a picker).
 macro_rules! browser_commands {
-    ($( $name:ident $( = $key:literal )? ),* $(,)?) => {
+    ($( $name:ident $( = $($key:literal)|+ )? ),* $(,)?) => {
         gpui::actions!(marcel, [$($name),*]);
 
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ macro_rules! browser_commands {
 
         pub fn init_key_bindings(cx: &mut App) {
             cx.bind_keys([
-                $( $( KeyBinding::new($key, $name, Some(BROWSER_KEY_CONTEXT)), )? )*
+                $( $( $( KeyBinding::new($key, $name, Some(BROWSER_KEY_CONTEXT)), )+ )? )*
             ]);
         }
 
@@ -87,10 +87,14 @@ browser_commands! {
     DeletePermanently = "shift-delete",
     EmptyTrash,
     NewFolder = "ctrl-shift-n",
+    NewFile,
+    DuplicateSelection = "ctrl-d",
     OpenTerminal,
     RenameSelection = "f2",
     CompressSelection,
     ExtractSelection,
+    // Nautilus binds Ctrl+I; Dolphin, Thunar, and Nemo bind Alt+Enter.
+    ShowProperties = "ctrl-i" | "alt-enter",
     UndoFileOperation = "ctrl-z",
     RedoFileOperation = "ctrl-y",
 }
@@ -195,7 +199,11 @@ impl Marcel {
                 self.can_mutate_here(cx)
                     && operations.clipboard().is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
-            NewFolder => self.can_mutate_here(cx),
+            NewFolder | NewFile => self.can_mutate_here(cx),
+            DuplicateSelection => self.can_mutate_here(cx) && self.has_selection(),
+            // With nothing selected, Properties describes the folder shown —
+            // except the Trash, which is a listing rather than a place.
+            ShowProperties => self.has_selection() || !trash,
             OpenTerminal => {
                 !trash
                     && !self.directory.loading
@@ -299,6 +307,9 @@ impl Marcel {
             DeletePermanently => self.open_permanent_delete_dialog(window, cx),
             EmptyTrash => self.open_empty_trash_dialog(window, cx),
             NewFolder => self.open_new_folder_dialog(window, cx),
+            NewFile => self.open_new_file_dialog(window, cx),
+            DuplicateSelection => self.start_duplicate_selection(window, cx),
+            ShowProperties => self.open_selection_properties(window, cx),
             OpenTerminal => self.open_terminal(window, cx),
             OpenInNewWindow => self.open_selection_in_new_window(cx),
             RenameSelection => self.begin_rename(window, cx),

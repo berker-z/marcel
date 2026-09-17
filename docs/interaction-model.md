@@ -203,9 +203,12 @@ configured MIME default without prompting, while `Open With…` explicitly
 requests the desktop application chooser. Cut, Copy, and Paste are active
 through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
-Remaining planned commands are disabled and prefixed with `–`: Duplicate,
-Move To, Create Link, Copy Path, and Properties. Rename is active for exactly
-one ordinary filesystem selection and edits the name inline in both views.
+Remaining planned commands are disabled and prefixed with `–`: Move To,
+Create Link, and Copy Path. Duplicate copies the selection beside itself and
+lets the transfer choose the free names. Properties opens for any selection,
+or for the displayed folder when nothing is selected. Rename is active for
+exactly one ordinary filesystem selection and edits the name inline in both
+views.
 Compress is active for ordinary filesystem selections. Extract appears for one
 recognized archive and is muted only while another filesystem operation is
 active. A planned command loses the prefix only when its implementation,
@@ -249,7 +252,9 @@ Separators group creation and clipboard actions, selection and refresh,
 visibility, and directory utilities. Paste is disabled when the clipboard has
 no compatible file payload. Properties describes the displayed directory. Show
 Hidden Files is a checked toggle. New Folder, Undo, and Redo use the same
-command state as `Ctrl+Shift+N`, `Ctrl+Z`, and `Ctrl+Y`.
+command state as `Ctrl+Shift+N`, `Ctrl+Z`, and `Ctrl+Y`. New File creates an
+empty file through the same name dialog as New Folder; undo removes it only
+while it is still empty and still the file Marcel made.
 
 Open in Terminal dispatches one shared command for the displayed ordinary
 filesystem directory. On Linux, Marcel first tries the proposed

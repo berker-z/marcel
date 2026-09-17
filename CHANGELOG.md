@@ -33,8 +33,14 @@ Copy and move with progress and cancellation. When a destination is taken,
 Marcel asks whether to replace, rename, skip, or merge, and one answer can
 apply to the rest of the operation. Undo and redo cover copy, move, rename,
 Trash, restore, archive creation, and extraction. Permanent deletion needs a
-confirmation and stays out of undo history. Inline rename, new folders, zip
-creation, and extraction of the common free formats.
+confirmation and stays out of undo history. Inline rename, new folders and
+files, Duplicate, zip creation, and extraction of the common free formats.
+
+A Properties dialog (`Ctrl+I` or `Alt+Enter`, also in both context menus, and
+answering `ShowItemProperties` over D-Bus): kind, location, size, owner,
+group, permissions, and timestamps, plus what the preview loaders know about
+the file, so image dimensions, PDF page count, text line count, and archive
+contents. Folders are measured in the background while the dialog is open.
 
 Marcel checks that files are still what and where it thinks they are before
 touching them, and refuses rather than guessing.
@@ -69,7 +75,7 @@ Marcel needs a window at least 900 pixels wide. Narrower than that its panes are
 wider than the window and the preview pane runs off the edge, so the window
 refuses to shrink below it on desktops that honour a minimum size.
 
-No search, no Properties dialog, no New File. Moves between filesystems are
-refused rather than silently turned into a copy and a delete. No removable
-volumes or remote locations. Sorting is fixed. Dragging files out of Marcel is
+No search. Moves between filesystems are refused rather than silently turned
+into a copy and a delete. No Move To, no removable volumes, no remote
+locations. Sorting is fixed. Dragging files out of Marcel is
 not implemented on X11. The full list is in the README.

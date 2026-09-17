@@ -120,8 +120,8 @@ Desktop clipboard exchange remains a later, separate slice.
   batches without opening or executing anything.
 - [x] Confirm `ShowItems` reveals files requested by a browser-style “Show in
   folder” call.
-- [ ] Confirm `ShowItemProperties` and the in-app Properties command share one
-  read-only implementation.
+- [x] Confirm `ShowItemProperties` and the in-app Properties command share one
+  read-only implementation (Sprint 25: both call `Marcel::open_properties`).
 - [x] Confirm installing the ordinary package leaves the current generic file
   manager service and MIME defaults untouched.
 - [x] Confirm the explicit generic-service opt-in routes

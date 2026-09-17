@@ -42,6 +42,10 @@ pub enum OperationRecord {
         path: PathBuf,
         identity: FileIdentity,
     },
+    CreateFile {
+        path: PathBuf,
+        identity: FileIdentity,
+    },
     Copy {
         sources: Vec<PathSnapshot>,
         destination: PathBuf,
@@ -84,7 +88,7 @@ pub enum OperationRecord {
 impl OperationRecord {
     pub fn path(&self) -> &Path {
         match self {
-            Self::CreateDirectory { path, .. } => path,
+            Self::CreateDirectory { path, .. } | Self::CreateFile { path, .. } => path,
             Self::Copy { destination, created, .. } => {
                 created.first().map(|snapshot| snapshot.path.as_path()).unwrap_or(destination)
             }
@@ -103,7 +107,9 @@ impl OperationRecord {
 
     pub fn forward_directory_changes(&self) -> DirectoryChanges {
         match self {
-            Self::CreateDirectory { path, .. } => DirectoryChanges::upserted(vec![path.clone()]),
+            Self::CreateDirectory { path, .. } | Self::CreateFile { path, .. } => {
+                DirectoryChanges::upserted(vec![path.clone()])
+            }
             Self::Copy { destination, created, .. } => DirectoryChanges::upserted(
                 created
                     .iter()

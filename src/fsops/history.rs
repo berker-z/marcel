@@ -24,7 +24,8 @@ use super::{
     },
     local::{ensure_unoccupied, rename_no_replace},
     mutations::{
-        create_directory_at, create_zip_operation, extract_archive_operation, reverse_rename,
+        create_directory_at, create_file_at, create_zip_operation, extract_archive_operation,
+        reverse_rename,
     },
     quarantine::{preserve_unrestored, restore_replaced_items},
     transfer::{TransferMode, transfer_paths},
@@ -51,6 +52,34 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                 identity.validate(path, "undo")?;
                 // Commit: `remove_dir` either removes the directory or leaves it.
                 fs::remove_dir(path).at("Could not remove", path)
+            })();
+            match prepared {
+                Ok(()) => MutationOutcome::Committed(CommittedOperation::new(
+                    path.clone(),
+                    reversed,
+                    Some(operation.clone()),
+                )),
+                Err(error) => MutationOutcome::unchanged(error),
+            }
+        }
+        OperationRecord::CreateFile { path, identity } => {
+            let prepared = (|| -> Result<()> {
+                // The same shape as a created directory: Marcel removes only
+                // the empty file it made. Content written since is the user's,
+                // and the identity check keeps a replacement from being
+                // mistaken for it.
+                let metadata = fs::symlink_metadata(path).with_context(|| {
+                    format!("Cannot undo: “{}” no longer exists", path.display())
+                })?;
+                if !metadata.file_type().is_file() {
+                    bail!("Cannot undo: “{}” is no longer a regular file", path.display());
+                }
+                if metadata.len() > 0 {
+                    bail!("Cannot undo: “{}” is no longer empty", path.display());
+                }
+                identity.validate(path, "undo")?;
+                // Commit: `remove_file` either unlinks the file or leaves it.
+                fs::remove_file(path).at("Could not remove", path)
             })();
             match prepared {
                 Ok(()) => MutationOutcome::Committed(CommittedOperation::new(
@@ -228,6 +257,7 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
     let no_cancel = || Arc::new(AtomicBool::new(false));
     match operation {
         OperationRecord::CreateDirectory { path, .. } => create_directory_at(path.clone()).into(),
+        OperationRecord::CreateFile { path, .. } => create_file_at(path.clone()).into(),
         OperationRecord::Copy { sources, destination, .. } => {
             if let Err(error) = validate_snapshot_tree(sources) {
                 return MutationOutcome::unchanged(error);

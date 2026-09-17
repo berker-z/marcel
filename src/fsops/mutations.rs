@@ -74,6 +74,35 @@ pub(super) fn create_directory_at(path: PathBuf) -> Result<CommittedOperation> {
     Ok(CommittedOperation::published(path, record))
 }
 
+pub fn create_file(parent: &Path, name: &str) -> Result<CommittedOperation> {
+    validate_entry_name(name)?;
+    create_file_at(parent.join(name))
+}
+
+/// Create an empty regular file, refusing an occupied path.
+///
+/// `O_EXCL` makes the creation the one commit: the file either did not exist
+/// and now does, or the call failed and nothing changed. Undo removes it only
+/// while it is still the empty file Marcel made.
+pub(super) fn create_file_at(path: PathBuf) -> Result<CommittedOperation> {
+    // Commit.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .at("Could not create", &path)?;
+    // Finalize: the file exists. Its identity comes from the descriptor just
+    // opened, so it is this file's and not that of something that replaced it.
+    let record =
+        file.metadata().ok().filter(|metadata| metadata.file_type().is_file()).map(|metadata| {
+            OperationRecord::CreateFile {
+                path: path.clone(),
+                identity: FileIdentity::of(&metadata),
+            }
+        });
+    Ok(CommittedOperation::published(path, record))
+}
+
 // Yazi's rename actor coordinates focused input, watcher updates, and reveal:
 // https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-actor/src/mgr/rename.rs
 // Marcel keeps those interaction principles but owns this stricter

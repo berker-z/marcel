@@ -142,7 +142,7 @@ impl Marcel {
             command("Cut", Some("Ctrl+X"), CutSelection),
             command("Copy", Some("Ctrl+C"), CopySelection),
             command("Paste", Some("Ctrl+V"), PasteFiles),
-            Planned("Duplicate"),
+            command("Duplicate", Some("Ctrl+D"), DuplicateSelection),
             Separator,
             command("Rename…", Some("F2"), RenameSelection),
             Planned("Move To…"),
@@ -159,7 +159,11 @@ impl Marcel {
         if self.selected_archive() {
             items.push(command("Extract", None, ExtractSelection));
         }
-        items.extend([Planned("Copy Path"), Separator, Planned("Properties")]);
+        items.extend([
+            Planned("Copy Path"),
+            Separator,
+            command("Properties", Some("Ctrl+I"), ShowProperties),
+        ]);
         items
     }
 
@@ -167,7 +171,7 @@ impl Marcel {
         use BrowserCommand::*;
         let mut items = vec![
             command("New Folder", Some("Ctrl+Shift+N"), NewFolder),
-            Planned("New File"),
+            command("New File", None, NewFile),
             command("Paste", Some("Ctrl+V"), PasteFiles),
             command("Undo", Some("Ctrl+Z"), UndoFileOperation),
             command("Redo", Some("Ctrl+Y"), RedoFileOperation),
@@ -195,7 +199,7 @@ impl Marcel {
                     ));
                 },
             },
-            Planned("Properties"),
+            command("Properties", Some("Ctrl+I"), ShowProperties),
         ];
         if self.sidebar.browsing_trash {
             items.extend([Separator, command("Empty Trash…", None, EmptyTrash)]);

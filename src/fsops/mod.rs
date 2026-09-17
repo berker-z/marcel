@@ -36,7 +36,7 @@ pub use journal::{
     CommittedOperation, HistoryDirection, MutationOutcome, OperationJournal, OperationRecord,
 };
 pub use mutations::{
-    create_directory, create_zip_operation, extract_archive_operation, rename_entry,
+    create_directory, create_file, create_zip_operation, extract_archive_operation, rename_entry,
     validate_entry_name, validate_entry_os_name,
 };
 pub use quarantine::{

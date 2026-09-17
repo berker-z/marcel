@@ -82,11 +82,11 @@ Linux `RENAME_NOREPLACE`; an occupied destination is always refused.
 - [x] Manually verify names containing spaces, dots, and non-ASCII characters.
 - [x] Manually verify watcher reconciliation and selection reveal after Rename,
   Undo, and Redo.
-- [ ] Implement New File.
+- [x] Implement New File (Sprint 25).
 - [x] Implement Open in Terminal through `xdg-terminal-exec`, `TERMINAL`, and
   bounded terminal-emulator fallbacks without leaking the Nix development
   shell's native-library search path.
-- [ ] Implement single- and multi-selection Properties.
+- [x] Implement single- and multi-selection Properties (Sprint 25).
 
 ## UI-fix handoff
 

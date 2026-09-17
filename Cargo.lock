@@ -3741,6 +3741,7 @@ dependencies = [
  "anyhow",
  "ashpd 0.12.3",
  "async-channel",
+ "chrono",
  "freedesktop-icons",
  "globset",
  "gpui",

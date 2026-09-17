@@ -6,6 +6,7 @@ use std::{
 
 use gpui::RenderImage;
 
+pub mod details;
 pub mod image;
 pub mod pdf;
 pub mod thumbnails;
@@ -15,7 +16,7 @@ use crate::browse::entries::{FileEntry, format_size};
 use crate::fsops::local::open_regular_file;
 use pdf::inspect_pdf;
 
-const MAX_TEXT_BYTES: u64 = 256 * 1024;
+pub(super) const MAX_TEXT_BYTES: u64 = 256 * 1024;
 const MAX_RICH_TEXT_BYTES: usize = 32 * 1024;
 const MAX_PREVIEW_LINE_CHARS: usize = 2 * 1024;
 
@@ -135,7 +136,7 @@ fn metadata_summary(entry: &FileEntry, detail: String) -> String {
 }
 
 /// Read as much of `buffer` as the file can fill, tolerating short reads.
-fn read_up_to(file: &mut std::fs::File, buffer: &mut [u8]) -> io::Result<usize> {
+pub(super) fn read_up_to(file: &mut std::fs::File, buffer: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
     while filled < buffer.len() {
         match file.read(&mut buffer[filled..]) {
@@ -175,7 +176,7 @@ fn split_preview_lines(contents: &str) -> (Arc<[String]>, bool) {
     (lines.into(), clipped_any)
 }
 
-fn is_probably_text(bytes: &[u8]) -> bool {
+pub(super) fn is_probably_text(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return true;
     }
@@ -188,11 +189,11 @@ fn is_probably_text(bytes: &[u8]) -> bool {
     suspicious * 100 / bytes.len() < 5
 }
 
-fn is_image_extension(path: &Path) -> bool {
+pub(super) fn is_image_extension(path: &Path) -> bool {
     has_extension(path, &["avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "tif", "tiff", "webp"])
 }
 
-fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+pub(super) fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
         extensions.iter().any(|candidate| extension.eq_ignore_ascii_case(candidate))
     })

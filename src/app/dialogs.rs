@@ -37,7 +37,11 @@ pub(super) struct NameDialog {
     pub action: &'static str,
 }
 
-fn footer(action: &'static str, variant: ButtonVariant, show_cancel: bool) -> DialogFooter {
+pub(super) fn footer(
+    action: &'static str,
+    variant: ButtonVariant,
+    show_cancel: bool,
+) -> DialogFooter {
     DialogFooter::new()
         .when(show_cancel, |footer| {
             footer.child(DialogClose::new().child(Button::new("cancel").label("Cancel").outline()))
