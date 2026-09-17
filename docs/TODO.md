@@ -95,7 +95,25 @@ libraries, portals, icon and thumbnail paths).
 
 - X11 outbound drag. Wayland is the tested target.
 - Desktop clipboard interoperability for files.
-- Media playback, video thumbnails, ebook previews.
+- Media previews, undecided. Measured on 2026-09-17: the whole Marcel
+  closure is 224 MiB, Poppler cost about 20 MiB of it, and `ffmpeg-headless`
+  would add about 300 MiB. Three tiers, in rising cost:
+  - A poster frame plus duration, codec, resolution, and tags through
+    `ffprobe`/`ffmpeg`, as one more loader modelled on `preview/pdf.rs`
+    (subprocess, cancellable, cached by identity), feeding the existing
+    image preview, the grid thumbnails, and Properties. About a day. The
+    open question is only the tool: bundle it like Poppler and double the
+    closure, or find it on `PATH` with a `settings.media` Nix switch that
+    wraps it in, and say "needs ffmpeg" otherwise.
+  - Audio playback with `symphonia` and `cpal`: pure Rust, a few MB of
+    binary, alsa-lib in the closure. Two or three days, mostly the
+    transport (play, pause, seek, stop when the preview is superseded).
+  - Video playback: GPUI has no video element, so it is `ffmpeg-next` or
+    `gstreamer-rs` decoding into a `RenderImage` per frame at 30 fps, plus
+    audio sync. One to two weeks, a 250 to 300 MiB closure either way, and
+    hot without VAAPI. Not worth it; a poster frame and Open in mpv is the
+    file-manager answer.
+- Ebook previews.
 - Accessibility: there is no AT-SPI tree, so screen readers see nothing.
 - Editable Places, Open in New Tab. Tabs themselves are not planned.
 - Grouping, zoom, and per-folder view settings.
