@@ -164,12 +164,6 @@ impl DirectorySession {
         self.projection_revision
     }
 
-    pub fn apply_event(&mut self, event: DirectoryEvent) -> ApplyDirectoryEvent {
-        let applied = apply_directory_event(&mut self.entries, event);
-        self.mark_entries_changed();
-        applied
-    }
-
     pub fn apply_events(&mut self, events: Vec<DirectoryEvent>) -> ApplyDirectoryEvents {
         let primary = self.selection.primary().cloned();
         let primary_changed = primary.as_ref().is_some_and(|primary| {
@@ -530,38 +524,6 @@ pub enum DirectoryEvent {
     RescanRequired,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApplyDirectoryEvent {
-    Applied,
-    RescanRequired,
-}
-
-fn apply_directory_event(
-    entries: &mut Vec<FileEntry>,
-    event: DirectoryEvent,
-) -> ApplyDirectoryEvent {
-    match event {
-        DirectoryEvent::Added(entry) | DirectoryEvent::Changed(entry) => {
-            remove_path(entries, &entry.path);
-            let current = std::mem::take(entries);
-            *entries = merge_sorted_entries(current, vec![entry]);
-        }
-        DirectoryEvent::Removed(path) => remove_path(entries, &path),
-        DirectoryEvent::Renamed { from, entry } => {
-            remove_path(entries, &from);
-            remove_path(entries, &entry.path);
-            let current = std::mem::take(entries);
-            *entries = merge_sorted_entries(current, vec![entry]);
-        }
-        DirectoryEvent::RescanRequired => return ApplyDirectoryEvent::RescanRequired,
-    }
-    ApplyDirectoryEvent::Applied
-}
-
-fn remove_path(entries: &mut Vec<FileEntry>, path: &PathBuf) {
-    entries.retain(|entry| &entry.path != path);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,51 +574,41 @@ mod tests {
         assert_eq!(visible, ["report.txt", ".marcel-delete-1-0-old", ".config"]);
     }
 
-    #[test]
-    fn additions_and_changes_preserve_directory_first_sorting() {
-        let mut entries = vec![entry("b", false, Some(1))];
-        apply_directory_event(&mut entries, DirectoryEvent::Added(entry("z", true, None)));
-        apply_directory_event(
-            &mut entries,
-            DirectoryEvent::Changed(entry("b", false, Some(9))),
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| (entry.name.as_str(), entry.size))
-                .collect::<Vec<_>>(),
-            vec![("z", None), ("b", Some(9))]
-        );
+    fn names(session: &DirectorySession) -> Vec<(&str, Option<u64>)> {
+        session
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.size))
+            .collect()
     }
 
     #[test]
-    fn rename_replaces_stale_source_and_destination_names() {
-        let mut entries = vec![entry("old", false, Some(1)), entry("new", false, Some(2))];
-        apply_directory_event(
-            &mut entries,
+    fn events_keep_directory_first_sorting_and_replace_stale_names() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.merge_batch(vec![
+            entry("b", false, Some(1)),
+            entry("old", false, Some(1)),
+        ]);
+
+        session.apply_events(vec![
+            DirectoryEvent::Added(entry("z", true, None)),
+            DirectoryEvent::Changed(entry("b", false, Some(9))),
             DirectoryEvent::Renamed {
                 from: PathBuf::from("/folder/old"),
                 entry: entry("new", false, Some(3)),
             },
+        ]);
+        assert_eq!(
+            names(&session),
+            [("z", None), ("b", Some(9)), ("new", Some(3))]
         );
-        assert_eq!(entries, vec![entry("new", false, Some(3))]);
-    }
 
-    #[test]
-    fn removal_and_rescan_are_explicit() {
-        let mut entries = vec![entry("gone", false, Some(1))];
-        assert_eq!(
-            apply_directory_event(
-                &mut entries,
-                DirectoryEvent::Removed(PathBuf::from("/folder/gone"))
-            ),
-            ApplyDirectoryEvent::Applied
-        );
-        assert!(entries.is_empty());
-        assert_eq!(
-            apply_directory_event(&mut entries, DirectoryEvent::RescanRequired),
-            ApplyDirectoryEvent::RescanRequired
-        );
+        session.apply_events(vec![DirectoryEvent::Removed(PathBuf::from("/folder/z"))]);
+        assert_eq!(names(&session), [("b", Some(9)), ("new", Some(3))]);
+        assert!(matches!(
+            session.apply_events(vec![DirectoryEvent::RescanRequired]),
+            ApplyDirectoryEvents::RescanRequired
+        ));
     }
 
     #[test]
@@ -932,7 +884,7 @@ mod tests {
         ))]);
         assert!(session.entry(Path::new("/folder/a.txt")).is_none());
 
-        session.apply_event(DirectoryEvent::Added(entry("b.txt", false, Some(2))));
+        session.apply_events(vec![DirectoryEvent::Added(entry("b.txt", false, Some(2)))]);
         assert!(session.entry(Path::new("/folder/b.txt")).is_some());
 
         session.begin_virtual_load(true);
