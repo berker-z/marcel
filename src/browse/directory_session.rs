@@ -547,31 +547,23 @@ mod tests {
         }
     }
 
-    /// Hidden entries are shown by default, so without filtering, replacing a
-    /// file would make a cryptic sibling appear beside it and vanish later.
-    /// Permanent-delete quarantines stay visible because their recovery
-    /// guidance tells the user to go and look at them.
-    #[test]
-    fn marcel_working_files_stay_out_of_the_browser() {
+    fn file(name: &str) -> FileEntry {
+        entry(name, false, Some(1))
+    }
+
+    fn dir(name: &str) -> FileEntry {
+        entry(name, true, None)
+    }
+
+    fn path(name: &str) -> PathBuf {
+        PathBuf::from("/folder").join(name)
+    }
+
+    /// A finished load holding `entries`, sorted and projected.
+    fn session(entries: Vec<FileEntry>) -> DirectorySession {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.show_hidden = true;
-        session.entries = vec![
-            entry("report.txt", false, Some(1)),
-            entry(".marcel-replaced-1-0-report.txt", false, Some(1)),
-            entry(".marcel-copy-1-0-staging", true, None),
-            entry(".marcel-archive-abc", true, None),
-            entry(".marcel-delete-1-0-old", true, None),
-            entry(".config", true, None),
-        ];
-        session.rebuild_visible_entries();
-
-        let visible = session
-            .visible_entries
-            .iter()
-            .map(|index| session.entries[*index].name.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(visible, ["report.txt", ".marcel-delete-1-0-old", ".config"]);
+        session.merge_batch(entries);
+        session
     }
 
     fn names(session: &DirectorySession) -> Vec<(&str, Option<u64>)> {
@@ -582,19 +574,50 @@ mod tests {
             .collect()
     }
 
+    fn visible_names(session: &DirectorySession) -> Vec<&str> {
+        session
+            .visible_entries
+            .iter()
+            .map(|index| session.entries[*index].name.as_str())
+            .collect()
+    }
+
+    fn previews(result: &ReconcileSelection, name: &str) -> bool {
+        matches!(result, ReconcileSelection::Preview(entry) if entry.name == name)
+    }
+
+    /// Hidden entries are shown by default, so without filtering, replacing a
+    /// file would make a cryptic sibling appear beside it and vanish later.
+    /// Permanent-delete quarantines stay visible because their recovery
+    /// guidance tells the user to go and look at them.
     #[test]
-    fn events_keep_directory_first_sorting_and_replace_stale_names() {
+    fn marcel_working_files_stay_out_of_the_browser() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.show_hidden = true;
         session.merge_batch(vec![
-            entry("b", false, Some(1)),
-            entry("old", false, Some(1)),
+            file("report.txt"),
+            file(".marcel-replaced-1-0-report.txt"),
+            dir(".marcel-copy-1-0-staging"),
+            dir(".marcel-archive-abc"),
+            dir(".marcel-delete-1-0-old"),
+            dir(".config"),
         ]);
 
+        assert_eq!(
+            visible_names(&session),
+            ["report.txt", ".marcel-delete-1-0-old", ".config"]
+        );
+    }
+
+    #[test]
+    fn events_keep_directory_first_sorting_and_replace_stale_names() {
+        let mut session = session(vec![file("b"), file("old")]);
+
         session.apply_events(vec![
-            DirectoryEvent::Added(entry("z", true, None)),
+            DirectoryEvent::Added(dir("z")),
             DirectoryEvent::Changed(entry("b", false, Some(9))),
             DirectoryEvent::Renamed {
-                from: PathBuf::from("/folder/old"),
+                from: path("old"),
                 entry: entry("new", false, Some(3)),
             },
         ]);
@@ -603,7 +626,7 @@ mod tests {
             [("z", None), ("b", Some(9)), ("new", Some(3))]
         );
 
-        session.apply_events(vec![DirectoryEvent::Removed(PathBuf::from("/folder/z"))]);
+        session.apply_events(vec![DirectoryEvent::Removed(path("z"))]);
         assert_eq!(names(&session), [("b", Some(9)), ("new", Some(3))]);
         assert!(matches!(
             session.apply_events(vec![DirectoryEvent::RescanRequired]),
@@ -613,23 +636,12 @@ mod tests {
 
     #[test]
     fn filtering_reconciles_selection_and_prefers_first_match() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.entries = vec![
-            entry("alpha.txt", false, Some(1)),
-            entry("beta.txt", false, Some(1)),
-        ];
-        session.rebuild_visible_entries();
-        session
-            .selection
-            .select_only(PathBuf::from("/folder/alpha.txt"));
+        let mut session = session(vec![file("alpha.txt"), file("beta.txt")]);
+        session.selection.select_only(path("alpha.txt"));
 
-        let result = session.set_filter_query("bet".to_string());
+        let result = session.set_filter_query("bet".to_string()).unwrap();
 
-        assert!(matches!(
-            result,
-            Some(ReconcileSelection::Preview(FileEntry { ref name, .. }))
-                if name == "beta.txt"
-        ));
+        assert!(previews(&result, "beta.txt"));
         assert_eq!(
             session.selection.primary().map(PathBuf::as_path),
             Some(Path::new("/folder/beta.txt")),
@@ -640,35 +652,17 @@ mod tests {
     /// navigable, and drops a selection it no longer shows.
     #[test]
     fn a_content_filter_projects_under_the_fuzzy_filter_and_reconciles() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.entries = vec![
-            entry("assets", true, None),
-            entry("photo.png", false, Some(1)),
-            entry("photo.txt", false, Some(1)),
-        ];
-        session.rebuild_visible_entries();
-        session
-            .selection
-            .select_only(PathBuf::from("/folder/photo.txt"));
+        let mut session = session(vec![dir("assets"), file("photo.png"), file("photo.txt")]);
+        session.selection.select_only(path("photo.txt"));
 
         let result = session.set_content_filter(Some(Arc::new(|entry: &FileEntry| {
             entry.navigable || entry.name.ends_with(".png")
         })));
         assert!(matches!(result, ReconcileSelection::ClearPreview));
-        assert_eq!(
-            session
-                .visible_paths()
-                .iter()
-                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            vec!["assets", "photo.png"]
-        );
+        assert_eq!(visible_names(&session), ["assets", "photo.png"]);
 
         session.set_filter_query("photo".to_string());
-        assert_eq!(
-            session.visible_paths(),
-            vec![PathBuf::from("/folder/photo.png")]
-        );
+        assert_eq!(session.visible_paths(), vec![path("photo.png")]);
 
         session.set_content_filter(None);
         assert_eq!(session.visible_paths().len(), 2);
@@ -681,37 +675,19 @@ mod tests {
         // still streaming is not the row it ends up on. `stream_directory`
         // yields in readdir order, so a later batch merges names that sort
         // *before* the revealed one and push it down.
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.merge_batch(vec![
-            entry("m.txt", false, Some(1)),
-            entry("target.txt", false, Some(1)),
-        ]);
+        let mut session = session(vec![file("m.txt"), file("target.txt")]);
+        let target = path("target.txt");
+        assert_eq!(session.visible_position(&target), Some(1));
 
-        let row_mid_stream = session
-            .visible_entries
-            .iter()
-            .position(|index| session.entries[*index].name == "target.txt")
-            .unwrap();
-        assert_eq!(row_mid_stream, 1);
+        session.merge_batch(vec![file("a.txt"), file("b.txt")]);
 
-        session.merge_batch(vec![
-            entry("a.txt", false, Some(1)),
-            entry("b.txt", false, Some(1)),
-        ]);
-
-        let row_settled = session
-            .visible_entries
-            .iter()
-            .position(|index| session.entries[*index].name == "target.txt")
-            .unwrap();
-        assert_eq!(row_settled, 3);
-        assert_ne!(row_mid_stream, row_settled);
+        assert_eq!(session.visible_position(&target), Some(3));
     }
 
     #[test]
     fn a_mid_stream_reveal_holds_its_scroll_target_until_taken() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.defer_reveal_scroll(PathBuf::from("/folder/target.txt"));
+        session.defer_reveal_scroll(path("target.txt"));
 
         // Finishing the load must not drop it: the whole point is that it
         // outlives the stream so the row can be corrected afterwards.
@@ -719,39 +695,32 @@ mod tests {
 
         assert_eq!(
             session.take_reveal_scroll_target(),
-            Some(PathBuf::from("/folder/target.txt")),
+            Some(path("target.txt"))
         );
         assert_eq!(session.take_reveal_scroll_target(), None);
     }
 
+    /// A scroll target belongs to one reveal: a new load or a replacement
+    /// reveal drops it.
     #[test]
-    fn a_new_load_drops_a_stale_reveal_scroll_target() {
+    fn a_new_load_or_reveal_drops_a_stale_scroll_target() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.defer_reveal_scroll(PathBuf::from("/folder/target.txt"));
-
+        session.defer_reveal_scroll(path("target.txt"));
         session.begin_load(true);
-
         assert_eq!(session.take_reveal_scroll_target(), None);
-    }
 
-    #[test]
-    fn replacing_the_pending_reveal_drops_the_previous_scroll_target() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.defer_reveal_scroll(PathBuf::from("/folder/old.txt"));
-
-        session.replace_pending_reveal(vec![PathBuf::from("/folder/new.txt")]);
-
+        session.defer_reveal_scroll(path("old.txt"));
+        session.replace_pending_reveal(vec![path("new.txt")]);
         assert_eq!(session.take_reveal_scroll_target(), None);
     }
 
     #[test]
     fn pending_reveal_waits_until_the_entry_is_visible() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.pending_reveal = vec![PathBuf::from("/folder/later.txt")];
+        session.pending_reveal = vec![path("later.txt")];
         assert!(session.take_pending_visible_entries().is_empty());
 
-        session.entries.push(entry("later.txt", false, Some(1)));
-        session.rebuild_visible_entries();
+        session.merge_batch(vec![file("later.txt")]);
         let revealed = session.take_pending_visible_entries();
 
         assert_eq!(revealed[0].name, "later.txt");
@@ -765,18 +734,12 @@ mod tests {
     #[test]
     fn pending_reveal_selects_every_item_across_incremental_batches() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.pending_reveal = vec![
-            PathBuf::from("/folder/first.txt"),
-            PathBuf::from("/folder/second.txt"),
-        ];
+        session.pending_reveal = vec![path("first.txt"), path("second.txt")];
 
-        session.entries.push(entry("second.txt", false, Some(1)));
-        session.rebuild_visible_entries();
+        session.merge_batch(vec![file("second.txt")]);
         assert_eq!(session.take_pending_visible_entries().len(), 1);
 
-        session.entries.push(entry("first.txt", false, Some(1)));
-        sort_entries(&mut session.entries);
-        session.rebuild_visible_entries();
+        session.merge_batch(vec![file("first.txt")]);
         assert_eq!(session.take_pending_visible_entries().len(), 1);
 
         assert!(session.pending_reveal.is_empty());
@@ -786,22 +749,10 @@ mod tests {
 
     #[test]
     fn pending_reveal_can_replace_an_existing_selection_before_streaming() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.entries = vec![
-            entry("old.txt", false, Some(1)),
-            entry("first.txt", false, Some(1)),
-            entry("second.txt", false, Some(1)),
-        ];
-        sort_entries(&mut session.entries);
-        session.rebuild_visible_entries();
-        session
-            .selection
-            .select_only(PathBuf::from("/folder/old.txt"));
+        let mut session = session(vec![file("old.txt"), file("first.txt"), file("second.txt")]);
+        session.selection.select_only(path("old.txt"));
 
-        session.replace_pending_reveal(vec![
-            PathBuf::from("/folder/first.txt"),
-            PathBuf::from("/folder/second.txt"),
-        ]);
+        session.replace_pending_reveal(vec![path("first.txt"), path("second.txt")]);
         session.take_pending_visible_entries();
 
         assert_eq!(session.selection.selected().len(), 2);
@@ -810,20 +761,13 @@ mod tests {
 
     #[test]
     fn event_batches_reconcile_once_and_refresh_changed_primary_entries() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.entries = vec![
-            entry("selected.txt", false, Some(1)),
-            entry("removed.txt", false, Some(1)),
-        ];
-        session.rebuild_visible_entries();
-        session
-            .selection
-            .select_only(PathBuf::from("/folder/selected.txt"));
+        let mut session = session(vec![file("selected.txt"), file("removed.txt")]);
+        session.selection.select_only(path("selected.txt"));
 
         let result = session.apply_events(vec![
-            DirectoryEvent::Removed(PathBuf::from("/folder/removed.txt")),
+            DirectoryEvent::Removed(path("removed.txt")),
             DirectoryEvent::Changed(entry("selected.txt", false, Some(9))),
-            DirectoryEvent::Added(entry("folder", true, None)),
+            DirectoryEvent::Added(dir("folder")),
         ]);
 
         assert!(matches!(
@@ -835,12 +779,8 @@ mod tests {
             })) if name == "selected.txt"
         ));
         assert_eq!(
-            session
-                .entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["folder", "selected.txt"]
+            names(&session),
+            [("folder", None), ("selected.txt", Some(9))]
         );
     }
 
@@ -850,23 +790,16 @@ mod tests {
     #[test]
     fn entry_lookup_tracks_every_entries_mutation() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        assert!(session.entry(Path::new("/folder/a.txt")).is_none());
+        let a = path("a.txt");
+        assert!(session.entry(&a).is_none());
 
-        session.merge_batch(vec![entry("a.txt", false, Some(1))]);
-        assert_eq!(
-            session.entry(Path::new("/folder/a.txt")).map(|e| e.size),
-            Some(Some(1))
-        );
+        session.merge_batch(vec![file("a.txt")]);
+        assert_eq!(session.entry(&a).map(|e| e.size), Some(Some(1)));
 
         // An inserted directory sorts ahead of the file and shifts its index.
-        session.apply_events(vec![DirectoryEvent::Added(entry("folder", true, None))]);
-        assert!(session.entry(Path::new("/folder/folder")).is_some());
-        assert_eq!(
-            session
-                .entry(Path::new("/folder/a.txt"))
-                .map(|e| e.name.as_str()),
-            Some("a.txt")
-        );
+        session.apply_events(vec![DirectoryEvent::Added(dir("folder"))]);
+        assert!(session.entry(&path("folder")).is_some());
+        assert_eq!(session.entry(&a).map(|e| e.name.as_str()), Some("a.txt"));
 
         // A change in place must be observed, not served from the old copy.
         session.apply_events(vec![DirectoryEvent::Changed(entry(
@@ -874,27 +807,18 @@ mod tests {
             false,
             Some(99),
         ))]);
-        assert_eq!(
-            session.entry(Path::new("/folder/a.txt")).map(|e| e.size),
-            Some(Some(99))
-        );
+        assert_eq!(session.entry(&a).map(|e| e.size), Some(Some(99)));
 
-        session.apply_events(vec![DirectoryEvent::Removed(PathBuf::from(
-            "/folder/a.txt",
-        ))]);
-        assert!(session.entry(Path::new("/folder/a.txt")).is_none());
+        session.apply_events(vec![DirectoryEvent::Removed(a.clone())]);
+        assert!(session.entry(&a).is_none());
 
-        session.apply_events(vec![DirectoryEvent::Added(entry("b.txt", false, Some(2)))]);
-        assert!(session.entry(Path::new("/folder/b.txt")).is_some());
+        session.apply_events(vec![DirectoryEvent::Added(file("b.txt"))]);
+        assert!(session.entry(&path("b.txt")).is_some());
 
         session.begin_virtual_load(true);
-        assert!(session.entry(Path::new("/folder/b.txt")).is_none());
+        assert!(session.entry(&path("b.txt")).is_none());
     }
 
-    /// When the primary leaves the visible set while other selected items
-    /// stay, `retain` promotes a survivor to primary. The preview must follow
-    /// that promotion; keeping it "unchanged" left the pane showing a vanished
-    /// file while the footer named the new primary.
     #[test]
     fn fuzzy_filter_is_case_insensitive_ordered_and_prefers_contiguous_early_matches() {
         assert!(fuzzy_score("Cargo.lock", "cgl").is_some());
@@ -920,53 +844,31 @@ mod tests {
     /// projection, not in the full listing.
     #[test]
     fn visible_position_follows_the_projection() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.merge_batch(vec![
-            entry("alpha.txt", false, Some(1)),
-            entry("beta.txt", false, Some(1)),
-            entry("gamma.txt", false, Some(1)),
-        ]);
-        assert_eq!(
-            session.visible_position(Path::new("/folder/gamma.txt")),
-            Some(2)
-        );
+        let mut session = session(vec![file("alpha.txt"), file("beta.txt"), file("gamma.txt")]);
+        assert_eq!(session.visible_position(&path("gamma.txt")), Some(2));
 
         session.set_filter_query("gam".to_string());
-        assert_eq!(
-            session.visible_position(Path::new("/folder/gamma.txt")),
-            Some(0)
-        );
-        assert_eq!(
-            session.visible_position(Path::new("/folder/alpha.txt")),
-            None
-        );
+        assert_eq!(session.visible_position(&path("gamma.txt")), Some(0));
+        assert_eq!(session.visible_position(&path("alpha.txt")), None);
     }
 
+    /// When the primary leaves the visible set while other selected items
+    /// stay, `retain` promotes a survivor to primary. The preview must follow
+    /// that promotion; keeping it "unchanged" left the pane showing a vanished
+    /// file while the footer named the new primary.
     #[test]
     fn a_promoted_primary_refreshes_the_preview() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
         session.show_hidden = true;
-        session.entries = vec![
-            entry(".bashrc", false, Some(1)),
-            entry("notes.txt", false, Some(2)),
-        ];
-        sort_entries(&mut session.entries);
-        session.rebuild_visible_entries();
-        session
-            .selection
-            .add_all([PathBuf::from("/folder/notes.txt")]);
-        session
-            .selection
-            .add_all([PathBuf::from("/folder/.bashrc")]);
+        session.merge_batch(vec![file(".bashrc"), entry("notes.txt", false, Some(2))]);
+        session.selection.add_all([path("notes.txt")]);
+        session.selection.add_all([path(".bashrc")]);
         session.selection.make_primary(Path::new("/folder/.bashrc"));
 
-        let result = session.set_show_hidden(false);
+        let result = session.set_show_hidden(false).unwrap();
 
         assert!(
-            matches!(
-                result,
-                Some(ReconcileSelection::Preview(FileEntry { ref name, .. })) if name == "notes.txt"
-            ),
+            previews(&result, "notes.txt"),
             "the promoted primary must be previewed"
         );
     }
@@ -976,18 +878,15 @@ mod tests {
     #[test]
     fn deferred_refresh_and_rescan_are_scoped_to_one_load() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.defer_refresh([PathBuf::from("/folder/changed.txt")]);
+        session.defer_refresh([path("changed.txt")]);
         session.defer_rescan();
 
         assert!(session.take_pending_rescan());
         assert!(!session.take_pending_rescan(), "taking consumes the flag");
-        assert_eq!(
-            session.take_pending_refresh(),
-            vec![PathBuf::from("/folder/changed.txt")]
-        );
+        assert_eq!(session.take_pending_refresh(), vec![path("changed.txt")]);
         assert!(session.take_pending_refresh().is_empty());
 
-        session.defer_refresh([PathBuf::from("/folder/stale.txt")]);
+        session.defer_refresh([path("stale.txt")]);
         session.defer_rescan();
         session.begin_virtual_load(true);
         assert!(!session.take_pending_rescan());
@@ -996,11 +895,7 @@ mod tests {
 
     #[test]
     fn projection_revision_advances_when_the_visible_set_changes() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.merge_batch(vec![
-            entry("alpha.txt", false, Some(1)),
-            entry("beta.txt", false, Some(1)),
-        ]);
+        let mut session = session(vec![file("alpha.txt"), file("beta.txt")]);
         let before = session.projection_revision();
 
         session.set_filter_query("bet".to_string());
@@ -1010,12 +905,11 @@ mod tests {
 
     #[test]
     fn large_directory_filter_reuses_entry_folded_names() {
-        let mut session = DirectorySession::new(PathBuf::from("/folder"));
-        session.entries = (0..50_000)
-            .map(|index| entry(&format!("item-{index:05}.txt"), false, Some(1)))
-            .collect();
-        sort_entries(&mut session.entries);
-        session.rebuild_visible_entries();
+        let mut session = session(
+            (0..50_000)
+                .map(|index| file(&format!("item-{index:05}.txt")))
+                .collect(),
+        );
 
         let reconcile = session.set_filter_query("ITEM-49999".to_string());
 

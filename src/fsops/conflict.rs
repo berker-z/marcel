@@ -434,6 +434,7 @@ pub fn describe_occupant(path: &Path) -> std::io::Result<Option<Occupant>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Sandbox;
     use std::sync::Mutex;
 
     /// A resolver that returns scripted answers and records what it was asked.
@@ -443,13 +444,6 @@ mod tests {
     }
 
     impl Scripted {
-        fn new(answers: Vec<ConflictDecision>) -> Arc<Self> {
-            Arc::new(Self {
-                answers: Mutex::new(answers.into_iter().rev().collect()),
-                asked: Mutex::new(Vec::new()),
-            })
-        }
-
         fn asked(&self) -> usize {
             self.asked.lock().unwrap().len()
         }
@@ -466,6 +460,23 @@ mod tests {
         }
     }
 
+    /// An interactive policy whose resolver gives `answers` in order.
+    fn scripted(answers: Vec<ConflictDecision>) -> (ConflictPolicy, Arc<Scripted>) {
+        let resolver = Arc::new(Scripted {
+            answers: Mutex::new(answers.into_iter().rev().collect()),
+            asked: Mutex::new(Vec::new()),
+        });
+        (ConflictPolicy::interactive(resolver.clone()), resolver)
+    }
+
+    fn once(response: ConflictResponse) -> ConflictDecision {
+        ConflictDecision::once(response)
+    }
+
+    fn for_all(response: ConflictResponse) -> ConflictDecision {
+        ConflictDecision::for_all(response)
+    }
+
     fn request(source_is_directory: bool, destination_is_directory: bool) -> ConflictRequest {
         ConflictRequest {
             source: PathBuf::from("/source/item"),
@@ -475,6 +486,16 @@ mod tests {
         }
     }
 
+    /// A file in the way of a file.
+    fn file() -> ConflictRequest {
+        request(false, false)
+    }
+
+    /// A directory in the way of a directory: a merge, not a replacement.
+    fn merge() -> ConflictRequest {
+        request(true, true)
+    }
+
     /// The default must reproduce Marcel's original behavior exactly, so that
     /// every operation that has not opted in still refuses to overwrite.
     #[test]
@@ -482,30 +503,20 @@ mod tests {
         let mut policy = ConflictPolicy::refusing();
 
         assert!(!policy.is_interactive());
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Skip
-        );
-        assert_eq!(policy.decide(&request(true, true)), ConflictResponse::Skip);
+        assert_eq!(policy.decide(&file()), ConflictResponse::Skip);
+        assert_eq!(policy.decide(&merge()), ConflictResponse::Skip);
         assert!(!policy.is_cancelled());
     }
 
     #[test]
     fn a_single_answer_applies_only_to_its_own_conflict() {
-        let resolver = Scripted::new(vec![
-            ConflictDecision::once(ConflictResponse::Replace),
-            ConflictDecision::once(ConflictResponse::Skip),
+        let (mut policy, resolver) = scripted(vec![
+            once(ConflictResponse::Replace),
+            once(ConflictResponse::Skip),
         ]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
 
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Replace
-        );
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Skip
-        );
+        assert_eq!(policy.decide(&file()), ConflictResponse::Replace);
+        assert_eq!(policy.decide(&file()), ConflictResponse::Skip);
         assert_eq!(
             resolver.asked(),
             2,
@@ -515,67 +526,32 @@ mod tests {
 
     /// Replacing files and merging directories are different intentions.
     /// Collapsing them would let "replace all" for a pile of files silently
-    /// merge a directory tree the user never looked at.
+    /// merge a directory tree the user never looked at, and the reverse.
     #[test]
-    fn replace_all_does_not_imply_merge_all() {
-        let resolver = Scripted::new(vec![
-            ConflictDecision::for_all(ConflictResponse::Replace),
-            ConflictDecision::once(ConflictResponse::Skip),
-        ]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
+    fn replace_all_and_merge_all_do_not_imply_each_other() {
+        for (answered, other) in [(file(), merge()), (merge(), file())] {
+            let (mut policy, resolver) = scripted(vec![
+                for_all(ConflictResponse::Replace),
+                once(ConflictResponse::Skip),
+            ]);
 
-        // Replace-all, answered for a file conflict.
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Replace
-        );
-        // Later file conflicts are answered from sticky state.
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Replace
-        );
-        assert_eq!(resolver.asked(), 1);
+            // Answered for all, then served from sticky state.
+            assert_eq!(policy.decide(&answered), ConflictResponse::Replace);
+            assert_eq!(policy.decide(&answered), ConflictResponse::Replace);
+            assert_eq!(resolver.asked(), 1);
 
-        // A directory-into-directory conflict is a merge, so it must be asked.
-        assert_eq!(policy.decide(&request(true, true)), ConflictResponse::Skip);
-        assert_eq!(resolver.asked(), 2);
-    }
-
-    #[test]
-    fn merge_all_does_not_imply_replace_all() {
-        let resolver = Scripted::new(vec![
-            ConflictDecision::for_all(ConflictResponse::Replace),
-            ConflictDecision::once(ConflictResponse::Skip),
-        ]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
-
-        assert_eq!(
-            policy.decide(&request(true, true)),
-            ConflictResponse::Replace
-        );
-        assert_eq!(
-            policy.decide(&request(true, true)),
-            ConflictResponse::Replace
-        );
-        assert_eq!(resolver.asked(), 1);
-
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Skip
-        );
-        assert_eq!(resolver.asked(), 2);
+            // The other kind of conflict must be asked.
+            assert_eq!(policy.decide(&other), ConflictResponse::Skip);
+            assert_eq!(resolver.asked(), 2);
+        }
     }
 
     #[test]
     fn skip_all_answers_every_later_conflict_of_any_kind() {
-        let resolver = Scripted::new(vec![ConflictDecision::for_all(ConflictResponse::Skip)]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
+        let (mut policy, resolver) = scripted(vec![for_all(ConflictResponse::Skip)]);
 
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Skip
-        );
-        assert_eq!(policy.decide(&request(true, true)), ConflictResponse::Skip);
+        assert_eq!(policy.decide(&file()), ConflictResponse::Skip);
+        assert_eq!(policy.decide(&merge()), ConflictResponse::Skip);
         assert_eq!(policy.decide(&request(false, true)), ConflictResponse::Skip);
         assert_eq!(resolver.asked(), 1);
     }
@@ -583,57 +559,46 @@ mod tests {
     /// A standing replace answer must not survive a cancellation.
     #[test]
     fn cancelling_ends_the_operation_and_overrides_sticky_answers() {
-        let resolver = Scripted::new(vec![
-            ConflictDecision::for_all(ConflictResponse::Replace),
-            ConflictDecision::once(ConflictResponse::Cancel),
+        let (mut policy, resolver) = scripted(vec![
+            for_all(ConflictResponse::Replace),
+            once(ConflictResponse::Cancel),
         ]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
 
-        assert_eq!(
-            policy.decide(&request(true, true)),
-            ConflictResponse::Replace
-        );
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Cancel
-        );
+        assert_eq!(policy.decide(&merge()), ConflictResponse::Replace);
+        assert_eq!(policy.decide(&file()), ConflictResponse::Cancel);
         assert!(policy.is_cancelled());
 
         // Even a conflict covered by merge-all is refused once cancelled.
-        assert_eq!(
-            policy.decide(&request(true, true)),
-            ConflictResponse::Cancel
-        );
+        assert_eq!(policy.decide(&merge()), ConflictResponse::Cancel);
         assert_eq!(resolver.asked(), 2, "nothing is asked after a cancellation");
     }
 
     /// A chosen name answers exactly one conflict. Applying it to all would
-    /// mean writing several different sources to one name.
+    /// mean writing several different sources to one name. Renaming
+    /// everything is the one rename that can stand for many conflicts,
+    /// because Marcel chooses the names rather than the user.
     #[test]
-    fn a_rename_never_becomes_a_standing_answer() {
-        let resolver = Scripted::new(vec![
-            ConflictDecision::for_all(ConflictResponse::Rename(OsString::from("copy.txt"))),
-            ConflictDecision::once(ConflictResponse::Skip),
-        ]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
+    fn rename_all_becomes_a_standing_answer_but_a_typed_name_does_not() {
+        let typed = ConflictResponse::Rename(OsString::from("copy.txt"));
+        let (mut policy, resolver) =
+            scripted(vec![for_all(typed.clone()), once(ConflictResponse::Skip)]);
 
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Rename(OsString::from("copy.txt"))
-        );
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::Skip
-        );
+        assert_eq!(policy.decide(&file()), typed);
+        assert_eq!(policy.decide(&file()), ConflictResponse::Skip);
         assert_eq!(resolver.asked(), 2);
+
+        let (mut policy, resolver) = scripted(vec![for_all(ConflictResponse::AutoRename)]);
+
+        assert_eq!(policy.decide(&file()), ConflictResponse::AutoRename);
+        assert_eq!(policy.decide(&merge()), ConflictResponse::AutoRename);
+        assert_eq!(resolver.asked(), 1);
     }
 
     #[test]
     fn a_symlink_occupies_its_path_without_being_followed() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("real");
-        let link = root.path().join("link");
-        std::fs::create_dir(&directory).unwrap();
+        let sandbox = Sandbox::new();
+        let directory = sandbox.dir("real");
+        let link = sandbox.path("link");
         std::os::unix::fs::symlink(&directory, &link).unwrap();
 
         let directory_occupant = describe_occupant(&directory).unwrap().unwrap();
@@ -644,11 +609,7 @@ mod tests {
         // not a merge, and it is a different object from its target.
         assert!(!link_occupant.is_directory);
         assert_ne!(directory_occupant.object, link_occupant.object);
-        assert!(
-            describe_occupant(&root.path().join("free"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(describe_occupant(&sandbox.path("free")).unwrap().is_none());
     }
 
     fn named(name: &str, count: usize) -> String {
@@ -657,147 +618,109 @@ mod tests {
             .unwrap()
     }
 
-    /// Numbering starts at 2 because the item already on disk is implicitly the
-    /// first. Nautilus makes the same choice explicitly.
+    /// Numbering starts at 2 because the item already on disk is implicitly
+    /// the first — Nautilus makes the same choice explicitly — and an
+    /// existing suffix increments rather than nesting, so names cannot grow
+    /// without bound.
     #[test]
-    fn alternative_names_count_from_two_and_keep_the_extension() {
-        assert_eq!(named("report.txt", 1), "report (2).txt");
-        assert_eq!(named("report.txt", 2), "report (2).txt");
-        assert_eq!(named("report.txt", 3), "report (3).txt");
-        assert_eq!(named("README", 1), "README (2)");
-    }
-
-    /// The whole point of parsing an existing suffix: a second conflict
-    /// increments rather than nesting, so names cannot grow without bound.
-    #[test]
-    fn an_existing_suffix_is_incremented_rather_than_nested() {
-        assert_eq!(named("report (2).txt", 1), "report (3).txt");
-        assert_eq!(named("report (9).txt", 1), "report (10).txt");
-        // Not Marcel's marker, so it belongs to the user's own name.
-        assert_eq!(named("report(2).txt", 1), "report(2) (2).txt");
-        assert_eq!(named("report (draft).txt", 1), "report (draft) (2).txt");
-        assert_eq!(named("report (02).txt", 1), "report (02) (2).txt");
+    fn alternative_names_count_from_two_and_increment_an_existing_suffix() {
+        for (name, count, expected) in [
+            ("report.txt", 1, "report (2).txt"),
+            ("report.txt", 2, "report (2).txt"),
+            ("report.txt", 3, "report (3).txt"),
+            ("README", 1, "README (2)"),
+            ("report (2).txt", 1, "report (3).txt"),
+            ("report (9).txt", 1, "report (10).txt"),
+            // Not Marcel's marker, so it belongs to the user's own name.
+            ("report(2).txt", 1, "report(2) (2).txt"),
+            ("report (draft).txt", 1, "report (draft) (2).txt"),
+            ("report (02).txt", 1, "report (02) (2).txt"),
+        ] {
+            assert_eq!(named(name, count), expected, "{name} × {count}");
+        }
     }
 
     #[test]
     fn extension_detection_matches_the_documented_rules() {
-        // A leading dot is not an extension, so dotfiles keep their name.
-        assert_eq!(named(".bashrc", 1), ".bashrc (2)");
-        // The last dot wins.
-        assert_eq!(named("photo.backup.png", 1), "photo.backup (2).png");
-        // `.tar` is folded in so the archive type survives intact.
-        assert_eq!(named("archive.tar.gz", 1), "archive (2).tar.gz");
-        // A trailing dot is not an extension.
-        assert_eq!(named("weird.", 1), "weird. (2)");
-        // Whitespace means this is a name, not a file type.
-        assert_eq!(named("report.final draft", 1), "report.final draft (2)");
-    }
-
-    /// A directory named `backup.2024` has no file type to preserve, so the
-    /// suffix belongs at the end.
-    #[test]
-    fn directories_keep_their_whole_name_before_the_suffix() {
+        for (name, expected) in [
+            // A leading dot is not an extension, so dotfiles keep their name.
+            (".bashrc", ".bashrc (2)"),
+            // The last dot wins.
+            ("photo.backup.png", "photo.backup (2).png"),
+            // `.tar` is folded in so the archive type survives intact.
+            ("archive.tar.gz", "archive (2).tar.gz"),
+            // A trailing dot is not an extension.
+            ("weird.", "weird. (2)"),
+            // Whitespace means this is a name, not a file type.
+            ("report.final draft", "report.final draft (2)"),
+        ] {
+            assert_eq!(named(name, 1), expected, "{name}");
+        }
+        // A directory named `backup.2024` has no file type to preserve, so
+        // the suffix belongs at the end.
         assert_eq!(
-            conflict_name(OsStr::new("backup.2024"), 1, true)
-                .into_string()
-                .unwrap(),
-            "backup.2024 (2)"
+            conflict_name(OsStr::new("backup.2024"), 1, true),
+            OsString::from("backup.2024 (2)")
         );
     }
 
     /// One directory entry cannot exceed 255 bytes, and the suffix and
-    /// extension carry the meaning, so the base is what gives way.
+    /// extension carry the meaning, so the base is what gives way. Non-UTF-8
+    /// names are authoritative in Marcel, so renaming one must not corrupt
+    /// it or split a character when trimming.
     #[test]
-    fn a_long_name_stays_within_one_directory_entry() {
-        use std::os::unix::ffi::OsStrExt as _;
+    fn long_and_non_utf8_names_are_renamed_intact() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let long = format!("{}.txt", "n".repeat(300));
         let renamed = conflict_name(OsStr::new(&long), 1, false);
-
         assert!(renamed.as_bytes().len() <= MAX_NAME_BYTES);
         assert!(renamed.to_string_lossy().ends_with(" (2).txt"));
-    }
-
-    /// Non-UTF-8 names are authoritative in Marcel, so renaming one must not
-    /// corrupt it or split a character when trimming.
-    #[test]
-    fn a_non_utf8_name_survives_renaming() {
-        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let raw = OsString::from_vec(vec![b'n', 0xff, b'.', b't', b'x', b't']);
-        let renamed = conflict_name(&raw, 1, false);
-
-        assert_eq!(renamed.as_bytes(), b"n\xff (2).txt");
+        assert_eq!(conflict_name(&raw, 1, false).as_bytes(), b"n\xff (2).txt");
     }
 
     #[test]
     fn a_free_name_is_found_past_every_occupied_candidate() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("report.txt"), b"original").unwrap();
-        std::fs::write(root.path().join("report (2).txt"), b"second").unwrap();
-        std::fs::write(root.path().join("report (3).txt"), b"third").unwrap();
+        let sandbox = Sandbox::new();
+        sandbox.file("report.txt", b"original");
+        sandbox.file("report (2).txt", b"second");
+        sandbox.file("report (3).txt", b"third");
 
-        let name = unique_name_in(root.path(), OsStr::new("report.txt"), false).unwrap();
+        let name = unique_name_in(sandbox.root(), OsStr::new("report.txt"), false).unwrap();
 
         assert_eq!(name, OsString::from("report (4).txt"));
     }
 
-    /// Renaming everything is the one rename that can stand for many
-    /// conflicts, because Marcel chooses the names rather than the user.
-    #[test]
-    fn rename_all_becomes_a_standing_answer_but_a_typed_name_does_not() {
-        let resolver = Scripted::new(vec![ConflictDecision::for_all(
-            ConflictResponse::AutoRename,
-        )]);
-        let mut policy = ConflictPolicy::interactive(resolver.clone());
-
-        assert_eq!(
-            policy.decide(&request(false, false)),
-            ConflictResponse::AutoRename
-        );
-        assert_eq!(
-            policy.decide(&request(true, true)),
-            ConflictResponse::AutoRename
-        );
-        assert_eq!(resolver.asked(), 1);
-    }
-
     /// A worker must never park on an answer that cannot arrive. Losing the
-    /// interface cancels the operation, which accounts for every source it did
-    /// not reach, rather than skipping each one silently.
+    /// interface, or having the question dismissed, cancels the operation —
+    /// which accounts for every source it did not reach, rather than
+    /// skipping each one silently.
     #[test]
-    fn losing_the_interface_cancels_instead_of_waiting() {
+    fn a_question_nobody_will_answer_cancels_instead_of_waiting() {
         let (resolver, questions) = PromptingResolver::new();
         drop(questions);
+        assert_eq!(resolver.resolve(&file()).response, ConflictResponse::Cancel);
 
-        let decision = resolver.resolve(&request(false, false));
-
-        assert_eq!(decision.response, ConflictResponse::Cancel);
-    }
-
-    #[test]
-    fn an_unanswered_question_cancels_rather_than_stranding_the_worker() {
         let (resolver, questions) = PromptingResolver::new();
-        let asking = std::thread::spawn(move || resolver.resolve(&request(false, false)));
-
+        let asking = std::thread::spawn(move || resolver.resolve(&file()));
         // Take the question and drop it, as a dismissed dialog would.
-        let pending = questions.recv_blocking().unwrap();
-        drop(pending);
-
+        drop(questions.recv_blocking().unwrap());
         assert_eq!(asking.join().unwrap().response, ConflictResponse::Cancel);
     }
 
     #[test]
     fn an_answered_question_reaches_the_waiting_worker() {
         let (resolver, questions) = PromptingResolver::new();
-        let asking = std::thread::spawn(move || resolver.resolve(&request(false, false)));
+        let asking = std::thread::spawn(move || resolver.resolve(&file()));
 
         let pending = questions.recv_blocking().unwrap();
         assert_eq!(
             pending.request().destination,
             PathBuf::from("/destination/item")
         );
-        pending.answer(ConflictDecision::for_all(ConflictResponse::Replace));
+        pending.answer(for_all(ConflictResponse::Replace));
 
         let decision = asking.join().unwrap();
         assert_eq!(decision.response, ConflictResponse::Replace);
@@ -806,13 +729,11 @@ mod tests {
 
     #[test]
     fn a_hardlink_is_the_same_object_as_the_file_it_links() {
-        let root = tempfile::tempdir().unwrap();
-        let original = root.path().join("original");
-        let link = root.path().join("hardlink");
-        let other = root.path().join("other");
-        std::fs::write(&original, b"payload").unwrap();
+        let sandbox = Sandbox::new();
+        let original = sandbox.file("original", b"payload");
+        let link = sandbox.path("hardlink");
         std::fs::hard_link(&original, &link).unwrap();
-        std::fs::write(&other, b"payload").unwrap();
+        let other = sandbox.file("other", b"payload");
 
         let original_metadata = std::fs::symlink_metadata(&original).unwrap();
         let link_occupant = describe_occupant(&link).unwrap().unwrap();
