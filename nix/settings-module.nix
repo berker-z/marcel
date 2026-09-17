@@ -108,7 +108,12 @@ in
           "system-light"
         ];
         default = "nord";
-        description = "Initial Marcel color palette.";
+        description = ''
+          The color palette Marcel starts with. A theme chosen in Marcel's own
+          Settings dialog is saved to `$XDG_CONFIG_HOME/marcel/state.conf` and
+          takes precedence over this from then on; delete its `theme=` line to
+          follow this option again.
+        '';
       };
 
       icon_theme = lib.mkOption {

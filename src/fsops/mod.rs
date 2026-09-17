@@ -37,11 +37,11 @@ pub use journal::{
 };
 pub use mutations::{
     create_directory, create_file, create_zip_operation, extract_archive_operation, rename_entry,
-    validate_entry_name, validate_entry_os_name,
+    set_mode, validate_entry_name, validate_entry_os_name,
 };
 pub use quarantine::{
-    RECOVERY_REMNANT_PREFIX, is_internal_working_name, process_is_running,
-    reclaim_abandoned_quarantines,
+    RECOVERY_REMNANT_PREFIX, boot_id, is_internal_working_name, is_quarantine_from_another_boot,
+    process_is_running, reclaim_abandoned_quarantines,
 };
 pub use transfer::{CompletedTransfer, TransferMode, TransferOutcome};
 

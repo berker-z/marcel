@@ -151,19 +151,51 @@ impl Palette {
         self.row().1
     }
 
-    fn from_environment() -> Self {
-        std::env::var("MARCEL_THEME").ok().as_deref().and_then(Self::from_name).unwrap_or_default()
+    /// The name the state file records: the first of the accepted names.
+    pub fn name(self) -> &'static str {
+        self.row().2[0]
+    }
+
+    fn from_environment() -> Option<Self> {
+        std::env::var("MARCEL_THEME").ok().as_deref().and_then(Self::from_name)
     }
 }
 
 static ACTIVE_PALETTE: AtomicU8 = AtomicU8::new(Palette::Nord as u8);
 
-pub fn init(cx: &mut App) {
-    apply(Palette::from_environment(), cx);
+/// The palette chosen in Settings, or `NO_CHOICE` while the environment's
+/// default is what applies. Kept apart from the active palette so that saving
+/// the browser state writes a theme only once someone has actually picked
+/// one; see `BrowserState::theme`.
+static CHOSEN_PALETTE: AtomicU8 = AtomicU8::new(NO_CHOICE);
+const NO_CHOICE: u8 = u8::MAX;
+
+/// Start with the theme the user chose, or failing that the one the
+/// environment (`MARCEL_THEME`, which the Nix module sets) asks for.
+pub fn init(chosen: Option<Palette>, cx: &mut App) {
+    if let Some(palette) = chosen {
+        choose(palette, cx);
+    } else {
+        apply(Palette::from_environment().unwrap_or_default(), cx);
+    }
 }
 
 pub fn active() -> Palette {
     Palette::ALL[ACTIVE_PALETTE.load(Ordering::Relaxed) as usize]
+}
+
+/// The theme someone picked, if anyone has.
+pub fn chosen() -> Option<Palette> {
+    match CHOSEN_PALETTE.load(Ordering::Relaxed) {
+        NO_CHOICE => None,
+        index => Some(Palette::ALL[index as usize]),
+    }
+}
+
+/// Apply a palette as the user's choice, which outlives this process.
+pub fn choose(palette: Palette, cx: &mut App) {
+    apply(palette, cx);
+    CHOSEN_PALETTE.store(palette as u8, Ordering::Relaxed);
 }
 
 pub fn apply(palette: Palette, cx: &mut App) {

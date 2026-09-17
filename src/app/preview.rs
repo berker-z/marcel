@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     browse::entries::{
-        DirectoryUpdate, FileEntry, format_size, merge_sorted_entries, stream_directory,
+        DirectoryUpdate, FileEntry, SortOrder, format_size, merge_sorted_entries, stream_directory,
     },
     preview::{
         Preview, PreviewState as PreviewContent, load_preview, pdf::render_pdf_page, thumbnails,
@@ -326,7 +326,10 @@ impl Marcel {
         self.preview.folder_loading = true;
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
-        unblock(cx, move || stream_directory(&stream_path, sender, Some(&cancelled))).detach();
+        unblock(cx, move || {
+            stream_directory(&stream_path, sender, Some(&cancelled), SortOrder::default())
+        })
+        .detach();
 
         self.preview.folder_task = Some(pump(cx, receiver, move |this, update, cx| {
             if ticket != this.preview.ticket {
@@ -345,6 +348,7 @@ impl Marcel {
                     this.preview.folder_entries = merge_sorted_entries(
                         std::mem::take(&mut this.preview.folder_entries),
                         batch,
+                        SortOrder::default(),
                     );
                 }
                 DirectoryUpdate::Degraded { skipped, examples } => {

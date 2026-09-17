@@ -264,16 +264,23 @@ impl Copier<'_> {
     }
 }
 
-fn copy_file_cancellable(
+pub(super) fn copy_file_cancellable(
     source: &Path,
     destination: &Path,
     cancelled: &AtomicBool,
     progress: Option<&TransferProgress>,
 ) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let mut input = fs::File::open(source).at("Could not open", source)?;
+    // Owner-only until the content is in place. The staging directory is
+    // already private, but the file should not depend on that: a copy of a
+    // key or a cookie store is readable by nobody else at any point, and
+    // `preserve_metadata` widens it to the source's mode once it is whole.
     let mut output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(destination)
         .at("Could not create", destination)?;
     if !try_copy_sparse(&mut input, &mut output, source, cancelled, progress)? {
@@ -390,9 +397,17 @@ fn try_copy_sparse(
     finish(output)
 }
 
-fn preserve_metadata(source: &Path, destination: &Path, metadata: &fs::Metadata) -> Result<()> {
-    fs::set_permissions(destination, metadata.permissions())
-        .at("Could not preserve permissions on", destination)?;
+/// Give the copy the source's attributes: extended attributes, timestamps,
+/// then the mode, in that order. The mode can take away the owner's own read
+/// bit — a `0000` lock file or a write-only drop folder copies fine, it just
+/// cannot be *opened* afterwards, and applying timestamps needs an open
+/// descriptor. Going last also keeps setuid and setgid off the copy until its
+/// content is final.
+pub(super) fn preserve_metadata(
+    source: &Path,
+    destination: &Path,
+    metadata: &fs::Metadata,
+) -> Result<()> {
     preserve_supported_xattrs(source, destination)?;
 
     let mut times = fs::FileTimes::new();
@@ -410,7 +425,8 @@ fn preserve_metadata(source: &Path, destination: &Path, metadata: &fs::Metadata)
             .and_then(|file| file.set_times(times))
             .at("Could not preserve timestamps on", destination)?;
     }
-    Ok(())
+    fs::set_permissions(destination, metadata.permissions())
+        .at("Could not preserve permissions on", destination)
 }
 
 fn preserve_supported_xattrs(source: &Path, destination: &Path) -> Result<()> {

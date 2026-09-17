@@ -18,8 +18,8 @@ use crate::{
     },
     desktop::icons::IconProvider,
     fsops::{
-        DirectoryChanges, RECOVERY_REMNANT_PREFIX, process_is_running,
-        reclaim_abandoned_quarantines,
+        DirectoryChanges, RECOVERY_REMNANT_PREFIX, is_quarantine_from_another_boot,
+        process_is_running, reclaim_abandoned_quarantines,
         trash::{TrashRecord, list_trash_records, unreadable_trash_warning},
     },
     operations::OperationEvent,
@@ -87,7 +87,8 @@ impl Marcel {
 
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
-        unblock(cx, move || stream_directory(&stream_path, sender, None)).detach();
+        let order = self.directory.sort;
+        unblock(cx, move || stream_directory(&stream_path, sender, None, order)).detach();
 
         self.directory.load_task = Some(pump(cx, receiver, move |this, update, cx| {
             if ticket != this.directory.generation {
@@ -157,6 +158,7 @@ impl Marcel {
         self.begin_listing(clear_filter);
         let ticket = self.directory.begin_virtual_load(clear_filter);
         self.sidebar.trash_records.clear();
+        let order = self.directory.sort;
 
         let load = unblock(cx, move || {
             let listing = list_trash_records()?;
@@ -178,7 +180,7 @@ impl Marcel {
                     }
                 }
             }
-            sort_entries(&mut entries);
+            sort_entries(&mut entries, order);
             anyhow::Ok((entries, by_backing, unreadable))
         });
 
@@ -617,6 +619,14 @@ fn quarantine_recovery_warning(entries: &[FileEntry]) -> Option<String> {
             .is_some_and(|owner| owner != std::process::id() && !process_is_running(owner))
     });
     let unrestored = remnants(&|name| name.starts_with(RECOVERY_REMNANT_PREFIX));
+    // A replacement quarantine from an earlier boot is certainly abandoned,
+    // but the name alone cannot prove Marcel made it, so it is shown and
+    // explained rather than swept.
+    let stale = entries
+        .iter()
+        .filter(|entry| is_quarantine_from_another_boot(&entry.name_os))
+        .map(|entry| entry.path.clone())
+        .min();
 
     let mut notices = Vec::new();
     if let Some(first) = interrupted.first() {
@@ -646,6 +656,12 @@ fn quarantine_recovery_warning(entries: &[FileEntry]) -> Option<String> {
                 first.display()
             )
         });
+    }
+    if let Some(first) = stale {
+        notices.push(format!(
+            "An earlier session left an item it had replaced at “{}”. It was overwritten at your request and nothing can restore it, so it is safe to delete",
+            first.display()
+        ));
     }
     (!notices.is_empty()).then(|| notices.join(". "))
 }
@@ -720,5 +736,29 @@ mod tests {
         assert!(quarantine_recovery_warning(&[active]).is_none());
         assert!(quarantine_recovery_warning(&[ordinary]).is_none());
         assert!(quarantine_recovery_warning(&[another_live]).is_none());
+    }
+
+    /// A replaced original from an earlier boot is nobody's to sweep, so it
+    /// is shown, and explained so the user knows it can go. This boot's own
+    /// are hidden and swept, and need no words.
+    #[test]
+    fn completed_load_explains_a_replacement_quarantine_from_another_boot() {
+        let stale = test_file_entry(
+            &format!("/folder/.marcel-replaced-{}-{DEAD_PROCESS}-0-thesis", "b".repeat(32)),
+            false,
+        );
+        let warning = quarantine_recovery_warning(std::slice::from_ref(&stale)).unwrap();
+        assert!(warning.contains("earlier session"), "{warning}");
+        assert!(warning.contains("-0-thesis"), "{warning}");
+        assert!(warning.contains("safe to delete"), "{warning}");
+
+        let current = test_file_entry(
+            &format!(
+                "/folder/.marcel-replaced-{}-{DEAD_PROCESS}-0-thesis",
+                crate::fsops::boot_id()
+            ),
+            false,
+        );
+        assert!(quarantine_recovery_warning(&[current]).is_none());
     }
 }

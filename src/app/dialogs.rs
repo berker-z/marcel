@@ -151,14 +151,18 @@ impl Marcel {
         let theme_select = cx.new(|cx| {
             SelectState::new(palettes, Some(IndexPath::default().row(selected)), window, cx)
         });
-        window
-            .subscribe(&theme_select, cx, |_, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+        cx.subscribe_in(
+            &theme_select,
+            window,
+            |this, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
                 let SelectEvent::Confirm(selected) = event;
                 if let Some(palette) = selected.as_deref().and_then(Palette::from_name) {
-                    theme::apply(palette, cx);
+                    theme::choose(palette, cx);
+                    this.persist_browser_state();
                 }
-            })
-            .detach();
+            },
+        )
+        .detach();
 
         window.open_dialog(cx, move |dialog, _, _| {
             dialog

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, Div, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, ObjectFit, Pixels, Stateful, TextRun, Window, div, font, img, px, relative,
+    MouseDownEvent, ObjectFit, Pixels, Stateful, TextRun, Window, div, font, img, px,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, notification::Notification,
@@ -25,7 +25,7 @@ use super::{
     menu::{clamp_to_window, menu_row, popover},
     navigation::unblock,
     pointer::{BookmarkDrag, FileDrag, accept_file_drops, painted_bounds},
-    state::{BookmarkMenu, ViewMode},
+    state::BookmarkMenu,
 };
 
 const MIN_PLACES_WIDTH: f32 = 176.0;
@@ -382,36 +382,6 @@ impl Marcel {
             .checked(self.directory.show_hidden)
             .tooltip("Show files whose names begin with a dot")
             .on_click(cx.listener(|this, checked, _, cx| this.set_show_hidden(*checked, cx)));
-        let view_glyph = |glyph: &'static str, mode: ViewMode| {
-            div()
-                .w_5()
-                .text_center()
-                .text_lg()
-                .text_color(if self.ui.view_mode == mode {
-                    colors.sidebar_primary
-                } else {
-                    colors.muted_foreground
-                })
-                .child(glyph)
-        };
-        let view_switch = h_flex()
-            .gap_2()
-            .font_family(cx.theme().mono_font_family.clone())
-            .line_height(relative(1.0))
-            .child(view_glyph("☷", ViewMode::List))
-            .child(
-                Switch::new("browser-view-mode")
-                    .small()
-                    .checked(self.ui.view_mode == ViewMode::Grid)
-                    .tooltip("Switch between list and icon views")
-                    .on_click(cx.listener(|this, checked, _, cx| {
-                        this.set_view_mode(
-                            if *checked { ViewMode::Grid } else { ViewMode::List },
-                            cx,
-                        );
-                    })),
-            )
-            .child(view_glyph("▦", ViewMode::Grid));
         let settings_button = super::chrome::icon_button("open-settings", "⚙", true, cx)
             .on_click(cx.listener(|this, _, window, cx| this.open_settings_dialog(window, cx)));
 
@@ -494,9 +464,7 @@ impl Marcel {
                     .child(div().flex_1())
                     .child(painted_bounds(move |bounds| bookmark_region_bounds.set(Some(bounds)))),
             )
-            .child(div().flex().flex_col().gap_3().child(hidden_switch).child(
-                h_flex().w_full().justify_between().child(view_switch).child(settings_button),
-            ))
+            .child(h_flex().w_full().justify_between().child(hidden_switch).child(settings_button))
             .into_any_element()
     }
 }

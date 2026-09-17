@@ -3,8 +3,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, CursorStyle, Div, IntoElement, MouseButton, Pixels, Render, Stateful,
-    Window, canvas, div, px, relative,
+    AnyElement, Context, CursorStyle, Div, Hsla, IntoElement, MouseButton, Pixels, Render,
+    Stateful, Window, canvas, div, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _,
@@ -21,6 +21,7 @@ use super::{
     MAX_PREVIEW_WIDTH, MIN_BROWSER_WIDTH, MIN_PREVIEW_WIDTH, Marcel,
     actions::{BROWSER_KEY_CONTEXT, BrowserCommand, bind_actions},
     pointer::{BookmarkDrag, FileDrag},
+    state::{ContextMenuTarget, ViewMode},
 };
 
 /// A glyph button on the chrome. gpui-component's icon-only Button loses its
@@ -51,6 +52,56 @@ pub(super) fn icon_button(
         .child(glyph)
 }
 
+/// `icon_button` with a drawn mark instead of a glyph.
+pub(super) fn mark_button(
+    id: &'static str,
+    mark: AnyElement,
+    enabled: bool,
+    cx: &Context<Marcel>,
+) -> Stateful<Div> {
+    let colors = cx.theme().colors;
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .size(px(28.0))
+        .items_center()
+        .justify_center()
+        .rounded(cx.theme().radius)
+        .when(enabled, |button| {
+            button.cursor_pointer().hover(|button| button.bg(colors.sidebar_accent))
+        })
+        .child(mark)
+}
+
+/// The list and grid marks for the view toggle, drawn rather than typed.
+///
+/// The font has no list or grid glyph at button height: its candidates are
+/// math operators drawn at x-height, which sit tiny beside the full-height
+/// arrows on the sort button. Three bars and four squares, sized to the
+/// arrows, are the whole of what is needed.
+pub(super) fn view_mark(mode: ViewMode, color: Hsla) -> AnyElement {
+    const EXTENT: f32 = 14.0;
+    match mode {
+        ViewMode::List => div()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .w(px(EXTENT))
+            .h(px(EXTENT - 2.0))
+            .children((0..3).map(|_| div().w_full().h(px(2.0)).bg(color)))
+            .into_any_element(),
+        ViewMode::Grid => div()
+            .flex()
+            .flex_wrap()
+            .justify_between()
+            .content_between()
+            .size(px(EXTENT))
+            .children((0..4).map(|_| div().size(px(6.0)).bg(color)))
+            .into_any_element(),
+    }
+}
+
 impl Marcel {
     fn render_topbar(
         &self,
@@ -70,8 +121,31 @@ impl Marcel {
                 )
             })
         };
+        // The sort picker and the view toggle sit between the location bar
+        // and the filter, where they act on what the location bar shows.
+        // The picker opens the context menus' popover shell; see
+        // `toggle_sort_menu` for why the press is recorded first.
+        let sort_button = icon_button("sort-menu-button", "⇅", true, cx)
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                this.ui.sort_menu_was_open =
+                    this.ui.entry_menu.is_some_and(|menu| menu.target == ContextMenuTarget::Sort);
+            }))
+            .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                this.toggle_sort_menu(event.position(), cx);
+            }));
+        let other_view = match self.ui.view_mode {
+            ViewMode::List => ViewMode::Grid,
+            ViewMode::Grid => ViewMode::List,
+        };
+        let view_button = mark_button(
+            "view-mode-button",
+            view_mark(self.ui.view_mode, colors.sidebar_foreground),
+            true,
+            cx,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.set_view_mode(other_view, cx)));
         let location_width =
-            (f32::from(window.bounds().size.width) - f32::from(sidebar_width) - 296.0).max(180.0);
+            (f32::from(window.bounds().size.width) - f32::from(sidebar_width) - 368.0).max(180.0);
         let max_breadcrumbs = ((location_width / 96.0).floor() as usize).clamp(3, 8);
         h_flex()
             .flex_none()
@@ -114,6 +188,8 @@ impl Marcel {
                     .px_2()
                     .gap_2()
                     .child(self.render_location_bar(max_breadcrumbs, cx))
+                    .child(sort_button)
+                    .child(view_button)
                     .child(
                         Input::new(&self.ui.search_input)
                             .small()

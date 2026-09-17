@@ -7,6 +7,7 @@
 use std::{
     ffi::OsStr,
     fs,
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -53,8 +54,22 @@ pub fn validate_entry_os_name(name: &OsStr) -> Result<()> {
     if bytes.contains(&b'/') || bytes.contains(&0) {
         bail!("Names cannot contain “/” or a null character");
     }
+    // Marcel's working files are told apart from the user's by name alone,
+    // and the browser hides them and a later Marcel may sweep them. A user
+    // must not be able to give their own file that fate through Rename.
+    if bytes.starts_with(WORKING_NAME_PREFIX) {
+        bail!(
+            "Names beginning with “{}” are reserved for Marcel's own working files",
+            String::from_utf8_lossy(WORKING_NAME_PREFIX)
+        );
+    }
     Ok(())
 }
+
+/// What every name Marcel gives its own working state begins with:
+/// replacement and deletion quarantines, copy and archive staging, recovery
+/// remnants.
+const WORKING_NAME_PREFIX: &[u8] = b".marcel-";
 
 pub fn create_directory(parent: &Path, name: &str) -> Result<CommittedOperation> {
     validate_entry_name(name)?;
@@ -123,6 +138,60 @@ pub fn rename_entry(source: &Path, name: &str) -> Result<CommittedOperation> {
     let expected = FileIdentity::read(source)?;
     expected.validate(source, "rename")?;
     rename_committing(source, &destination)
+}
+
+/// Change an object's permission bits, recording the ones it had.
+///
+/// Symbolic links are refused: `chmod` follows them, so the bits would land
+/// on whatever the link points at, which is not what the dialog showed.
+pub fn set_mode(path: &Path, mode: u32) -> Result<CommittedOperation> {
+    // Prepare.
+    let metadata = inspect(path)?;
+    if metadata.file_type().is_symlink() {
+        bail!("The permissions of a symbolic link cannot be changed");
+    }
+    let previous = metadata.mode() & 0o7777;
+    if previous == mode & 0o7777 {
+        bail!("The permissions are unchanged");
+    }
+    change_mode(path, &FileIdentity::of(&metadata), previous, mode)
+}
+
+/// Undo or redo a mode change by putting the other mode on, which is one
+/// more single commit.
+pub(super) fn reverse_set_mode(operation: &OperationRecord) -> Result<CommittedOperation> {
+    let OperationRecord::SetMode { path, identity, previous, mode } = operation else {
+        bail!("Operation is not a permission change");
+    };
+    change_mode(path, identity, *mode, *previous)
+}
+
+/// Commit a mode change and describe it, whichever direction it runs in.
+fn change_mode(
+    path: &Path,
+    expected: &FileIdentity,
+    from: u32,
+    to: u32,
+) -> Result<CommittedOperation> {
+    // Prepare: the object must still be the one whose bits were read.
+    expected.validate(path, "change permissions")?;
+    // Commit.
+    fs::set_permissions(path, fs::Permissions::from_mode(to))
+        .at("Could not change permissions on", path)?;
+    // Finalize: the bits are on disk. The change moved the ctime, so the
+    // record carries a fresh identity; a failed read costs undo, not the
+    // change.
+    let record = fs::symlink_metadata(path).ok().map(|metadata| OperationRecord::SetMode {
+        path: path.to_path_buf(),
+        identity: FileIdentity::of(&metadata),
+        previous: from,
+        mode: to,
+    });
+    Ok(CommittedOperation::new(
+        path.to_path_buf(),
+        DirectoryChanges::upserted(vec![path.to_path_buf()]),
+        record,
+    ))
 }
 
 /// Undo or redo a rename by renaming back, which is one more atomic commit.

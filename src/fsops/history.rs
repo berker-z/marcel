@@ -26,7 +26,7 @@ use super::{
     local::{ensure_unoccupied, rename_no_replace},
     mutations::{
         create_directory_at, create_file_at, create_zip_operation, extract_archive_operation,
-        reverse_rename,
+        reverse_rename, reverse_set_mode,
     },
     quarantine::{preserve_unrestored, restore_replaced_items},
     transfer::{TransferMode, transfer_paths},
@@ -253,6 +253,7 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
             Err(failure) => failure.into(),
         },
         OperationRecord::Rename { .. } => reverse_rename(operation).into(),
+        OperationRecord::SetMode { .. } => reverse_set_mode(operation).into(),
     }
 }
 
@@ -302,6 +303,7 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
             Err(failure) => failure.into(),
         },
         OperationRecord::Rename { .. } => reverse_rename(operation).into(),
+        OperationRecord::SetMode { .. } => reverse_set_mode(operation).into(),
         // The archive is published atomically, so a failure leaves the
         // destination untouched.
         OperationRecord::ArchiveCreate { sources, destination, .. } => {

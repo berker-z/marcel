@@ -11,7 +11,7 @@ use std::{
 
 use gpui::Task;
 
-use crate::browse::entries::{FileEntry, merge_sorted_entries, sort_entries};
+use crate::browse::entries::{FileEntry, SortKey, SortOrder, merge_sorted_entries, sort_entries};
 use crate::browse::selection::SelectionModel;
 
 /// Lazily rebuilt path lookup over `entries`.
@@ -33,6 +33,8 @@ pub struct DirectorySession {
     pub(crate) visible_entries: Vec<usize>,
     pub(crate) filter_query: String,
     pub(crate) show_hidden: bool,
+    /// The order `entries` is kept in. Every merge and re-sort honours it.
+    pub(crate) sort: SortOrder,
     pub(crate) selection: SelectionModel,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
@@ -80,6 +82,7 @@ impl DirectorySession {
             visible_entries: Vec::new(),
             filter_query: String::new(),
             show_hidden: true,
+            sort: SortOrder::default(),
             selection: SelectionModel::default(),
             loading: false,
             error: None,
@@ -194,8 +197,8 @@ impl DirectorySession {
         self.entries
             .retain(|entry| !removed.contains(&entry.path) && !upserts.contains_key(&entry.path));
         let mut upserts = upserts.into_values().collect::<Vec<_>>();
-        sort_entries(&mut upserts);
-        self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), upserts);
+        sort_entries(&mut upserts, self.sort);
+        self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), upserts, self.sort);
         self.mark_entries_changed();
         self.rebuild_visible_entries();
         let mut reconcile = self.reconcile_selection();
@@ -251,8 +254,14 @@ impl DirectorySession {
         self.watch_task.take();
     }
 
-    pub fn merge_batch(&mut self, batch: Vec<FileEntry>) -> ReconcileSelection {
-        self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), batch);
+    /// Fold a streamed batch into the listing.
+    ///
+    /// The stream sorted the batch in the order it was started with; if the
+    /// order changed meanwhile the batch is re-sorted here, which costs
+    /// nothing when it was right already.
+    pub fn merge_batch(&mut self, mut batch: Vec<FileEntry>) -> ReconcileSelection {
+        sort_entries(&mut batch, self.sort);
+        self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), batch, self.sort);
         self.mark_entries_changed();
         self.rebuild_visible_entries();
         self.reconcile_selection()
@@ -286,6 +295,22 @@ impl DirectorySession {
         self.show_hidden = show_hidden;
         self.rebuild_visible_entries();
         Some(self.reconcile_selection())
+    }
+
+    /// Reorder the listing by `key`: its natural direction, or the reverse
+    /// when it already was the key. Returns the order now in force.
+    pub fn sort_by(&mut self, key: SortKey) -> (SortOrder, ReconcileSelection) {
+        self.set_sort(self.sort.choose(key))
+    }
+
+    pub fn set_sort(&mut self, order: SortOrder) -> (SortOrder, ReconcileSelection) {
+        if order != self.sort {
+            self.sort = order;
+            sort_entries(&mut self.entries, order);
+            self.mark_entries_changed();
+            self.rebuild_visible_entries();
+        }
+        (self.sort, self.reconcile_selection())
     }
 
     pub fn take_pending_visible_entries(&mut self) -> Vec<FileEntry> {
@@ -511,6 +536,7 @@ mod tests {
             kind: if navigable { EntryKind::Directory } else { EntryKind::File },
             navigable,
             size,
+            modified: None,
             icon_path: None,
         }
     }
@@ -556,14 +582,14 @@ mod tests {
         session.show_hidden = true;
         session.merge_batch(vec![
             file("report.txt"),
-            file(".marcel-replaced-1-0-report.txt"),
+            file(&format!(".marcel-replaced-{}-1-0-report.txt", crate::fsops::boot_id())),
             dir(".marcel-copy-1-0-staging"),
             dir(".marcel-archive-abc"),
             dir(".marcel-delete-1-0-old"),
             dir(".config"),
         ]);
 
-        assert_eq!(visible_names(&session), ["report.txt", ".marcel-delete-1-0-old", ".config"]);
+        assert_eq!(visible_names(&session), [".config", ".marcel-delete-1-0-old", "report.txt"]);
     }
 
     #[test]

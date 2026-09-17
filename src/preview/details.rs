@@ -350,6 +350,11 @@ impl AccessClass {
             Self::Others => 0,
         }
     }
+
+    /// The mode bit `permission` (`0o4`, `0o2`, or `0o1`) is for this class.
+    pub fn bit(self, permission: u32) -> u32 {
+        permission << self.shift()
+    }
 }
 
 /// What one class may do, in words: "read, write, execute", or "none".

@@ -15,11 +15,13 @@ use gpui_component::{
 };
 
 use crate::{
-    browse::entries::EntryKind,
+    browse::entries::{EntryKind, SortKey, SortOrder},
     fsops::{TransferMode, archive::is_supported_archive},
 };
 
-use super::{DIRECTORY_ROW_HEIGHT, GRID_ROW_HEIGHT, Marcel, state::ViewMode};
+use super::{
+    DIRECTORY_ROW_HEIGHT, GRID_ROW_HEIGHT, Marcel, browser::LIST_HEADER_HEIGHT, state::ViewMode,
+};
 
 pub const BROWSER_KEY_CONTEXT: &str = "MarcelBrowser";
 
@@ -379,7 +381,9 @@ impl Marcel {
             .map(|bounds| f32::from(bounds.size.height))
             .unwrap_or(DIRECTORY_ROW_HEIGHT);
         match self.ui.view_mode {
-            ViewMode::List => (height / DIRECTORY_ROW_HEIGHT).floor().max(1.0) as usize,
+            ViewMode::List => {
+                ((height - LIST_HEADER_HEIGHT) / DIRECTORY_ROW_HEIGHT).floor().max(1.0) as usize
+            }
             ViewMode::Grid => (height / GRID_ROW_HEIGHT).floor().max(1.0) as usize * columns.max(1),
         }
     }
@@ -596,6 +600,42 @@ impl Marcel {
         if let Some(reconcile) = self.directory.set_show_hidden(show_hidden) {
             self.persist_browser_state();
             self.reprojected(reconcile, cx);
+        }
+    }
+
+    /// Reorder by `key` from a heading: its natural direction when it is
+    /// new, the reverse when it already was the key.
+    pub(super) fn sort_by(&mut self, key: SortKey, cx: &mut Context<Self>) {
+        self.apply_sort(self.directory.sort.choose(key), cx);
+    }
+
+    /// Reorder by `key` from a menu, where the current key is the checked
+    /// item and choosing it again changes nothing, as a checked item should.
+    pub(super) fn set_sort_key(&mut self, key: SortKey, cx: &mut Context<Self>) {
+        if self.directory.sort.key != key {
+            self.apply_sort(SortOrder { key, descending: key.descends_first() }, cx);
+        }
+    }
+
+    pub(super) fn reverse_sort(&mut self, cx: &mut Context<Self>) {
+        let current = self.directory.sort;
+        self.apply_sort(SortOrder { descending: !current.descending, ..current }, cx);
+    }
+
+    /// Keeps the primary selection in view rather than jumping to the top,
+    /// since the same items are shown in a new order.
+    fn apply_sort(&mut self, order: SortOrder, cx: &mut Context<Self>) {
+        let (_, reconcile) = self.directory.set_sort(order);
+        self.persist_browser_state();
+        self.reprojected(reconcile, cx);
+        if let Some(row) = self
+            .directory
+            .selection
+            .primary()
+            .cloned()
+            .and_then(|primary| self.scroll_row_of(&primary))
+        {
+            self.ui.directory_scroll.scroll_to_item(row, gpui::ScrollStrategy::Center);
         }
     }
 

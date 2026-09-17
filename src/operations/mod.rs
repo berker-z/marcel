@@ -44,7 +44,7 @@ use crate::{
         delete::{DeleteOutcome, delete_paths},
         extract_archive_operation,
         quarantine::erase_replacement_quarantine,
-        redo_operation, rename_entry,
+        redo_operation, rename_entry, set_mode,
         transfer::transfer_paths_with_conflicts,
         trash::{
             TrashOutcome, TrashRecord, purge_trash_records, restore_trash_records, trash_paths,
@@ -515,6 +515,20 @@ impl OperationCoordinator {
             return;
         }
         self.run_committing(origin, cx, "Created", move || create_file(&parent, &name));
+    }
+
+    /// Change one object's permission bits, journalled like any other edit.
+    pub fn start_set_mode(
+        &mut self,
+        path: PathBuf,
+        mode: u32,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        if self.begin(None).is_none() {
+            return;
+        }
+        self.run_committing(origin, cx, "Changed permissions of", move || set_mode(&path, mode));
     }
 
     /// Copy the selection into the folder it lives in.
@@ -992,6 +1006,12 @@ fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> 
             format!("Restored name “{original}”")
         }
         (OperationRecord::Rename { .. }, true) => format!("Renamed to “{name}” again"),
+        (OperationRecord::SetMode { previous, .. }, false) => {
+            format!("Restored permissions {previous:04o} on “{name}”")
+        }
+        (OperationRecord::SetMode { mode, .. }, true) => {
+            format!("Set permissions {mode:04o} on “{name}” again")
+        }
         (OperationRecord::ArchiveCreate { .. }, false) => {
             format!("Removed created ZIP “{name}”")
         }

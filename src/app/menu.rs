@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, h_flex};
 
-use crate::desktop::picker::PickerMode;
+use crate::{browse::entries::SortKey, desktop::picker::PickerMode};
 
 use super::{
     Marcel,
@@ -41,7 +41,7 @@ pub(super) enum MenuItem {
     Action {
         label: &'static str,
         checked: bool,
-        run: fn(&mut Marcel, &mut Window, &mut Context<Marcel>),
+        run: MenuAction,
     },
     /// Not built yet; shown greyed so the shape of the menu is known.
     Planned(&'static str),
@@ -49,6 +49,9 @@ pub(super) enum MenuItem {
 }
 
 use MenuItem::{Action, Planned, Separator};
+
+/// What an `Action` item does when chosen.
+type MenuAction = fn(&mut Marcel, &mut Window, &mut Context<Marcel>);
 
 fn command(
     label: &'static str,
@@ -160,7 +163,11 @@ impl Marcel {
             items.push(command("Extract", None, ExtractSelection));
         }
         items.extend([
-            Planned("Copy Path"),
+            Action {
+                label: "Copy Path",
+                checked: false,
+                run: |this, _, cx| this.copy_selected_paths(cx),
+            },
             Separator,
             command("Properties", Some("Ctrl+I"), ShowProperties),
         ]);
@@ -207,6 +214,52 @@ impl Marcel {
         items
     }
 
+    /// The sort picker: one checked key, and whether the order is reversed.
+    fn sort_menu_items(&self) -> Vec<MenuItem> {
+        let order = self.directory.sort;
+        let key = |label: &'static str, key: SortKey, run: MenuAction| Action {
+            label,
+            checked: order.key == key,
+            run,
+        };
+        vec![
+            key("Name", SortKey::Name, |this, _, cx| this.set_sort_key(SortKey::Name, cx)),
+            key("Modified", SortKey::Modified, |this, _, cx| {
+                this.set_sort_key(SortKey::Modified, cx)
+            }),
+            key("Size", SortKey::Size, |this, _, cx| this.set_sort_key(SortKey::Size, cx)),
+            key("Kind", SortKey::Kind, |this, _, cx| this.set_sort_key(SortKey::Kind, cx)),
+            Separator,
+            Action {
+                label: "Reverse Order",
+                checked: order.descending,
+                run: |this, _, cx| this.reverse_sort(cx),
+            },
+        ]
+    }
+
+    /// Open the sort picker at `position`, unless the press that became this
+    /// click found it open, in which case the popover has already closed it.
+    pub(super) fn toggle_sort_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.ui.sort_menu_was_open) {
+            self.ui.entry_menu = Some(EntryMenu { position, target: ContextMenuTarget::Sort });
+        }
+        cx.notify();
+    }
+
+    /// Every selected path on the clipboard, one per line.
+    pub(super) fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
+        let paths = self
+            .selected_paths()
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !paths.is_empty() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(paths));
+        }
+    }
+
     pub(super) fn render_entry_menu(
         &self,
         window: &mut Window,
@@ -216,6 +269,7 @@ impl Marcel {
         let colors = cx.theme().colors;
         let (id, items) = match menu.target {
             ContextMenuTarget::Entry => ("entry-context-menu", self.entry_menu_items(cx)),
+            ContextMenuTarget::Sort => ("sort-menu", self.sort_menu_items()),
             ContextMenuTarget::CurrentDirectory => {
                 ("directory-context-menu", self.directory_menu_items())
             }

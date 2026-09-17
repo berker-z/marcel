@@ -10,12 +10,12 @@ use gpui::{
     relative, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, h_flex, input::Input, scroll::ScrollableElement as _,
+    ActiveTheme as _, Sizable as _, h_flex, input::Input, scroll::ScrollableElement as _, v_flex,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    browse::entries::{FileEntry, format_size},
+    browse::entries::{FileEntry, SortKey, format_modified, format_size},
     preview::thumbnails,
 };
 
@@ -31,6 +31,15 @@ const GRID_VISUAL_SIZE: f32 = 104.0;
 const GRID_ICON_SIZE: f32 = 80.0;
 const GRID_LABEL_HEIGHT: f32 = 64.0;
 const GRID_LABEL_COLUMNS: usize = 30;
+
+/// The list columns. Rows and the header share these so they line up; the
+/// row is content-sized in the sense that it ends where the last column
+/// does, and the space beyond stays a marquee start target.
+const LIST_ICON_WIDTH: f32 = 20.0;
+const LIST_NAME_WIDTH: f32 = 340.0;
+const LIST_SIZE_WIDTH: f32 = 72.0;
+const LIST_MODIFIED_WIDTH: f32 = 132.0;
+pub(super) const LIST_HEADER_HEIGHT: f32 = 26.0;
 
 /// An entry's icon at row size: the themed image, or the glyph fallback.
 pub(super) fn entry_icon(entry: &FileEntry, fallback_color: Hsla) -> AnyElement {
@@ -171,7 +180,7 @@ impl Marcel {
     fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let selected_drag = self.shared_drag();
-        uniform_list(
+        let rows = uniform_list(
             "directory-entries",
             self.directory.visible_entries.len(),
             cx.processor(move |this, range: Range<usize>, _window, cx| {
@@ -180,33 +189,41 @@ impl Marcel {
                         let entry = this.directory.visible_entry(index)?.clone();
                         let name = match this.ui.rename_input_for(&entry.path) {
                             Some(input) => div()
-                                .w(px(300.0))
+                                .w(px(LIST_NAME_WIDTH))
                                 .child(Input::new(&input).small())
                                 .into_any_element(),
                             None => div()
-                                .max_w(px(480.0))
+                                .w(px(LIST_NAME_WIDTH))
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .child(entry.name.clone())
                                 .into_any_element(),
                         };
+                        let detail = |width: f32, text: String| {
+                            div()
+                                .w(px(width))
+                                .flex_none()
+                                .text_right()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .whitespace_nowrap()
+                                .child(text)
+                        };
                         let row = this
                             .entry_surface(("entry", index), &entry, &selected_drag, cx)
                             .h(px(32.0))
-                            .max_w(px(640.0))
                             .px_3()
                             .gap_2()
                             .flex()
                             .items_center()
                             .child(entry_icon(&entry, colors.primary))
                             .child(name)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_foreground)
-                                    .child(format_size(entry.size)),
-                            );
+                            .child(detail(LIST_SIZE_WIDTH, format_size(entry.size)))
+                            .child(detail(
+                                LIST_MODIFIED_WIDTH,
+                                entry.modified.map(format_modified).unwrap_or_default(),
+                            ));
                         Some(
                             div()
                                 .flex()
@@ -220,8 +237,55 @@ impl Marcel {
             }),
         )
         .track_scroll(&self.ui.directory_scroll)
-        .h_full()
-        .into_any_element()
+        .flex_1()
+        .min_h_0();
+        v_flex().size_full().child(self.render_list_header(cx)).child(rows).into_any_element()
+    }
+
+    /// The column headings. Each names the key it sorts by; the one in force
+    /// carries an arrow, and choosing it again reverses the order.
+    fn render_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors;
+        let order = self.directory.sort;
+        let heading = |id: &'static str, key: SortKey, width: f32, right: bool| {
+            let active = order.key == key;
+            let label = if active {
+                format!("{} {}", key.label(), if order.descending { "▾" } else { "▴" })
+            } else {
+                key.label().to_string()
+            };
+            div()
+                .id(id)
+                .w(px(width))
+                .flex_none()
+                .px_1()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .hover(|this| this.bg(colors.list_hover))
+                .when(right, |this| this.text_right())
+                .when(active, |this| this.text_color(colors.foreground))
+                .whitespace_nowrap()
+                .child(label)
+                // A press here is a click on a heading, not the start of a
+                // marquee on empty browser space.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| this.sort_by(key, cx)))
+        };
+        h_flex()
+            .flex_none()
+            .h(px(LIST_HEADER_HEIGHT))
+            .px_3()
+            .gap_2()
+            .items_center()
+            .text_xs()
+            .text_color(colors.muted_foreground)
+            .border_b_1()
+            .border_color(colors.border)
+            .child(div().w(px(LIST_ICON_WIDTH)).flex_none())
+            .child(heading("sort-by-name", SortKey::Name, LIST_NAME_WIDTH, false))
+            .child(heading("sort-by-size", SortKey::Size, LIST_SIZE_WIDTH, true))
+            .child(heading("sort-by-modified", SortKey::Modified, LIST_MODIFIED_WIDTH, true))
+            .into_any_element()
     }
 
     fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {

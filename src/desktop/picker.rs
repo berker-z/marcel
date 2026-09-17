@@ -194,6 +194,7 @@ mod tests {
             kind: if navigable { EntryKind::Directory } else { EntryKind::File },
             navigable,
             size: None,
+            modified: None,
             icon_path: None,
         }
     }

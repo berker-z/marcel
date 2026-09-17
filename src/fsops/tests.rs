@@ -2,7 +2,7 @@ use super::{
     conflict::{
         ConflictDecision, ConflictPolicy, ConflictRequest, ConflictResolver, ConflictResponse,
     },
-    copy::{supported_xattr_name, xattrs_unsupported},
+    copy::{copy_file_cancellable, preserve_metadata, supported_xattr_name, xattrs_unsupported},
     identity::FileIdentity,
     journal::*,
     local::{MAX_NAME_BYTES, fault, quarantined_name},
@@ -322,6 +322,28 @@ fn rejects_names_that_escape_the_parent_or_have_no_name() {
     assert!(validate_entry_name("New Folder").is_ok());
 }
 
+/// A file the user renamed to look like an abandoned quarantine would be
+/// hidden by the browser and swept by the next Marcel to open the folder.
+/// Every name Marcel reserves for itself is refused, not only the swept one,
+/// so the rule stays one line long and needs no updating.
+#[test]
+fn rejects_names_reserved_for_marcels_working_files() {
+    for name in [
+        ".marcel-replaced-999999-0-notes",
+        ".marcel-copy-1-0-staging",
+        ".marcel-archive-abc",
+        ".marcel-delete-1-0-thesis",
+        ".marcel-recovered-0-report.txt",
+        ".marcel-",
+    ] {
+        let error = validate_entry_name(name).unwrap_err().to_string();
+        assert!(error.contains("reserved"), "{name:?}: {error}");
+    }
+    assert!(validate_entry_name("marcel-replaced-1-0-notes").is_ok());
+    assert!(validate_entry_name(".marcel").is_ok());
+    assert!(validate_entry_name(".marcelrc").is_ok());
+}
+
 #[test]
 fn create_never_overwrites_an_occupied_destination() {
     let sandbox = Sandbox::new();
@@ -394,6 +416,70 @@ fn rename_undo_refuses_a_modified_result() {
     assert!(undo_operation(&operation).is_err());
     assert!(!source.exists());
     assert_eq!(read(&destination), b"modified");
+}
+
+#[test]
+fn set_mode_records_both_modes_and_supports_undo_redo() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new();
+    let script = sandbox.file("run.sh", b"#!/bin/sh\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+    let mode_of = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+
+    let operation = recorded(set_mode(&script, 0o755).unwrap());
+    assert_eq!(mode_of(&script), 0o755);
+    assert_eq!(
+        operation.forward_directory_changes(),
+        DirectoryChanges::upserted(vec![script.clone()])
+    );
+    assert!(matches!(operation, OperationRecord::SetMode { previous: 0o644, mode: 0o755, .. }));
+
+    let redo_record = recorded(undo_operation(&operation).unwrap());
+    assert_eq!(mode_of(&script), 0o644);
+    assert!(matches!(redo_record, OperationRecord::SetMode { previous: 0o755, mode: 0o644, .. }));
+
+    recorded(redo_operation(&redo_record).unwrap());
+    assert_eq!(mode_of(&script), 0o755);
+    assert_eq!(read(&script), b"#!/bin/sh\n");
+}
+
+/// The bits of a link belong to its target, which is not what the dialog
+/// described; a request for no change is a refusal too, so nothing lands in
+/// the journal for it.
+#[test]
+fn set_mode_refuses_links_and_unchanged_modes() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new();
+    let target = sandbox.file("target", b"x");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let link = sandbox.path("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let error = set_mode(&link, 0o644).unwrap_err().to_string();
+    assert!(error.contains("symbolic link"), "{error}");
+    assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o7777, 0o600);
+
+    let error = set_mode(&target, 0o600).unwrap_err().to_string();
+    assert!(error.contains("unchanged"), "{error}");
+}
+
+/// Undo puts the old bits back only on the object whose bits were changed.
+#[test]
+fn set_mode_undo_refuses_a_replaced_object() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new();
+    let file = sandbox.file("notes", b"a");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let operation = recorded(set_mode(&file, 0o600).unwrap());
+    fs::remove_file(&file).unwrap();
+    let replacement = sandbox.file("notes", b"b");
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(undo_operation(&operation).is_err());
+    assert_eq!(fs::metadata(&replacement).unwrap().permissions().mode() & 0o7777, 0o600);
 }
 
 #[test]
@@ -613,20 +699,28 @@ fn a_rename_response_cannot_escape_the_destination_directory() {
 /// A crash cannot run the exit path, so the remnants it leaves have to be
 /// reclaimed later. A dead owner's quarantine can never be restored, which
 /// makes it unreachable garbage rather than data anyone might want — but a
-/// live owner (this process, or its parent) can still restore its own, and
-/// recovery remnants are never anyone's to sweep.
+/// live owner (this process, or its parent) can still restore its own, a
+/// name from another boot proves nothing about who made it, and recovery
+/// remnants are never anyone's to sweep.
 #[test]
-fn the_abandoned_sweep_reclaims_only_dead_owners_undo_storage() {
+fn the_abandoned_sweep_reclaims_only_dead_owners_undo_storage_from_this_boot() {
     let sandbox = Sandbox::new();
+    let boot = boot_id();
     // Process id 0 is never a real process, so it stands in for a Marcel
     // that is gone.
-    let abandoned = sandbox.file(".marcel-replaced-0-0-report.txt", b"overwritten");
-    let mine =
-        sandbox.file(&format!(".marcel-replaced-{}-0-report.txt", std::process::id()), b"payload");
+    let abandoned = sandbox.file(&format!(".marcel-replaced-{boot}-0-0-report.txt"), b"old");
+    let mine = sandbox
+        .file(&format!(".marcel-replaced-{boot}-{}-0-report.txt", std::process::id()), b"payload");
     let parents = sandbox.file(
-        &format!(".marcel-replaced-{}-0-report.txt", std::os::unix::process::parent_id()),
+        &format!(".marcel-replaced-{boot}-{}-0-report.txt", std::os::unix::process::parent_id()),
         b"payload",
     );
+    // The same dead pid under another boot id: restored from a backup, or
+    // from a machine whose pid 0 means something else entirely.
+    let other_boot = "f".repeat(32);
+    let foreign = sandbox.file(&format!(".marcel-replaced-{other_boot}-0-0-report.txt"), b"?");
+    // The shape Marcel wrote before boot ids, which no longer parses as its.
+    let legacy = sandbox.file(".marcel-replaced-0-0-report.txt", b"?");
     let preserved = sandbox.file(".marcel-recovered-0-report.txt", b"ORIGINAL");
     let ordinary = sandbox.file("report.txt", b"payload");
 
@@ -635,6 +729,8 @@ fn the_abandoned_sweep_reclaims_only_dead_owners_undo_storage() {
     assert!(!abandoned.exists(), "a dead owner's undo storage is garbage");
     assert!(mine.exists(), "this process can still undo, so its quarantine stays");
     assert!(parents.exists(), "liveness is consulted, not equality with this process");
+    assert!(foreign.exists(), "another boot's pids are not this boot's");
+    assert!(legacy.exists(), "a name without a boot id is nobody's to sweep");
     assert_eq!(read(&preserved), b"ORIGINAL");
     assert!(ordinary.exists(), "user data is never touched");
 }
@@ -748,13 +844,26 @@ fn an_identity_refresh_refuses_an_object_it_did_not_commit() {
 
 #[test]
 fn marcel_working_names_are_recognized_without_catching_user_data() {
-    for name in [".marcel-replaced-1-0-report.txt", ".marcel-copy-1-0-abc", ".marcel-archive-abc"] {
+    let mine = format!(".marcel-replaced-{}-1-0-report.txt", boot_id());
+    for name in [mine.as_str(), ".marcel-copy-1-0-abc", ".marcel-archive-abc"] {
         assert!(is_internal_working_name(OsStr::new(name)), "{name}");
     }
-    // Recovery guidance points the user straight at the first of these.
-    for name in [".marcel-delete-1-0-report.txt", "report.txt", ".hidden", "marcel-replaced-1-0"] {
+    // Recovery guidance points the user straight at the first of these, and
+    // nothing will ever sweep the next two, so the browser shows them too.
+    let other_boot = format!(".marcel-replaced-{}-1-0-report.txt", "a".repeat(32));
+    for name in [
+        ".marcel-delete-1-0-report.txt",
+        other_boot.as_str(),
+        ".marcel-replaced-1-0-report.txt",
+        "report.txt",
+        ".hidden",
+        "marcel-replaced-1-0",
+    ] {
         assert!(!is_internal_working_name(OsStr::new(name)), "{name}");
     }
+    assert!(is_quarantine_from_another_boot(OsStr::new(&other_boot)));
+    assert!(!is_quarantine_from_another_boot(OsStr::new(&mine)));
+    assert!(!is_quarantine_from_another_boot(OsStr::new(".marcel-replaced-1-0-report.txt")));
 }
 
 /// A record pushed out of the journal can never be undone, so what it was
@@ -1403,6 +1512,78 @@ fn copy_preserves_file_and_directory_modes_and_times() {
     assert_eq!(tree_metadata.modified().unwrap(), modified);
     assert_eq!(file_metadata.modified().unwrap(), modified);
     assert_eq!(file_metadata.accessed().unwrap(), accessed);
+}
+
+/// A mode without the owner's read bit is legal on a source Marcel can still
+/// read through its group or world bits — a root-owned `0044` file, say —
+/// and the copy Marcel owns must end up with that same mode. It only forbids
+/// opening the copy afterwards, and applying the mode before the timestamps
+/// failed exactly there, after every byte was in place.
+#[test]
+fn copy_applies_modes_that_forbid_reading_the_copy_back_after_its_times() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if skip_as_root() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let modified = UNIX_EPOCH + Duration::from_secs(1_650_000_123);
+    let times = fs::FileTimes::new().set_modified(modified);
+
+    let locked = sandbox.file("lock", b"held");
+    let copied_lock = sandbox.path("lock copy");
+    copy_file_cancellable(&locked, &copied_lock, &no_cancel(), None).unwrap();
+    fs::File::open(&locked).unwrap().set_times(times).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let dropbox = sandbox.dir("dropbox");
+    let copied_dropbox = sandbox.dir("dropbox copy");
+    fs::File::open(&dropbox).unwrap().set_times(times).unwrap();
+    fs::set_permissions(&dropbox, fs::Permissions::from_mode(0o300)).unwrap();
+
+    let lock_result =
+        preserve_metadata(&locked, &copied_lock, &fs::symlink_metadata(&locked).unwrap());
+    let dropbox_result =
+        preserve_metadata(&dropbox, &copied_dropbox, &fs::symlink_metadata(&dropbox).unwrap());
+
+    // An unlistable folder cannot be torn down with the sandbox, so record
+    // what happened and reopen everything before asserting anything.
+    let lock_metadata = fs::symlink_metadata(&copied_lock).unwrap();
+    let dropbox_metadata = fs::symlink_metadata(&copied_dropbox).unwrap();
+    for path in [&dropbox, &copied_dropbox] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    lock_result.unwrap();
+    dropbox_result.unwrap();
+    assert_eq!(lock_metadata.permissions().mode() & 0o7777, 0o000);
+    assert_eq!(lock_metadata.modified().unwrap(), modified);
+    assert_eq!(dropbox_metadata.permissions().mode() & 0o7777, 0o300);
+    assert_eq!(dropbox_metadata.modified().unwrap(), modified);
+}
+
+/// Nobody but the owner can read a copy while it is being written, whatever
+/// the umask says. The content copy leaves the file at `0600`; the source's
+/// mode is applied by a later step, once the content is final.
+#[test]
+fn copy_creates_files_owner_only_until_finished() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("secret", b"shh");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+    let staged = sandbox.path("staged");
+
+    copy_file_cancellable(&source, &staged, &no_cancel(), None).unwrap();
+
+    assert_eq!(fs::metadata(&staged).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(read(&staged), b"shh");
+
+    // The whole transfer then publishes it at the source's mode.
+    let destination = sandbox.dir("destination");
+    assert_clean(&copy(std::slice::from_ref(&source), &destination));
+    let copied = fs::metadata(destination.join("secret")).unwrap();
+    assert_eq!(copied.permissions().mode() & 0o777, 0o644);
 }
 
 #[test]

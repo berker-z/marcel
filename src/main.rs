@@ -43,7 +43,7 @@ fn main() {
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         marcel::fonts::init(cx);
-        marcel::theme::init(cx);
+        marcel::theme::init(marcel::config::chosen_theme(), cx);
         marcel::init_key_bindings(cx);
         marcel::operations::init(cx);
         window::init(cx);

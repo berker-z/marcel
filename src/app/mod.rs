@@ -117,7 +117,7 @@ impl Marcel {
             ),
         ];
         let mono_font_size = gpui_component::ActiveTheme::theme(&**cx).mono_font_size;
-        let state_path = config::path(&home_dir, "state.conf");
+        let state_path = config::path(&home_dir, config::STATE_FILE);
         let browser_state = config::load(&state_path).unwrap_or_else(|error| {
             eprintln!("Could not load Marcel browser state: {error:#}");
             BrowserState::default()
@@ -132,6 +132,7 @@ impl Marcel {
         });
         let mut directory = DirectorySession::new(start_dir.clone());
         directory.show_hidden = browser_state.show_hidden;
+        directory.sort = browser_state.sort;
 
         // Effects arrive from the application, so a mutation another window
         // started still reconciles here, and progress it is running still
@@ -225,6 +226,8 @@ impl Marcel {
         let _ = self.ui.state_save_sender.try_send(BrowserState {
             view: self.ui.view_mode.to_state(),
             show_hidden: self.directory.show_hidden,
+            sort: self.directory.sort,
+            theme: crate::theme::chosen(),
         });
     }
 }
@@ -252,6 +255,7 @@ pub(crate) fn test_file_entry(path: &str, navigable: bool) -> FileEntry {
         kind: if navigable { EntryKind::Directory } else { EntryKind::File },
         navigable,
         size: Some(0),
+        modified: None,
         icon_path: None,
     }
 }

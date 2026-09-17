@@ -231,6 +231,7 @@ mod tests {
             kind,
             navigable: false,
             size,
+            modified: None,
             icon_path: None,
         }
     }

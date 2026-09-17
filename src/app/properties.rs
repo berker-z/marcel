@@ -16,14 +16,15 @@ use std::{
 };
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, FontWeight, Hsla, Task, Window, div, px};
+use gpui::{AnyElement, Context, FontWeight, Hsla, Subscription, Task, Window, div, px};
 use gpui_component::{
-    ActiveTheme as _, WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex,
-    v_flex,
+    ActiveTheme as _, WindowExt as _, button::ButtonVariant, checkbox::Checkbox,
+    dialog::DialogButtonProps, h_flex, v_flex,
 };
 
 use crate::{
     browse::entries::format_size,
+    operations::OperationEvent,
     preview::details::{
         self, AccessClass, Details, ItemProperties, ObjectKind, TreeTotals, describe_access,
         symbolic_mode,
@@ -53,6 +54,7 @@ pub(super) struct PropertiesView {
     totals: Option<TreeTotals>,
     cancelled: Arc<AtomicBool>,
     _tasks: Vec<Task<()>>,
+    _subscription: Option<Subscription>,
 }
 
 impl PropertiesView {
@@ -64,15 +66,32 @@ impl PropertiesView {
             totals: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             _tasks: Vec::new(),
+            _subscription: None,
         };
         match this.paths.as_slice() {
-            [path] => this.start_inspecting(path.clone(), cx),
+            [path] => {
+                this.start_inspecting(path.clone(), true, cx);
+                // A permission change the dialog asked for lands like any
+                // other operation, and the facts are re-read when it does.
+                let operations = crate::operations::global(cx);
+                this._subscription =
+                    Some(cx.subscribe(&operations, |this, _, event: &OperationEvent, cx| {
+                        if let OperationEvent::Applied { changes, .. } = event
+                            && let [path] = this.paths.as_slice()
+                            && changes.upserted.iter().any(|changed| changed == path)
+                        {
+                            this.start_inspecting(path.clone(), false, cx);
+                        }
+                    }));
+            }
             _ => this.start_summarizing(cx),
         }
         this
     }
 
-    fn start_inspecting(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    /// Read the item's facts; `measure` starts the folder walk as well,
+    /// which a re-read after a permission change has no reason to repeat.
+    fn start_inspecting(&mut self, path: PathBuf, measure: bool, cx: &mut Context<Self>) {
         let cancelled = self.cancelled.clone();
         let read = cx.background_executor().spawn(smol::unblock({
             let path = path.clone();
@@ -83,12 +102,33 @@ impl PropertiesView {
             let _ = this.update(cx, |this, cx| {
                 let is_folder = matches!(&result, Ok(item) if item.object == ObjectKind::Directory);
                 this.item = Some(result);
-                if is_folder {
+                if is_folder && measure {
                     this.start_measuring(vec![path], cx);
                 }
                 cx.notify();
             });
         }));
+    }
+
+    /// Ask for one permission bit to be set or cleared. The change goes
+    /// through the operation coordinator like every other edit, so it is
+    /// journalled, undoable, and reported the same way.
+    fn set_permission(
+        &mut self,
+        class: AccessClass,
+        bit: u32,
+        granted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Ok(item)) = &self.item else {
+            return;
+        };
+        let mode = if granted { item.mode | class.bit(bit) } else { item.mode & !class.bit(bit) };
+        let path = item.path.clone();
+        let origin = window.window_handle();
+        crate::operations::global(cx)
+            .update(cx, |operations, cx| operations.start_set_mode(path, mode, origin, cx));
     }
 
     fn start_summarizing(&mut self, cx: &mut Context<Self>) {
@@ -151,14 +191,33 @@ impl Drop for PropertiesView {
 /// One labelled fact.
 struct Row {
     label: &'static str,
-    value: String,
+    value: RowValue,
     /// A quieter second line: the raw MIME type, a caveat.
     note: Option<String>,
     color: Option<Hsla>,
 }
 
+enum RowValue {
+    Text(String),
+    /// One class's three permission bits, as checkboxes that change them.
+    Access {
+        class: AccessClass,
+        mode: u32,
+        folder: bool,
+    },
+}
+
 fn row(label: &'static str, value: impl Into<String>) -> Row {
-    Row { label, value: value.into(), note: None, color: None }
+    Row { label, value: RowValue::Text(value.into()), note: None, color: None }
+}
+
+fn access_row(class: AccessClass, mode: u32, folder: bool) -> Row {
+    Row {
+        label: class.label(),
+        value: RowValue::Access { class, mode, folder },
+        note: None,
+        color: None,
+    }
 }
 
 impl Row {
@@ -299,8 +358,15 @@ impl PropertiesView {
 
     fn access_rows(item: &ItemProperties) -> Vec<Row> {
         let mut rows = vec![row("Owner", &item.owner), row("Group", &item.group)];
+        // A link's bits are not its own to change — `chmod` follows it — so a
+        // link shows its bits in words and everything else gets checkboxes.
+        let editable = !matches!(item.object, ObjectKind::Symlink { .. });
         for class in AccessClass::ALL {
-            rows.push(row(class.label(), describe_access(&item.object, item.mode, class)));
+            rows.push(if editable {
+                access_row(class, item.mode, item.object == ObjectKind::Directory)
+            } else {
+                row(class.label(), describe_access(&item.object, item.mode, class))
+            });
         }
         rows.push(row(
             "Mode",
@@ -363,11 +429,23 @@ impl PropertiesView {
             return None;
         }
         let colors = cx.theme().colors;
+        // A change is refused while another operation runs, so say so with
+        // the control rather than with a click that does nothing.
+        let busy = crate::operations::global(cx).read(cx).is_busy();
         Some(
             v_flex()
                 .gap_2()
                 .when(!first, |this| this.pt_3().border_t_1().border_color(colors.border))
                 .children(rows.into_iter().map(|row| {
+                    let value = match row.value {
+                        RowValue::Text(text) => div()
+                            .when_some(row.color, |this, color| this.text_color(color))
+                            .child(text)
+                            .into_any_element(),
+                        RowValue::Access { class, mode, folder } => {
+                            Self::render_access(class, mode, folder, busy, cx)
+                        }
+                    };
                     h_flex()
                         .items_start()
                         .gap_3()
@@ -378,27 +456,48 @@ impl PropertiesView {
                                 .text_color(colors.muted_foreground)
                                 .child(row.label),
                         )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .when_some(row.color, |this, color| this.text_color(color))
-                                        .child(row.value),
+                        .child(v_flex().flex_1().min_w_0().child(value).when_some(
+                            row.note,
+                            |this, note| {
+                                this.child(
+                                    div().text_xs().text_color(colors.muted_foreground).child(note),
                                 )
-                                .when_some(row.note, |this, note| {
-                                    this.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(colors.muted_foreground)
-                                            .child(note),
-                                    )
-                                }),
-                        )
+                            },
+                        ))
                 }))
                 .into_any_element(),
         )
+    }
+
+    /// Three checkboxes for one class, worded the way `describe_access` words
+    /// the same bits.
+    fn render_access(
+        class: AccessClass,
+        mode: u32,
+        folder: bool,
+        busy: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use gpui_component::Disableable as _;
+
+        let permissions = [
+            (0o4, if folder { "List" } else { "Read" }),
+            (0o2, if folder { "Create and delete" } else { "Write" }),
+            (0o1, if folder { "Enter" } else { "Execute" }),
+        ];
+        h_flex()
+            .gap_4()
+            .flex_wrap()
+            .children(permissions.into_iter().map(|(bit, label)| {
+                Checkbox::new((class.label(), bit as usize))
+                    .label(label)
+                    .checked(mode & class.bit(bit) != 0)
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                        this.set_permission(class, bit, *checked, window, cx);
+                    }))
+            }))
+            .into_any_element()
     }
 }
 

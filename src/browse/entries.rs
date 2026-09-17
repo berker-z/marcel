@@ -8,6 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
     },
+    time::SystemTime,
 };
 
 use async_channel::Sender;
@@ -33,6 +34,8 @@ pub struct FileEntry {
     pub kind: EntryKind,
     pub navigable: bool,
     pub size: Option<u64>,
+    /// When the object — the target, for a link — was last written.
+    pub modified: Option<SystemTime>,
     pub icon_path: Option<PathBuf>,
 }
 
@@ -84,6 +87,7 @@ impl FileEntry {
             folded_name,
             navigable,
             size: followed_metadata.as_ref().filter(|meta| meta.is_file()).map(|meta| meta.len()),
+            modified: followed_metadata.as_ref().and_then(|meta| meta.modified().ok()),
             icon_path: icons.icon_for(&path, navigable),
             path,
             kind,
@@ -108,6 +112,16 @@ impl FileEntry {
     pub fn icon(&self) -> &'static str {
         if self.navigable { "▸" } else { "·" }
     }
+
+    /// The folded extension, for sorting by kind; empty when there is none.
+    /// A leading dot is not an extension: `.bashrc` has none.
+    pub(crate) fn folded_extension(&self) -> &[char] {
+        let name = &self.folded_name[..];
+        match name.iter().rposition(|character| *character == '.') {
+            Some(dot) if dot > 0 => &name[dot + 1..],
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -127,6 +141,7 @@ pub fn stream_directory(
     path: &Path,
     sender: Sender<DirectoryUpdate>,
     cancelled: Option<&AtomicBool>,
+    order: SortOrder,
 ) {
     if cancelled.is_some_and(|cancelled| cancelled.load(AtomicOrdering::Acquire)) {
         return;
@@ -166,7 +181,7 @@ pub fn stream_directory(
 
         batch.push(entry);
         if batch.len() == DIRECTORY_BATCH_SIZE {
-            batch.sort_by(compare_entries);
+            sort_entries(&mut batch, order);
             if sender.send_blocking(DirectoryUpdate::Batch(std::mem::take(&mut batch))).is_err() {
                 return;
             }
@@ -175,7 +190,7 @@ pub fn stream_directory(
     }
 
     if !batch.is_empty() {
-        batch.sort_by(compare_entries);
+        sort_entries(&mut batch, order);
         if sender.send_blocking(DirectoryUpdate::Batch(batch)).is_err() {
             return;
         }
@@ -206,13 +221,89 @@ fn record_degraded_entry(
     examples.push(detail.chars().take(MAX_DETAIL_CHARS).collect());
 }
 
-pub fn merge_sorted_entries(left: Vec<FileEntry>, right: Vec<FileEntry>) -> Vec<FileEntry> {
+/// What a listing is ordered by. Folders come first whatever the key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortKey {
+    #[default]
+    Name,
+    Modified,
+    Size,
+    Kind,
+}
+
+impl SortKey {
+    pub const ALL: [Self; 4] = [Self::Name, Self::Modified, Self::Size, Self::Kind];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Modified => "Modified",
+            Self::Size => "Size",
+            Self::Kind => "Kind",
+        }
+    }
+
+    /// The name the state file records.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Modified => "modified",
+            Self::Size => "size",
+            Self::Kind => "kind",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|key| key.name() == name)
+    }
+
+    /// The direction a key starts in when first chosen: names read forwards,
+    /// but the point of sorting by date or size is the newest or the largest.
+    pub fn descends_first(self) -> bool {
+        matches!(self, Self::Modified | Self::Size)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SortOrder {
+    pub key: SortKey,
+    pub descending: bool,
+}
+
+impl SortOrder {
+    /// The order choosing `key` gives: its natural direction, or the reverse
+    /// when it was already the key.
+    pub fn choose(self, key: SortKey) -> Self {
+        let descending = if self.key == key { !self.descending } else { key.descends_first() };
+        Self { key, descending }
+    }
+
+    pub fn compare(self, a: &FileEntry, b: &FileEntry) -> Ordering {
+        b.navigable.cmp(&a.navigable).then_with(|| {
+            let ordering = match self.key {
+                SortKey::Name => Ordering::Equal,
+                SortKey::Modified => a.modified.cmp(&b.modified),
+                SortKey::Size => a.size.cmp(&b.size),
+                SortKey::Kind => a.folded_extension().cmp(b.folded_extension()),
+            }
+            .then_with(|| compare_names(a, b));
+            if self.descending { ordering.reverse() } else { ordering }
+        })
+    }
+}
+
+/// Merge two listings each already in `order`.
+pub fn merge_sorted_entries(
+    left: Vec<FileEntry>,
+    right: Vec<FileEntry>,
+    order: SortOrder,
+) -> Vec<FileEntry> {
     let mut left = left.into_iter().peekable();
     let mut right = right.into_iter().peekable();
     let mut merged = Vec::with_capacity(left.len() + right.len());
 
     while let (Some(a), Some(b)) = (left.peek(), right.peek()) {
-        if compare_entries(a, b).is_le() {
+        if order.compare(a, b).is_le() {
             merged.push(left.next().expect("peeked left entry"));
         } else {
             merged.push(right.next().expect("peeked right entry"));
@@ -223,15 +314,14 @@ pub fn merge_sorted_entries(left: Vec<FileEntry>, right: Vec<FileEntry>) -> Vec<
     merged
 }
 
-pub(crate) fn sort_entries(entries: &mut [FileEntry]) {
-    entries.sort_by(compare_entries);
+pub(crate) fn sort_entries(entries: &mut [FileEntry], order: SortOrder) {
+    entries.sort_by(|a, b| order.compare(a, b));
 }
 
-fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {
-    b.navigable
-        .cmp(&a.navigable)
-        .then_with(|| a.folded_name.cmp(&b.folded_name))
-        .then_with(|| a.name_os.cmp(&b.name_os))
+/// Case-insensitively by name, with the raw bytes breaking ties so two names
+/// that fold alike keep one fixed order.
+fn compare_names(a: &FileEntry, b: &FileEntry) -> Ordering {
+    a.folded_name.cmp(&b.folded_name).then_with(|| a.name_os.cmp(&b.name_os))
 }
 
 pub fn display_filename(name: &OsStr) -> String {
@@ -251,6 +341,26 @@ pub fn display_filename(name: &OsStr) -> String {
     }
     display.push('⟧');
     display
+}
+
+/// A modification time as a list column shows it: the time alone for
+/// today, day and month with the time for this year, and the date for
+/// anything older. Short, and the most telling part is always there.
+pub fn format_modified(time: SystemTime) -> String {
+    format_modified_relative_to(time, chrono::Local::now())
+}
+
+fn format_modified_relative_to(time: SystemTime, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::Datelike as _;
+
+    let time = chrono::DateTime::<chrono::Local>::from(time);
+    if time.date_naive() == now.date_naive() {
+        time.format("%H:%M").to_string()
+    } else if time.year() == now.year() {
+        time.format("%-d %b %H:%M").to_string()
+    } else {
+        time.format("%-d %b %Y").to_string()
+    }
 }
 
 pub fn format_size(size: Option<u64>) -> String {
@@ -287,6 +397,7 @@ mod tests {
             kind: if navigable { EntryKind::Directory } else { EntryKind::File },
             navigable,
             size: None,
+            modified: None,
             icon_path: None,
         }
     }
@@ -299,7 +410,7 @@ mod tests {
             entry("Alpha", true),
             entry("A.txt", false),
         ];
-        entries.sort_by(compare_entries);
+        sort_entries(&mut entries, SortOrder::default());
 
         assert_eq!(
             entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
@@ -312,12 +423,88 @@ mod tests {
         let left = vec![entry("Alpha", true), entry("b.txt", false)];
         let right = vec![entry("Beta", true), entry("a.txt", false)];
 
-        let merged = merge_sorted_entries(left, right);
+        let merged = merge_sorted_entries(left, right, SortOrder::default());
 
         assert_eq!(
             merged.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
             ["Alpha", "Beta", "a.txt", "b.txt"]
         );
+    }
+
+    fn names(entries: &[FileEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
+    #[test]
+    fn every_key_keeps_folders_first_and_breaks_ties_by_name() {
+        use std::time::Duration;
+
+        let at = |seconds: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        let mut entries = [
+            FileEntry { size: Some(30), modified: at(3), ..entry("old.txt", false) },
+            FileEntry { size: Some(10), modified: at(1), ..entry("Notes.md", false) },
+            FileEntry { size: Some(10), modified: at(2), ..entry("archive.zip", false) },
+            FileEntry { modified: at(9), ..entry("Folder", true) },
+            FileEntry { modified: at(0), ..entry("bin", true) },
+            FileEntry { modified: None, ..entry("broken", false) },
+        ];
+
+        sort_entries(&mut entries, SortOrder { key: SortKey::Modified, descending: true });
+        assert_eq!(
+            names(&entries),
+            ["Folder", "bin", "old.txt", "archive.zip", "Notes.md", "broken"]
+        );
+
+        sort_entries(&mut entries, SortOrder { key: SortKey::Size, descending: true });
+        assert_eq!(
+            names(&entries),
+            ["Folder", "bin", "old.txt", "Notes.md", "archive.zip", "broken"]
+        );
+
+        sort_entries(&mut entries, SortOrder { key: SortKey::Size, descending: false });
+        assert_eq!(
+            names(&entries),
+            ["bin", "Folder", "broken", "archive.zip", "Notes.md", "old.txt"]
+        );
+
+        sort_entries(&mut entries, SortOrder { key: SortKey::Kind, descending: false });
+        assert_eq!(
+            names(&entries),
+            ["bin", "Folder", "broken", "Notes.md", "old.txt", "archive.zip"]
+        );
+
+        sort_entries(&mut entries, SortOrder { key: SortKey::Name, descending: true });
+        assert_eq!(
+            names(&entries),
+            ["Folder", "bin", "old.txt", "Notes.md", "broken", "archive.zip"]
+        );
+    }
+
+    #[test]
+    fn choosing_a_key_starts_in_its_natural_direction_and_repeats_to_reverse() {
+        let order = SortOrder::default();
+        assert_eq!(
+            order.choose(SortKey::Modified),
+            SortOrder { key: SortKey::Modified, descending: true }
+        );
+        assert_eq!(
+            order.choose(SortKey::Modified).choose(SortKey::Modified),
+            SortOrder { key: SortKey::Modified, descending: false }
+        );
+        assert_eq!(order.choose(SortKey::Name), SortOrder { key: SortKey::Name, descending: true });
+        assert_eq!(
+            order.choose(SortKey::Kind),
+            SortOrder { key: SortKey::Kind, descending: false }
+        );
+        assert_eq!(SortKey::from_name(SortKey::Size.name()), Some(SortKey::Size));
+    }
+
+    #[test]
+    fn a_leading_dot_is_not_an_extension() {
+        assert_eq!(entry(".bashrc", false).folded_extension(), &[] as &[char]);
+        assert_eq!(entry("Photo.JPG", false).folded_extension(), &['j', 'p', 'g']);
+        assert_eq!(entry("archive.tar.gz", false).folded_extension(), &['g', 'z']);
+        assert_eq!(entry("README", false).folded_extension(), &[] as &[char]);
     }
 
     #[test]
@@ -328,11 +515,24 @@ mod tests {
     }
 
     #[test]
+    fn modification_times_shorten_with_nearness() {
+        use chrono::TimeZone as _;
+
+        let now = chrono::Local.with_ymd_and_hms(2026, 9, 17, 15, 30, 0).unwrap();
+        let at = |year, month, day, hour| {
+            SystemTime::from(chrono::Local.with_ymd_and_hms(year, month, day, hour, 5, 0).unwrap())
+        };
+        assert_eq!(format_modified_relative_to(at(2026, 9, 17, 9), now), "09:05");
+        assert_eq!(format_modified_relative_to(at(2026, 3, 2, 9), now), "2 Mar 09:05");
+        assert_eq!(format_modified_relative_to(at(2025, 12, 31, 23), now), "31 Dec 2025");
+    }
+
+    #[test]
     fn cancelled_directory_stream_publishes_nothing() {
         let cancelled = Arc::new(AtomicBool::new(true));
         let (sender, receiver) = async_channel::unbounded();
 
-        stream_directory(Path::new("."), sender, Some(&cancelled));
+        stream_directory(Path::new("."), sender, Some(&cancelled), SortOrder::default());
 
         assert!(receiver.try_recv().is_err());
     }

@@ -53,6 +53,8 @@ impl ViewMode {
 pub enum ContextMenuTarget {
     Entry,
     CurrentDirectory,
+    /// The sort picker, opened from its button in the sidebar.
+    Sort,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +109,10 @@ pub struct UiState {
     pub location: LocationEdit,
     pub rename: Option<RenameEdit>,
     pub entry_menu: Option<EntryMenu>,
+    /// Whether the sort picker was open when its button was pressed. The
+    /// popover dismisses itself on the press, before the click arrives, so
+    /// without this the button could only ever open the picker.
+    pub sort_menu_was_open: bool,
     pub directory_scroll: UniformListScrollHandle,
     pub view_mode: ViewMode,
     pub grid_layout_columns: usize,
@@ -130,6 +136,7 @@ impl UiState {
             location: LocationEdit::default(),
             rename: None,
             entry_menu: None,
+            sort_menu_was_open: false,
             directory_scroll: UniformListScrollHandle::new(),
             view_mode: ViewMode::from_state(browser_state.view),
             grid_layout_columns: 1,

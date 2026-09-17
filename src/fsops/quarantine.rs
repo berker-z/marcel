@@ -9,7 +9,10 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use super::local::PathContext as _;
@@ -34,10 +37,34 @@ pub const REPLACEMENT_UNDO_BYTE_LIMIT: u64 = 1024 * 1024 * 1024;
 
 /// The name prefix Marcel gives an object it has displaced.
 ///
-/// The process id is part of the name so a later Marcel can tell its own live
-/// quarantines from those a dead process abandoned, which is the same rule
-/// permanent deletion already uses for its own remnants.
+/// The full name is `.marcel-replaced-<boot>-<pid>-<sequence>-<original>`.
+/// The process id lets a later Marcel tell its own live quarantines from
+/// those a dead process abandoned, which is the same rule permanent deletion
+/// already uses for its own remnants. The boot id is what makes that rule
+/// safe to act on: process ids are only meaningful within one boot and one
+/// pid namespace, and a name can arrive from anywhere — a backup restored
+/// mid-operation, an `rsync` from another machine, an archive made from a
+/// folder that had one. A name from another boot is never reclaimed, and is
+/// not hidden either, so it cannot become invisible garbage.
 const REPLACEMENT_PREFIX: &[u8] = b".marcel-replaced-";
+
+/// This boot, as `/proc/sys/kernel/random/boot_id` names it: 32 hex digits.
+///
+/// Read once; the kernel does not change its mind. Without `/proc` — no
+/// Linux system Marcel targets — every boot reads as the same zero id, which
+/// scopes nothing and breaks nothing.
+pub fn boot_id() -> &'static str {
+    static BOOT_ID: OnceLock<String> = OnceLock::new();
+    BOOT_ID.get_or_init(|| {
+        fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .ok()
+            .map(|id| id.chars().filter(char::is_ascii_hexdigit).collect::<String>())
+            .filter(|id| id.len() == BOOT_ID_LENGTH)
+            .unwrap_or_else(|| "0".repeat(BOOT_ID_LENGTH))
+    })
+}
+
+const BOOT_ID_LENGTH: usize = 32;
 
 /// The name prefix Marcel gives data it could not put back.
 ///
@@ -70,12 +97,22 @@ pub fn is_recovery_remnant_name(name: &OsStr) -> bool {
 ///
 /// Permanent-delete quarantines and recovery remnants are deliberately
 /// excluded: their recovery guidance points the user straight at the path, so
-/// hiding them would make that advice impossible to follow.
+/// hiding them would make that advice impossible to follow. So is a
+/// replacement quarantine from another boot: nothing will ever sweep it, and
+/// a file nothing sweeps and nothing shows is lost disk.
 pub fn is_internal_working_name(name: &OsStr) -> bool {
     let bytes = os_bytes(name);
-    bytes.starts_with(REPLACEMENT_PREFIX)
+    quarantine_owner(name).is_some_and(|owner| owner.boot == boot_id().as_bytes())
         || bytes.starts_with(b".marcel-copy-")
         || bytes.starts_with(b".marcel-archive-")
+}
+
+/// Whether a name is a replacement quarantine some other boot left behind.
+///
+/// Its owner is certainly gone, but so is the only context in which its name
+/// meant anything, so it is left for the user rather than swept.
+pub fn is_quarantine_from_another_boot(name: &OsStr) -> bool {
+    quarantine_owner(name).is_some_and(|owner| owner.boot != boot_id().as_bytes())
 }
 
 fn os_bytes(name: &OsStr) -> &[u8] {
@@ -83,11 +120,26 @@ fn os_bytes(name: &OsStr) -> &[u8] {
     name.as_bytes()
 }
 
-/// The process that created a replacement quarantine, if the name carries one.
-fn quarantine_owner(name: &OsStr) -> Option<u32> {
+/// Who made a replacement quarantine, as its name records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuarantineOwner<'a> {
+    boot: &'a [u8],
+    process: u32,
+}
+
+/// The owner a replacement quarantine's name carries, if it has the shape
+/// Marcel writes. Names from before the boot id was added parse as nobody's,
+/// which leaves them alone.
+fn quarantine_owner(name: &OsStr) -> Option<QuarantineOwner<'_>> {
     let rest = os_bytes(name).strip_prefix(REPLACEMENT_PREFIX)?;
+    let (boot, rest) = rest.split_at_checked(BOOT_ID_LENGTH)?;
+    if !boot.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let rest = rest.strip_prefix(b"-")?;
     let end = rest.iter().position(|byte| *byte == b'-')?;
-    std::str::from_utf8(&rest[..end]).ok()?.parse().ok()
+    let process = std::str::from_utf8(&rest[..end]).ok()?.parse().ok()?;
+    Some(QuarantineOwner { boot, process })
 }
 
 /// Whether a process is still running, and so might still be able to undo.
@@ -105,6 +157,10 @@ pub fn process_is_running(process: u32) -> bool {
 /// A replaced file is one the user chose to overwrite, and once the process
 /// holding its record is gone nothing can ever restore it, so it is provably
 /// unreachable rather than possibly-wanted. Returns how many were released.
+///
+/// Only this boot's quarantines qualify. The pid in a name from another boot
+/// says nothing about any process now, and the name alone cannot prove Marcel
+/// made the file; see [`REPLACEMENT_PREFIX`].
 pub fn reclaim_abandoned_quarantines(directory: &Path) -> usize {
     let current = std::process::id();
     let Ok(entries) = fs::read_dir(directory) else {
@@ -113,8 +169,11 @@ pub fn reclaim_abandoned_quarantines(directory: &Path) -> usize {
     entries
         .flatten()
         .filter(|entry| {
-            quarantine_owner(&entry.file_name())
-                .is_some_and(|owner| owner != current && !process_is_running(owner))
+            quarantine_owner(&entry.file_name()).is_some_and(|owner| {
+                owner.boot == boot_id().as_bytes()
+                    && owner.process != current
+                    && !process_is_running(owner.process)
+            })
         })
         // No record survives to say what this was, so the identity read while
         // scanning stands in for one.
@@ -172,7 +231,7 @@ pub(super) fn quarantine_for_replacement(path: &Path) -> Result<ReplacedItem> {
     let parent = path.parent().context("Replacement target has no parent directory")?;
     let name = path.file_name().context("Replacement target has no file name")?;
     let expected = FileIdentity::read(path)?;
-    let prefix = format!(".marcel-replaced-{}-", std::process::id());
+    let prefix = format!(".marcel-replaced-{}-{}-", boot_id(), std::process::id());
 
     for _ in 0..1024 {
         let sequence = REPLACEMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);

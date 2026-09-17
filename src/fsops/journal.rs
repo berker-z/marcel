@@ -73,6 +73,13 @@ pub enum OperationRecord {
         destination: PathBuf,
         identity: FileIdentity,
     },
+    /// A permission change: the bits before and after, on one object.
+    SetMode {
+        path: PathBuf,
+        identity: FileIdentity,
+        previous: u32,
+        mode: u32,
+    },
     ArchiveCreate {
         sources: Vec<PathSnapshot>,
         destination: PathBuf,
@@ -104,6 +111,7 @@ impl OperationRecord {
                 records.first().map(TrashRecord::original_path).unwrap_or_else(|| Path::new(""))
             }
             Self::Rename { destination, .. } => destination,
+            Self::SetMode { path, .. } => path,
             Self::ArchiveCreate { destination, .. } => destination,
             Self::ArchiveExtract { output, .. } => output,
         }
@@ -131,6 +139,7 @@ impl OperationRecord {
                 removed: vec![source.clone()],
                 upserted: vec![destination.clone()],
             },
+            Self::SetMode { path, .. } => DirectoryChanges::upserted(vec![path.clone()]),
             Self::ArchiveCreate { destination, .. } => {
                 DirectoryChanges::upserted(vec![destination.clone()])
             }
