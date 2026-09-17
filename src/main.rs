@@ -17,7 +17,12 @@ fn main() {
     let explicit_launch = !arguments.is_empty();
     let start_path = launch::start_path(arguments, current_dir);
 
-    let initial_uris = launch::launch_uris(&start_path);
+    // A bus-activated start has no folder of its own: its working directory
+    // is the daemon's. Should another Marcel already be primary (it was
+    // started for a portal or FileManager1 name that one does not hold), the
+    // forwarded request is "show me Marcel", not "open the daemon's cwd".
+    let bus_activated = !explicit_launch && launch::started_by_bus_activation();
+    let initial_uris = if bus_activated { None } else { launch::launch_uris(&start_path) };
     let desktop_runtime = match smol::block_on(bus::acquire_or_forward(initial_uris)) {
         InstanceStartup::Primary(runtime) => Some(runtime),
         InstanceStartup::Forwarded => return,
@@ -33,8 +38,7 @@ fn main() {
     // stray window at that directory in front of every such launch, so wait
     // for the request instead. Anything else — a terminal, a launcher running
     // the desktop entry's Exec line directly — still gets its window here.
-    let wait_for_bus_request =
-        !explicit_launch && desktop_runtime.is_some() && launch::started_by_bus_activation();
+    let wait_for_bus_request = bus_activated && desktop_runtime.is_some();
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
