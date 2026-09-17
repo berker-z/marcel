@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
+use anyhow::{Result, anyhow, bail};
 use async_channel::{Receiver, Sender, TrySendError};
 use url::Url;
 use zbus::{self, zvariant::OwnedValue};
@@ -120,23 +121,6 @@ struct FileManagerService {
     requests: Sender<DesktopRequest>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DesktopRequestError(String);
-
-impl DesktopRequestError {
-    fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
-
-impl fmt::Display for DesktopRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for DesktopRequestError {}
-
 pub async fn acquire_or_forward(initial_uris: Option<Vec<String>>) -> InstanceStartup {
     acquire_or_forward_with_roles(initial_uris, BusRoles::from_environment()).await
 }
@@ -246,27 +230,10 @@ async fn forward_to_primary(initial_uris: Option<Vec<String>>) -> zbus::Result<(
     }
 }
 
-impl ApplicationService {
-    fn enqueue(&self, request: DesktopRequest) -> zbus::fdo::Result<()> {
-        enqueue(&self.requests, request)
-    }
-
-    async fn validate_and_enqueue(
-        &self,
-        kind: UriRequestKind,
-        uris: Vec<String>,
-    ) -> zbus::fdo::Result<()> {
-        let request = smol::unblock(move || validate_uri_request(kind, &uris))
-            .await
-            .map_err(|error| zbus::fdo::Error::InvalidArgs(error.to_string()))?;
-        self.enqueue(request)
-    }
-}
-
 #[zbus::interface(interface = "org.freedesktop.Application")]
 impl ApplicationService {
     async fn activate(&self, _platform_data: HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
-        self.enqueue(DesktopRequest::Activate)
+        enqueue(&self.requests, DesktopRequest::Activate)
     }
 
     async fn open(
@@ -274,7 +241,7 @@ impl ApplicationService {
         uris: Vec<String>,
         _platform_data: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<()> {
-        self.validate_and_enqueue(UriRequestKind::Open, uris).await
+        validate_and_enqueue(&self.requests, UriRequestKind::Open, uris).await
     }
 
     async fn activate_action(
@@ -289,29 +256,14 @@ impl ApplicationService {
     }
 }
 
-impl FileManagerService {
-    async fn validate_and_enqueue(
-        &self,
-        kind: UriRequestKind,
-        uris: Vec<String>,
-    ) -> zbus::fdo::Result<()> {
-        let request = smol::unblock(move || validate_uri_request(kind, &uris))
-            .await
-            .map_err(|error| zbus::fdo::Error::InvalidArgs(error.to_string()))?;
-        enqueue(&self.requests, request)
-    }
-}
-
 #[zbus::interface(interface = "org.freedesktop.FileManager1")]
 impl FileManagerService {
     async fn show_folders(&self, uris: Vec<String>, _startup_id: String) -> zbus::fdo::Result<()> {
-        self.validate_and_enqueue(UriRequestKind::ShowFolders, uris)
-            .await
+        validate_and_enqueue(&self.requests, UriRequestKind::ShowFolders, uris).await
     }
 
     async fn show_items(&self, uris: Vec<String>, _startup_id: String) -> zbus::fdo::Result<()> {
-        self.validate_and_enqueue(UriRequestKind::ShowItems, uris)
-            .await
+        validate_and_enqueue(&self.requests, UriRequestKind::ShowItems, uris).await
     }
 
     async fn show_item_properties(
@@ -325,6 +277,18 @@ impl FileManagerService {
     }
 }
 
+/// Validate a URI request off the bus thread, then queue it.
+async fn validate_and_enqueue(
+    sender: &Sender<DesktopRequest>,
+    kind: UriRequestKind,
+    uris: Vec<String>,
+) -> zbus::fdo::Result<()> {
+    let request = smol::unblock(move || validate_uri_request(kind, &uris))
+        .await
+        .map_err(|error| zbus::fdo::Error::InvalidArgs(error.to_string()))?;
+    enqueue(sender, request)
+}
+
 fn enqueue(sender: &Sender<DesktopRequest>, request: DesktopRequest) -> zbus::fdo::Result<()> {
     sender.try_send(request).map_err(|error| match error {
         TrySendError::Full(_) => {
@@ -336,10 +300,7 @@ fn enqueue(sender: &Sender<DesktopRequest>, request: DesktopRequest) -> zbus::fd
     })
 }
 
-pub fn validate_uri_request(
-    kind: UriRequestKind,
-    uris: &[String],
-) -> Result<DesktopRequest, DesktopRequestError> {
+pub fn validate_uri_request(kind: UriRequestKind, uris: &[String]) -> Result<DesktopRequest> {
     validate_request_bounds(uris)?;
 
     let mut paths = Vec::with_capacity(uris.len());
@@ -367,67 +328,52 @@ pub fn validate_uri_request(
     }
 }
 
-fn validate_request_bounds(uris: &[String]) -> Result<(), DesktopRequestError> {
+fn validate_request_bounds(uris: &[String]) -> Result<()> {
     if uris.is_empty() {
-        return Err(DesktopRequestError::new(
-            "the request must contain at least one URI",
-        ));
+        bail!("the request must contain at least one URI");
     }
     if uris.len() > MAX_REQUEST_URIS {
-        return Err(DesktopRequestError::new(format!(
-            "the request contains more than {MAX_REQUEST_URIS} URIs"
-        )));
+        bail!("the request contains more than {MAX_REQUEST_URIS} URIs");
     }
 
     let total_bytes = uris.iter().try_fold(0usize, |total, uri| {
-        total.checked_add(uri.len()).ok_or_else(|| {
-            DesktopRequestError::new("the request URI size exceeds the supported limit")
-        })
+        total
+            .checked_add(uri.len())
+            .ok_or_else(|| anyhow!("the request URI size exceeds the supported limit"))
     })?;
     if total_bytes > MAX_REQUEST_URI_BYTES {
-        return Err(DesktopRequestError::new(format!(
-            "the request URI size exceeds {MAX_REQUEST_URI_BYTES} bytes"
-        )));
+        bail!("the request URI size exceeds {MAX_REQUEST_URI_BYTES} bytes");
     }
 
     Ok(())
 }
 
-fn local_path_from_uri(uri: &str) -> Result<PathBuf, DesktopRequestError> {
-    let parsed =
-        Url::parse(uri).map_err(|_| DesktopRequestError::new(format!("invalid URI: {uri}")))?;
+fn local_path_from_uri(uri: &str) -> Result<PathBuf> {
+    let parsed = Url::parse(uri).map_err(|_| anyhow!("invalid URI: {uri}"))?;
     if parsed.scheme() != "file" {
-        return Err(DesktopRequestError::new(format!(
-            "unsupported URI scheme in {uri}"
-        )));
+        bail!("unsupported URI scheme in {uri}");
     }
 
     parsed
         .to_file_path()
-        .map_err(|_| DesktopRequestError::new(format!("non-local file URI: {uri}")))
+        .map_err(|_| anyhow!("non-local file URI: {uri}"))
 }
 
-fn require_existing(path: &Path) -> Result<PathBuf, DesktopRequestError> {
-    fs::metadata(path).map_err(|error| {
-        DesktopRequestError::new(format!("cannot inspect {}: {error}", path.display()))
-    })?;
+fn require_existing(path: &Path) -> Result<PathBuf> {
+    fs::metadata(path).map_err(|error| anyhow!("cannot inspect {}: {error}", path.display()))?;
     Ok(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
-fn require_directory(path: &Path) -> Result<PathBuf, DesktopRequestError> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        DesktopRequestError::new(format!("cannot inspect {}: {error}", path.display()))
-    })?;
+fn require_directory(path: &Path) -> Result<PathBuf> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| anyhow!("cannot inspect {}: {error}", path.display()))?;
     if !metadata.is_dir() {
-        return Err(DesktopRequestError::new(format!(
-            "{} is not a directory",
-            path.display()
-        )));
+        bail!("{} is not a directory", path.display());
     }
     Ok(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
-fn group_open_targets(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>, DesktopRequestError> {
+fn group_open_targets(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>> {
     let mut locations = Vec::with_capacity(paths.len());
     for path in paths {
         let path = require_existing(&path)?;
@@ -437,9 +383,10 @@ fn group_open_targets(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>, Desk
                 items: Vec::new(),
             });
         } else {
-            let directory = path.parent().map(Path::to_path_buf).ok_or_else(|| {
-                DesktopRequestError::new(format!("{} has no parent directory", path.display()))
-            })?;
+            let directory = path
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
             locations.push(RevealedLocation {
                 directory,
                 items: vec![path],
@@ -449,15 +396,16 @@ fn group_open_targets(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>, Desk
     Ok(locations)
 }
 
-fn group_revealed_items(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>, DesktopRequestError> {
+fn group_revealed_items(paths: Vec<PathBuf>) -> Result<Vec<RevealedLocation>> {
     let mut locations = Vec::<RevealedLocation>::new();
     let mut parent_indices = HashMap::<PathBuf, usize>::new();
 
     for path in paths {
         let path = require_existing(&path)?;
-        let directory = path.parent().map(Path::to_path_buf).ok_or_else(|| {
-            DesktopRequestError::new(format!("{} has no parent directory", path.display()))
-        })?;
+        let directory = path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
 
         if let Some(index) = parent_indices.get(&directory).copied() {
             locations[index].items.push(path);

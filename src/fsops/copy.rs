@@ -364,7 +364,6 @@ fn copy_buffered(
 /// Copy only the extents that hold data, so a sparse source stays sparse.
 /// Returns `false` when the file has no holes worth preserving, in which case
 /// the caller copies it plainly.
-#[cfg(target_os = "linux")]
 fn try_copy_sparse(
     input: &mut fs::File,
     output: &mut fs::File,
@@ -448,17 +447,6 @@ fn try_copy_sparse(
         cursor = hole;
     }
     finish(output)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn try_copy_sparse(
-    _input: &mut fs::File,
-    _output: &mut fs::File,
-    _source: &Path,
-    _cancelled: &AtomicBool,
-    _progress: Option<&TransferProgress>,
-) -> Result<bool> {
-    Ok(false)
 }
 
 fn preserve_metadata(source: &Path, destination: &Path, metadata: &fs::Metadata) -> Result<()> {

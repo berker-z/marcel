@@ -5,9 +5,7 @@ use std::{
 
 #[derive(Debug)]
 pub struct IconProvider {
-    #[cfg(target_os = "linux")]
     explicit_theme: Option<String>,
-    #[cfg(target_os = "linux")]
     ambient_theme: String,
     bundled_dir: Option<PathBuf>,
     cache: HashMap<Vec<String>, Option<PathBuf>>,
@@ -16,10 +14,8 @@ pub struct IconProvider {
 impl IconProvider {
     pub fn discover() -> Self {
         Self {
-            #[cfg(target_os = "linux")]
-            explicit_theme: explicit_linux_theme(),
-            #[cfg(target_os = "linux")]
-            ambient_theme: discover_ambient_linux_theme(),
+            explicit_theme: explicit_theme(),
+            ambient_theme: discover_ambient_theme(),
             bundled_dir: discover_bundled_icon_dir(),
             cache: HashMap::new(),
         }
@@ -44,25 +40,21 @@ impl IconProvider {
         }
 
         enum Layer<'a> {
-            #[cfg(target_os = "linux")]
             Theme(&'a str),
             Bundled(&'a Path),
         }
 
         let mut layers = Vec::new();
-        #[cfg(target_os = "linux")]
         if let Some(theme) = self.explicit_theme.as_deref() {
             layers.push(Layer::Theme(theme));
         }
         if let Some(directory) = self.bundled_dir.as_deref() {
             layers.push(Layer::Bundled(directory));
         }
-        #[cfg(target_os = "linux")]
         layers.push(Layer::Theme(&self.ambient_theme));
 
         let icon = resolve_layered(candidates, layers.len(), |layer, name| {
             match layers[layer] {
-                #[cfg(target_os = "linux")]
                 Layer::Theme(theme) => freedesktop_icons::lookup(name)
                     .with_theme(theme)
                     .with_size(32)
@@ -164,22 +156,19 @@ fn icon_candidates(path: &Path, directory: bool) -> Vec<String> {
     candidates
 }
 
-#[cfg(target_os = "linux")]
-fn explicit_linux_theme() -> Option<String> {
+fn explicit_theme() -> Option<String> {
     std::env::var("MARCEL_ICON_THEME")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(target_os = "linux")]
-fn discover_ambient_linux_theme() -> String {
+fn discover_ambient_theme() -> String {
     read_gtk_icon_theme()
         .or_else(freedesktop_icons::default_theme_gtk)
         .unwrap_or_else(|| "hicolor".to_string())
 }
 
-#[cfg(target_os = "linux")]
 fn read_gtk_icon_theme() -> Option<String> {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)

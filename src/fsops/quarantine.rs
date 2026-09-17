@@ -94,14 +94,8 @@ fn quarantine_owner(name: &OsStr) -> Option<u32> {
 /// A live owner's quarantine is its own business: two Marcel processes can
 /// exist when desktop integration is unavailable, and reclaiming another's
 /// would destroy data it can still restore. An unknown answer keeps the file.
-#[cfg(target_os = "linux")]
 pub fn process_is_running(process: u32) -> bool {
     Path::new(&format!("/proc/{process}")).exists()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn process_is_running(_process: u32) -> bool {
-    true
 }
 
 /// Release replacement quarantines abandoned by processes that are gone.

@@ -17,8 +17,8 @@ use std::{
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, Hsla, IntoElement, ObjectFit, Pixels, Task, TextRun,
-    UniformListScrollHandle, Window, div, font, img, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Hsla, Img, IntoElement, ObjectFit, Pixels, Stateful,
+    Task, TextRun, UniformListScrollHandle, Window, div, font, img, px, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, scroll::ScrollableElement as _, text::TextView};
 use unicode_width::UnicodeWidthChar;
@@ -692,13 +692,12 @@ impl Marcel {
             PreviewContent::Error(error) => message(format!("Preview failed\n{error}"), danger),
             PreviewContent::Ready(Preview::Metadata { summary }) => message(summary.clone(), muted),
             PreviewContent::Ready(Preview::Directory { .. }) => self.render_folder_preview(cx),
-            PreviewContent::Ready(Preview::Image { image, .. }) => img(image.clone())
-                .id(("preview-image", self.preview.ticket))
-                .size_full()
-                .object_fit(ObjectFit::Contain)
-                .with_loading(move || message("Decoding image…", muted))
-                .with_fallback(move || message("This image could not be decoded", danger))
-                .into_any_element(),
+            PreviewContent::Ready(Preview::Image { image, .. }) => decoded_image(
+                img(image.clone()).id(("preview-image", self.preview.ticket)),
+                "Decoding image…",
+                "This image could not be decoded",
+                cx,
+            ),
             PreviewContent::Ready(Preview::Pdf { pages, .. }) => {
                 let pages = *pages;
                 let scroll = self.preview.pdf_scroll.clone();
@@ -713,20 +712,12 @@ impl Marcel {
                             .map(|index| {
                                 let page = index + 1;
                                 let content = match this.preview.pdf_pages.get(&page).cloned() {
-                                    Some(PdfPageState::Ready(path)) => img(path)
-                                        .id(("pdf-page-image", page))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Contain)
-                                        .with_loading(move || {
-                                            message(format!("Loading page {page}…"), muted)
-                                        })
-                                        .with_fallback(move || {
-                                            message(
-                                                format!("Page {page} could not be decoded"),
-                                                danger,
-                                            )
-                                        })
-                                        .into_any_element(),
+                                    Some(PdfPageState::Ready(path)) => decoded_image(
+                                        img(path).id(("pdf-page-image", page)),
+                                        format!("Loading page {page}…"),
+                                        format!("Page {page} could not be decoded"),
+                                        cx,
+                                    ),
                                     Some(PdfPageState::Failed(error)) => message(
                                         format!("Page {page} failed to render\n{error}"),
                                         danger,
@@ -912,6 +903,23 @@ fn scrolled(list: impl IntoElement, scroll: &UniformListScrollHandle) -> AnyElem
         .size_full()
         .child(list)
         .vertical_scrollbar(scroll)
+        .into_any_element()
+}
+
+/// An image that fills the pane, saying so while it decodes and if it cannot.
+fn decoded_image(
+    image: Stateful<Img>,
+    loading: impl Into<String>,
+    failed: impl Into<String>,
+    cx: &App,
+) -> AnyElement {
+    let colors = cx.theme().colors;
+    let (loading, failed) = (loading.into(), failed.into());
+    image
+        .size_full()
+        .object_fit(ObjectFit::Contain)
+        .with_loading(move || message(loading.clone(), colors.muted_foreground))
+        .with_fallback(move || message(failed.clone(), colors.danger))
         .into_any_element()
 }
 

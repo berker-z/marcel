@@ -466,16 +466,9 @@ pub fn fuzzy_score(candidate: &str, query: &str) -> Option<i64> {
 }
 
 fn is_hidden_os_name(name: &OsStr) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        let bytes = name.as_bytes();
-        bytes.first() == Some(&b'.') && bytes != b"." && bytes != b".."
-    }
-    #[cfg(not(unix))]
-    {
-        name.to_str().is_some_and(is_hidden_name)
-    }
+    use std::os::unix::ffi::OsStrExt as _;
+    let bytes = name.as_bytes();
+    bytes.first() == Some(&b'.') && bytes != b"." && bytes != b".."
 }
 
 fn fuzzy_score_folded(candidate: &[char], query: &[char]) -> Option<i64> {

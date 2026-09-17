@@ -272,24 +272,15 @@ pub fn display_filename(name: &OsStr) -> String {
         return name.to_string();
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-
-        let bytes = name.as_bytes();
-        let mut display = String::with_capacity(bytes.len() * 2 + 10);
-        display.push_str("⟦bytes:");
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(display, "{byte:02x}");
-        }
-        display.push('⟧');
-        display
+    use std::{fmt::Write as _, os::unix::ffi::OsStrExt as _};
+    let bytes = name.as_bytes();
+    let mut display = String::with_capacity(bytes.len() * 2 + 10);
+    display.push_str("⟦bytes:");
+    for byte in bytes {
+        let _ = write!(display, "{byte:02x}");
     }
-    #[cfg(not(unix))]
-    {
-        name.to_string_lossy().into_owned()
-    }
+    display.push('⟧');
+    display
 }
 
 pub fn format_size(size: Option<u64>) -> String {
@@ -409,7 +400,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn invalid_utf8_names_keep_raw_identity_and_have_distinct_labels() {
         use std::{collections::HashSet, os::unix::ffi::OsStringExt as _};
