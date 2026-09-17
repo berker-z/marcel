@@ -67,9 +67,24 @@ knows about, and a documented one that no longer works is worse.
 
 Shortcuts are registered in two places, so check both before editing the list:
 
-- `commands.rs` registers the ordinary bindings through `KeyBinding::new`.
-- `app.rs`'s `on_window_key_down` handles the ones that must keep working while
-  another surface holds focus, currently `Ctrl+L` and `Ctrl+F`.
+- The `browser_commands!` table in `src/app/actions.rs` declares every command
+  once: its GPUI action, its binding if it has one, and the `BrowserCommand`
+  menus and toolbar buttons dispatch through. Enablement lives in
+  `command_enabled` and behaviour in `execute`, in the same file.
+- `on_window_key_down` in the same file handles the ones that must keep working
+  while another surface holds focus, currently `Ctrl+L` and `Ctrl+F`.
+
+## Module map
+
+`src/lib.rs` carries the map. In short: `app/` is the window (one `Marcel`
+view split by concern — navigation, edits, pointer, preview, menus, sidebar,
+chrome), `browse/` is the read side (entries, the directory session, the
+watcher, selection, history), `fsops/` is everything that changes the disk
+(`local` primitives, `identity`, `journal`, then the mutations), `preview/`
+decodes, `desktop/` speaks to the session (bus, portal, launch, icons, places),
+and `operations` is the application-wide owner of running work and history.
+Tests share `src/testing.rs` (`Sandbox` and friends) rather than building
+trees by hand.
 
 ## Quality checks
 
