@@ -18,13 +18,13 @@ use crate::desktop::launch::{LocationTarget, resolve_location};
 use super::{Marcel, navigation::unblock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Breadcrumb {
-    label: String,
+pub(super) struct Breadcrumb {
+    pub(super) label: String,
     /// `None` for the ellipsis that stands in for elided segments.
-    path: Option<PathBuf>,
+    pub(super) path: Option<PathBuf>,
 }
 
-fn breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
+pub(super) fn breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
     let mut current = PathBuf::new();
     let mut crumbs = Vec::new();
     for component in path.components() {
@@ -44,7 +44,7 @@ fn breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
 }
 
 /// Keep the root and the deepest segments, eliding the middle.
-fn compact(crumbs: Vec<Breadcrumb>, max_items: usize) -> Vec<Breadcrumb> {
+pub(super) fn compact(crumbs: Vec<Breadcrumb>, max_items: usize) -> Vec<Breadcrumb> {
     if crumbs.len() <= max_items || max_items < 3 {
         return crumbs;
     }

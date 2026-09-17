@@ -207,10 +207,12 @@ through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
 Remaining planned commands are disabled and prefixed with `–`: Create Link
 and Copy Path. Duplicate copies the selection beside itself and lets the
-transfer choose the free names. Move To… opens the folder chooser (the same
-window the portal backend shows) and moves the selection to the folder
-chosen; the transfer, its conflicts, and its undo are those of cut and paste. Properties opens for any selection,
-or for the displayed folder when nothing is selected. Rename is active for
+transfer choose the free names. Move To… asks for a folder in a small dialog
+that works like the location bar: breadcrumbs for the destination, the
+folders inside it, Places and Bookmarks as shortcuts, and a path field behind
+the crumbs; the transfer, its conflicts, and its undo are those of cut and
+paste. Properties opens for any selection, or for the displayed folder when
+nothing is selected. Rename is active for
 exactly one ordinary filesystem selection and edits the name inline in both
 views.
 Compress is active for ordinary filesystem selections. Extract appears for one

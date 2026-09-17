@@ -41,13 +41,21 @@ item(s)", which is what happened.
 
 ### Move To
 
-The item menu. It opens the folder chooser, the same window the portal
-backend shows other applications, with "Move" on the button and the current
-folder as the starting point, and moves the selection to whatever folder is
-chosen. The answer comes back on the picker's reply channel and the move
-starts through the application's operation owner, so it still happens if the
-window that asked has gone. The transfer, its conflict questions, and its
-undo are cut and paste's; a move across filesystems is refused the same way.
+The item menu. The first version opened the folder chooser, the same window
+the portal backend shows other applications. A whole window for "which
+folder" felt wrong in use, so it became a small dialog that works like the
+location bar: the destination as breadcrumbs, starting at the current folder;
+a crumb goes up, a folder listed underneath goes down, the empty end of the
+row turns into a path field that resolves like Ctrl+L, and Places and
+Bookmarks sit below as one-click chips. A back button undoes a jump that
+went somewhere unhelpful. Move sends the selection to whatever the crumbs
+show; the transfer, its conflict questions, and its undo are cut and paste's,
+and a move across filesystems is refused the same way.
+
+The folder listing is read on the foreground while the dialog opens, from at
+most 5,000 entries, using the entry's own file type rather than a stat each.
+That is a shortcut a browsing view would not take; for a dialog whose list
+is a convenience rather than the point, it keeps the code to one function.
 
 ### Extraction meets an occupied name
 
@@ -125,8 +133,8 @@ refuses to merge a folder into an existing one, as cut and paste does.
 - [x] Properties of a file, a folder (totals grow, then settle), a ZIP
   (entries and unpacked size), and a multi-selection.
 - [x] `Ctrl+I` opens the dialog without putting a character in the filter.
-- [x] Move To… moves a file into a chosen folder through the picker, and
-  Undo brings it back.
+- [x] Move To… moves a file into a folder chosen through the crumbs, the
+  folder list, a chip, and a typed path; Undo brings it back.
 - [x] Extracting over an existing file offers the conflict dialog; Replace
   publishes the archive's copy and Undo restores the original.
 - [x] `busctl --user call io.github.berker_z.Marcel /org/freedesktop/FileManager1

@@ -2,19 +2,28 @@
 //! the operation needs a name or a confirmation, then hand the work to the
 //! application's operation owner.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Window};
+use gpui::{App, Context, Entity, Window, div, px};
 use gpui_component::{
     WindowExt as _,
-    input::{InputEvent, InputState},
+    button::{Button, ButtonVariant},
+    dialog::DialogButtonProps,
+    input::{Input, InputEvent, InputState},
     notification::Notification,
 };
 
 use crate::{
     browse::entries::{FileEntry, display_filename},
-    desktop::picker::{PickerMode, PickerRequest, PickerResponse},
+    desktop::{
+        launch::{LocationTarget, resolve_location},
+        picker::{PickerMode, PickerResponse},
+    },
     fsops::{TransferMode, archive::default_zip_name, validate_entry_name},
     operations::{FileClipboard, OperationProgressKind},
     preview::PreviewState as PreviewContent,
@@ -22,7 +31,8 @@ use crate::{
 
 use super::{
     Marcel,
-    dialogs::{Confirm, NameDialog},
+    dialogs::{Confirm, NameDialog, footer},
+    location::{breadcrumbs, compact},
     navigation::unblock,
     pointer::accepted_external_drop_paths,
     state::RenameEdit,
@@ -388,60 +398,281 @@ impl Marcel {
         });
     }
 
-    /// Ask for a folder, then move the selection there.
-    ///
-    /// The folder chooser is the same window the portal backend shows, with
-    /// the transfer as its caller instead of another application. Its answer
-    /// arrives on a channel; the move then starts through the application's
-    /// operation owner, so it happens even if this window has gone by then.
+    /// Ask where to move the selection, in a small dialog rather than a
+    /// window. The destination is shown as breadcrumbs, as the location bar
+    /// shows the current folder: a crumb goes up, a folder listed below goes
+    /// down, the empty end of the row turns into a path field, and Places and
+    /// Bookmarks sit underneath as one-click shortcuts.
     pub(super) fn open_move_to_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sources = self.selected_paths();
         if sources.is_empty() {
             return;
         }
         self.ui.entry_menu = None;
-        let (reply, answer) = async_channel::bounded(1);
-        // A picker closes itself when its caller withdraws the request; this
-        // caller never does, and dropping the sender says so.
-        let (_never_withdrawn, closed) = async_channel::bounded::<()>(1);
-        let request = PickerRequest {
-            title: "Move To".to_string(),
-            mode: PickerMode::OpenDirectories,
-            multiple: false,
-            accept_label: Some("Move".to_string()),
-            start_directory: Some(self.directory.current_dir.clone()),
-            current_name: None,
-            filters: Vec::new(),
-            current_filter: None,
-            reply,
-            closed,
-        };
-        if let Err(error) = crate::window::open_picker(request, cx) {
-            window.push_notification(Notification::error(error.to_string()), cx);
-            return;
+        let current = self.directory.current_dir.clone();
+        let home = self.home_dir.clone();
+        let show_hidden = self.directory.show_hidden;
+        let state = Rc::new(RefCell::new(MoveToState {
+            destination: current.clone(),
+            back: Vec::new(),
+            folders: folders_in(&current, show_hidden),
+            editing: false,
+        }));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
+
+        let mut shortcuts: Vec<(String, PathBuf)> = Vec::new();
+        for place in &self.sidebar.places {
+            shortcuts.push((place.label.clone(), place.path.clone()));
         }
-        let origin = Self::origin(window);
-        cx.spawn(async move |_, cx| {
-            let Ok(PickerResponse::Chosen { paths, .. }) = answer.recv().await else {
-                return;
+        for bookmark in self.bookmarks.read(cx).bookmarks() {
+            shortcuts.push((bookmark.label(), bookmark.path.clone()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        shortcuts.retain(|(_, path)| seen.insert(path.clone()));
+        let shortcuts = Rc::new(shortcuts);
+
+        // Typing a path: Enter resolves it into the crumbs, leaving the field
+        // cancels. The subscription lives as long as the dialog's closure.
+        let subscription = cx.subscribe_in(&input, window, {
+            let state = state.clone();
+            let (current, home) = (current.clone(), home.clone());
+            move |_, input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let value = input.read(cx).value().to_string();
+                    match resolve_location(&value, &current, Some(&home)) {
+                        Ok(LocationTarget { directory, reveal: None }) => {
+                            state.borrow_mut().go_to(directory, show_hidden);
+                            window.refresh();
+                        }
+                        Ok(_) => window.push_notification(
+                            Notification::error("Enter a folder, not a file"),
+                            cx,
+                        ),
+                        Err(error) => window.push_notification(Notification::error(error), cx),
+                    }
+                }
+                InputEvent::Blur => {
+                    state.borrow_mut().editing = false;
+                    window.refresh();
+                }
+                InputEvent::Change | InputEvent::Focus => {}
+            }
+        });
+
+        let count = sources.len();
+        let sources = Rc::new(sources);
+        let view = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            use gpui_component::{
+                ActiveTheme as _, Disableable as _, Sizable as _, button::ButtonVariants as _,
             };
-            let Some(destination) = paths.into_iter().next() else {
-                return;
+            let _keep = &subscription;
+            let colors = cx.theme().colors;
+            let radius = cx.theme().radius;
+            let (destination, folders, editing, can_go_back) = {
+                let state = state.borrow();
+                (
+                    state.destination.clone(),
+                    state.folders.clone(),
+                    state.editing,
+                    !state.back.is_empty(),
+                )
             };
-            cx.update(|cx| {
-                crate::operations::global(cx).update(cx, |operations, cx| {
-                    operations.start_transfer(
-                        sources,
-                        destination,
-                        TransferMode::Move,
-                        None,
-                        origin,
-                        cx,
-                    );
+            let back = Button::new("move-to-back")
+                .xsmall()
+                .compact()
+                .ghost()
+                .label("←")
+                .disabled(!can_go_back)
+                .on_click({
+                    let state = state.clone();
+                    move |_, window, _| {
+                        state.borrow_mut().go_back(show_hidden);
+                        window.refresh();
+                    }
                 });
+
+            // The destination, as crumbs or as a field.
+            let location: gpui::AnyElement = if editing {
+                Input::new(&input).into_any_element()
+            } else {
+                let crumbs = compact(breadcrumbs(&destination), 6);
+                let last = crumbs.len().saturating_sub(1);
+                let mut items: Vec<gpui::AnyElement> = Vec::new();
+                for (index, crumb) in crumbs.into_iter().enumerate() {
+                    if index > 0 {
+                        items.push(
+                            div()
+                                .flex_none()
+                                .text_color(colors.muted_foreground)
+                                .child("/")
+                                .into_any_element(),
+                        );
+                    }
+                    let button = |label: String| {
+                        Button::new(("move-to-crumb", index))
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .label(label)
+                    };
+                    items.push(match crumb.path {
+                        Some(path) if index != last => {
+                            let state = state.clone();
+                            button(crumb.label)
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    state.borrow_mut().go_to(path.clone(), show_hidden);
+                                    window.refresh();
+                                })
+                                .into_any_element()
+                        }
+                        _ => div()
+                            .flex_none()
+                            .text_color(colors.foreground)
+                            .child(crumb.label)
+                            .into_any_element(),
+                    });
+                }
+                let (state, input, destination) =
+                    (state.clone(), input.clone(), destination.clone());
+                div()
+                    .id("move-to-crumbs")
+                    .w_full()
+                    .h_7()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .overflow_hidden()
+                    .rounded(radius)
+                    .bg(colors.background)
+                    .border_1()
+                    .border_color(colors.border)
+                    .cursor_text()
+                    .on_click(move |_, window, cx| {
+                        state.borrow_mut().editing = true;
+                        let value = destination.display().to_string();
+                        input.update(cx, |input, cx| {
+                            input.set_value(value, window, cx);
+                            input.focus(window, cx);
+                            let end = input.value().len();
+                            input.set_selected_range(0..end, cx);
+                        });
+                        window.refresh();
+                    })
+                    .children(items)
+                    .into_any_element()
+            };
+
+            let folder_rows = folders.iter().enumerate().map(|(index, (label, path))| {
+                let state = state.clone();
+                let path = path.clone();
+                gpui_component::h_flex()
+                    .id(("move-to-folder", index))
+                    .h(px(26.0))
+                    .px_2()
+                    .gap_2()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(colors.list_active))
+                    .child(div().text_color(colors.muted_foreground).child("▸"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(label.clone()),
+                    )
+                    .on_click(move |_, window, _| {
+                        state.borrow_mut().go_to(path.clone(), show_hidden);
+                        window.refresh();
+                    })
             });
-        })
-        .detach();
+            let folder_list = if folders.is_empty() {
+                div()
+                    .h(px(26.0))
+                    .px_2()
+                    .text_color(colors.muted_foreground)
+                    .child("No folders inside")
+                    .into_any_element()
+            } else {
+                div()
+                    .id("move-to-folders")
+                    .max_h(px(220.0))
+                    .overflow_y_scroll()
+                    .children(folder_rows)
+                    .into_any_element()
+            };
+
+            let chips = shortcuts.iter().enumerate().map(|(index, (label, path))| {
+                let state = state.clone();
+                let path = path.clone();
+                Button::new(("move-to-shortcut", index))
+                    .xsmall()
+                    .compact()
+                    .outline()
+                    .label(label.clone())
+                    .on_click(move |_, window, _| {
+                        state.borrow_mut().go_to(path.clone(), show_hidden);
+                        window.refresh();
+                    })
+            });
+
+            let (view, sources, state) = (view.clone(), sources.clone(), state.clone());
+            let _ = window;
+            dialog
+                .title("Move To")
+                .w(px(500.0))
+                .child(
+                    gpui_component::v_flex()
+                        .gap_3()
+                        .text_sm()
+                        .child(
+                            div()
+                                .text_color(colors.muted_foreground)
+                                .child(format!("Move {count} item(s) to")),
+                        )
+                        .child(
+                            gpui_component::h_flex()
+                                .gap_1()
+                                .child(back)
+                                .child(div().flex_1().min_w_0().child(location)),
+                        )
+                        .child(folder_list)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .children(chips),
+                        ),
+                )
+                .button_props(DialogButtonProps::default().ok_text("Move").show_cancel(true))
+                .footer(footer("Move", ButtonVariant::Primary, true))
+                .overlay_closable(false)
+                .close_button(false)
+                .on_ok(move |_, window, cx| {
+                    let destination = state.borrow().destination.clone();
+                    view.update(cx, |this, cx| {
+                        this.start_transfer(
+                            sources.as_ref().clone(),
+                            destination,
+                            TransferMode::Move,
+                            None,
+                            window,
+                            cx,
+                        );
+                    });
+                    true
+                })
+        });
+        cx.notify();
     }
 
     pub(super) fn open_compress_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -588,6 +819,65 @@ impl Marcel {
     }
 }
 
+/// What the Move To dialog is pointing at.
+struct MoveToState {
+    destination: PathBuf,
+    /// Where the dialog pointed before each jump, newest last, so a crumb
+    /// or chip that went somewhere unhelpful can be taken back.
+    back: Vec<PathBuf>,
+    /// The folders inside `destination`, by display name.
+    folders: Vec<(String, PathBuf)>,
+    /// The crumbs have become a text field.
+    editing: bool,
+}
+
+impl MoveToState {
+    fn go_to(&mut self, destination: PathBuf, show_hidden: bool) {
+        if destination == self.destination {
+            self.editing = false;
+            return;
+        }
+        let previous = std::mem::replace(&mut self.destination, destination);
+        self.back.push(previous);
+        self.folders = folders_in(&self.destination, show_hidden);
+        self.editing = false;
+    }
+
+    fn go_back(&mut self, show_hidden: bool) {
+        if let Some(previous) = self.back.pop() {
+            self.destination = previous;
+            self.folders = folders_in(&self.destination, show_hidden);
+            self.editing = false;
+        }
+    }
+}
+
+/// How many entries the Move To dialog reads before it stops listing
+/// subfolders. The dialog is for choosing a folder, not browsing one, and
+/// the read happens on the foreground while it opens.
+const MOVE_TO_SCAN_LIMIT: usize = 5_000;
+
+/// The subfolders of `directory`, sorted by name, from at most
+/// [`MOVE_TO_SCAN_LIMIT`] entries. `file_type` comes free with the entry on
+/// Linux; only a symbolic link costs a `stat` to see what it points at.
+fn folders_in(directory: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut folders = entries
+        .flatten()
+        .take(MOVE_TO_SCAN_LIMIT)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()))
+        })
+        .map(|entry| (display_filename(&entry.file_name()), entry.path()))
+        .filter(|(name, _)| show_hidden || !name.starts_with('.'))
+        .collect::<Vec<_>>();
+    folders.sort_by_key(|(name, _)| name.to_lowercase());
+    folders
+}
 #[cfg(test)]
 mod tests {
     use super::*;
