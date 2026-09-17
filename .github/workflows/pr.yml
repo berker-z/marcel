@@ -1,0 +1,65 @@
+name: pr
+
+# What a pull request gets before anyone reads it: the checks that need no
+# compiler, plus formatting and Clippy. Clippy compiles GPUI, which is why
+# `ci.yml` keeps the gate off ordinary pushes; a pull request is rare enough
+# here that the minutes are worth spending, and the rust-cache keeps repeat
+# runs short. Tests stay with the tag-time gate, where a session bus and the
+# packaged build are set up for them.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: versions and desktop metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Check the version and the Zed revision are the same everywhere
+        run: ./scripts/check_version.sh
+
+      - name: Validate AppStream metadata
+        run: |
+          nix run nixpkgs#appstream -- validate --no-net --explain \
+            nix/io.github.berker_z.Marcel.metainfo.xml
+
+  lint:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: devshell-${{ hashFiles('flake.lock', 'flake.nix') }}
+
+      - name: fmt and clippy
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            cargo fmt --check
+            cargo clippy --all-targets --all-features -- -D warnings
+          '

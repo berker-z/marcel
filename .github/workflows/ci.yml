@@ -84,7 +84,7 @@ jobs:
           nix run nixpkgs#appstream -- validate --no-net --explain \
             nix/io.github.berker_z.Marcel.metainfo.xml
 
-      - name: Check the version is the same everywhere
+      - name: Check the version and the Zed revision are the same everywhere
         run: ./scripts/check_version.sh
 
   # The packaged build is the artifact people actually install, and the most

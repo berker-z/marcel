@@ -6,6 +6,15 @@ description = "A fast, preview-first graphical file explorer"
 license = "MIT"
 publish = false
 
+# GPUI is unreleased and moves daily, so the Zed revision Marcel builds
+# against is a fact worth writing down. It cannot go on the dependency lines:
+# gpui-component names the same repository without a revision, and cargo
+# refuses a `[patch]` that points a git source back at itself, so a `rev` here
+# would split the graph into two GPUIs. `Cargo.lock` is the pin, and
+# `scripts/check_version.sh` fails when the lock stops agreeing with this.
+[package.metadata.marcel]
+zed-rev = "5e1fd392f67e27fa1da91bad43eef7db1a5dec23"
+
 # The installed command is `marcel-rs`, not `marcel`.
 #
 # nixpkgs already has a `marcel`: an unrelated Python shell that installs

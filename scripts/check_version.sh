@@ -4,6 +4,9 @@
 # agreement. A release built from a tree where they disagree is a release whose
 # artifacts describe themselves differently depending on which one you read, so
 # check them together rather than remembering to update each one by hand.
+# The Zed revision GPUI is built from is checked the same way; Cargo.lock is
+# the only place it can be pinned, so the lock is held to the value Cargo.toml
+# records.
 #
 # Run with a tag name to also check that the tag matches:
 #
@@ -60,6 +63,38 @@ if [ -f CHANGELOG.md ]; then
 		's/^## \[?([0-9]+\.[0-9]+\.[0-9]+)\]?.*/\1/p'
 fi
 
+
+# GPUI comes from the Zed repository at whatever revision the lock records,
+# because the dependency lines cannot carry one (see Cargo.toml). A `cargo
+# update` that follows Zed's master changes the UI framework underneath the
+# release without touching a single line of Marcel, so the lock has to agree
+# with the revision written down in Cargo.toml, and with itself.
+echo
+zed_rev="$(sed -nE 's/^zed-rev = "([0-9a-f]{40})"$/\1/p' Cargo.toml | head -n 1)"
+if [ -z "$zed_rev" ]; then
+	report "Cargo.toml zed-rev" "NOT FOUND"
+	fail=1
+else
+	locked="$(sed -nE 's|^source = "git\+https://github.com/zed-industries/zed[^#]*#([0-9a-f]{40})"$|\1|p' Cargo.lock | sort -u)"
+	case "$(printf '%s\n' "$locked" | grep -c .)" in
+	0)
+		report "Cargo.lock Zed revision" "NOT FOUND"
+		fail=1
+		;;
+	1)
+		if [ "$locked" = "$zed_rev" ]; then
+			report "Cargo.lock Zed revision" "$locked"
+		else
+			report "Cargo.lock Zed revision" "$locked  <- differs from Cargo.toml's $zed_rev"
+			fail=1
+		fi
+		;;
+	*)
+		report "Cargo.lock Zed revision" "$(printf '%s' "$locked" | tr '\n' ' ') <- more than one"
+		fail=1
+		;;
+	esac
+fi
 tag="${1-}"
 if [ -n "$tag" ]; then
 	if [ "$tag" != "v$canonical" ]; then
