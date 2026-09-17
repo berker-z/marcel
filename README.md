@@ -12,8 +12,6 @@ Alpha. I use Marcel as my daily file manager, and it has been through two rounds
 
 Copy, move, rename, Trash, restore, archive creation, and extraction can all be undone. Marcel checks that files are still what and where it thinks they are before touching them, and refuses rather than guessing. Permanent deletion is the exception.
 
-Back up anything you would be upset to lose.
-
 Linux only. Wayland is the tested target. X11 mostly works, but dragging files out of Marcel into other applications is not implemented there.
 
 ![Marcel in grid view, with a folder of two files on the left and a PDF open in the preview pane on the right, showing the cover and first page of text](docs/screenshots/marcel.png)
