@@ -186,7 +186,7 @@ impl Default for TransferBudget {
 const MAX_CONFLICT_RETRIES: usize = 64;
 
 /// What conflict resolution decided to do with one source.
-enum SourcePlan {
+pub(super) enum SourcePlan {
     /// Transfer it to this destination, which is free.
     Transfer(PathBuf),
     /// Transfer it to this destination after displacing what is there.
@@ -204,7 +204,7 @@ enum SourcePlan {
 
 /// Resolve a destination for one source, asking the policy while the chosen
 /// name stays occupied.
-fn plan_source(
+pub(super) fn plan_source(
     source: &Path,
     destination_dir: &Path,
     initial_target: PathBuf,

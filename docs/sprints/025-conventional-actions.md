@@ -1,4 +1,4 @@
-# Sprint 25: Properties, New File, Duplicate
+# Sprint 25: Properties, New File, Duplicate, Move To
 
 **Status:** Implemented. The quality gate is green (278 tests, the private-bus
 integration test run unsandboxed as before). Every path below was driven by
@@ -8,10 +8,11 @@ Undo of both; and `ShowItemProperties` over `busctl`.
 
 ## Goal
 
-Three commands the context menus had shown greyed with a `–` since Sprint 9.
-Each was cheap once Sprint 24 had put commands in a table and mutations behind
-one shape, and Properties was the one most missed now that there is no other
-file manager to fall back to.
+Four commands the context menus had shown greyed with a `–` since Sprint 9,
+and one inconsistency: extraction refused an occupied destination while every
+other way of putting something somewhere asked. Each was cheap once Sprint 24
+had put commands in a table and mutations behind one shape, and Properties was
+the one most missed now that there is no other file manager to fall back to.
 
 ## What was built
 
@@ -37,6 +38,30 @@ onto itself": pick the next free name, no question asked. So Duplicate is
 the transfer with no new code on the filesystem side, and it inherits the
 progress card, cancellation, and undo of a copy. The report says "Copied 1
 item(s)", which is what happened.
+
+### Move To
+
+The item menu. It opens the folder chooser, the same window the portal
+backend shows other applications, with "Move" on the button and the current
+folder as the starting point, and moves the selection to whatever folder is
+chosen. The answer comes back on the picker's reply channel and the move
+starts through the application's operation owner, so it still happens if the
+window that asked has gone. The transfer, its conflict questions, and its
+undo are cut and paste's; a move across filesystems is refused the same way.
+
+### Extraction meets an occupied name
+
+`publish_extracted` in `fsops/archive.rs` now plans the publish through the
+transfer's `plan_source`, so the occupied case gets the copy conflict dialog:
+skip, a typed name, a free name, replace, or merge when both are folders.
+Replace moves the occupant aside with the same quarantine a transfer uses and
+puts it back if the rename fails; merge copies the staged tree into the
+existing folder through `merge_directories`, keeping what is already there.
+The `ArchiveExtract` record carries `replaced` and `merged` like a `Copy`
+record, and undo runs through the same branch, so undoing a replacing
+extraction removes the output and restores the occupant. That undo is not
+redoable, as with a copy. A redo of a plain extraction asks nobody and
+refuses an occupied name.
 
 ### Properties
 
@@ -84,8 +109,9 @@ relying on all along.
 ## Not built
 
 Permissions are shown, not edited. An editable rwx grid is one journalled
-`chmod` away and is the obvious next slice of this dialog. Move To is still
-greyed out.
+`chmod` away and is the obvious next slice of this dialog; it is on the TODO
+list. Merging while moving is still the deliberate gap it was, so Move To
+refuses to merge a folder into an existing one, as cut and paste does.
 
 ## Acceptance checks
 
@@ -99,6 +125,10 @@ greyed out.
 - [x] Properties of a file, a folder (totals grow, then settle), a ZIP
   (entries and unpacked size), and a multi-selection.
 - [x] `Ctrl+I` opens the dialog without putting a character in the filter.
+- [x] Move To… moves a file into a chosen folder through the picker, and
+  Undo brings it back.
+- [x] Extracting over an existing file offers the conflict dialog; Replace
+  publishes the archive's copy and Undo restores the original.
 - [x] `busctl --user call io.github.berker_z.Marcel /org/freedesktop/FileManager1
   org.freedesktop.FileManager1 ShowItemProperties ass 2 file:///… file:///… ""`
   opens the summary on the current window.

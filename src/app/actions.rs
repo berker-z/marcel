@@ -89,6 +89,7 @@ browser_commands! {
     NewFolder = "ctrl-shift-n",
     NewFile,
     DuplicateSelection = "ctrl-d",
+    MoveToSelection,
     OpenTerminal,
     RenameSelection = "f2",
     CompressSelection,
@@ -200,7 +201,9 @@ impl Marcel {
                     && operations.clipboard().is_some_and(|clipboard| !clipboard.paths.is_empty())
             }
             NewFolder | NewFile => self.can_mutate_here(cx),
-            DuplicateSelection => self.can_mutate_here(cx) && self.has_selection(),
+            DuplicateSelection | MoveToSelection => {
+                self.can_mutate_here(cx) && self.has_selection()
+            }
             // With nothing selected, Properties describes the folder shown —
             // except the Trash, which is a listing rather than a place.
             ShowProperties => self.has_selection() || !trash,
@@ -309,6 +312,7 @@ impl Marcel {
             NewFolder => self.open_new_folder_dialog(window, cx),
             NewFile => self.open_new_file_dialog(window, cx),
             DuplicateSelection => self.start_duplicate_selection(window, cx),
+            MoveToSelection => self.open_move_to_dialog(window, cx),
             ShowProperties => self.open_selection_properties(window, cx),
             OpenTerminal => self.open_terminal(window, cx),
             OpenInNewWindow => self.open_selection_in_new_window(cx),

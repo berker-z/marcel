@@ -1554,7 +1554,9 @@ fn archive_create_and_extract_support_identity_validated_undo_redo() {
     assert!(archive.is_file());
 
     fs::remove_file(&source).unwrap();
-    let extracted = recorded(extract_archive_operation(&archive, no_cancel()).unwrap());
+    let extracted = recorded(
+        extract_archive_operation(&archive, no_cancel(), &mut ConflictPolicy::refusing()).unwrap(),
+    );
     assert_eq!(read(&source), b"archive history");
     let undone = recorded(undo_operation(&extracted).unwrap());
     assert!(!source.exists());
@@ -1568,4 +1570,36 @@ fn archive_create_and_extract_support_identity_validated_undo_redo() {
     // Keep the compiler and test honest that the recreated record remains
     // a normal archive operation rather than a special test-only path.
     assert!(matches!(recreated, OperationRecord::ArchiveCreate { .. }));
+}
+
+/// Replacing while extracting holds the occupant aside the way a copy does,
+/// so undo removes the extracted item and brings the occupant back.
+#[test]
+fn extraction_that_replaces_is_undone_by_restoring_the_occupant() {
+    if super::archive::SevenZipBackend::discover().is_err() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let source = sandbox.file("report.txt", b"from the archive");
+    let archive = sandbox.path("report.zip");
+    create_zip_operation(std::slice::from_ref(&source), &archive, no_cancel()).unwrap();
+    fs::write(&source, b"edited since").unwrap();
+
+    let extracted = recorded(
+        extract_archive_operation(
+            &archive,
+            no_cancel(),
+            &mut answering(ConflictDecision::once(ConflictResponse::Replace)),
+        )
+        .unwrap(),
+    );
+    assert_eq!(read(&source), b"from the archive");
+    assert_eq!(extracted.replaced_items().len(), 1);
+
+    // Undoing a replacement is not redoable, as with a copy: redoing would
+    // displace the restored item again, a decision the user has not made.
+    let undone = undo_operation(&extracted).unwrap();
+    assert_eq!(read(&source), b"edited since");
+    assert!(no_replacement_quarantines(sandbox.root()));
+    assert!(!undone.is_undoable());
 }

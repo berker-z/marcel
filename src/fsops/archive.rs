@@ -22,7 +22,16 @@ use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
 use rustix::process::{Pid, Signal, kill_process_group};
 
-use super::local::{ensure_unoccupied, inspect, rename_no_replace};
+use super::{
+    conflict::ConflictPolicy,
+    copy::{MergeStop, merge_directories},
+    journal::{PathSnapshot, UNDO_SNAPSHOT_LIMIT},
+    local::{ensure_unoccupied, inspect, rename_no_replace},
+    quarantine::{
+        ReplacedItem, preserve_unrestored, quarantine_for_replacement, restore_replaced_items,
+    },
+    transfer::{SourcePlan, TransferMode, plan_source},
+};
 
 pub const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 pub const MAX_EXPANDED_BYTES: u64 = 100 * 1024 * 1024 * 1024;
@@ -49,9 +58,29 @@ pub struct ArchiveEntry {
     pub is_dir: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ArchiveOutcome {
     pub published: PathBuf,
+    /// What publishing displaced, held aside so undo can put it back.
+    pub replaced: Vec<ReplacedItem>,
+    /// Present when the output was folded into a folder already at
+    /// `published` rather than published as a new tree.
+    pub merged: Option<MergeAdded>,
+}
+
+impl ArchiveOutcome {
+    fn fresh(published: PathBuf) -> Self {
+        Self { published, replaced: Vec::new(), merged: None }
+    }
+}
+
+/// What a merge added to the folder it joined, for undo to take back.
+#[derive(Debug)]
+pub struct MergeAdded {
+    pub(super) added: Vec<PathSnapshot>,
+    /// `false` when the additions stand but could not be described, so undo
+    /// is not offered for them.
+    pub(super) undoable: bool,
 }
 
 pub trait ArchiveBackend {
@@ -248,8 +277,12 @@ fn shared_parent(sources: &[PathBuf]) -> Result<&Path> {
     Ok(parent)
 }
 
-pub fn extract_archive(archive: &Path, cancelled: Arc<AtomicBool>) -> Result<ArchiveOutcome> {
-    extract_archive_with(&SevenZipBackend::discover()?, archive, cancelled)
+pub fn extract_archive(
+    archive: &Path,
+    cancelled: Arc<AtomicBool>,
+    policy: &mut ConflictPolicy,
+) -> Result<ArchiveOutcome> {
+    extract_archive_with(&SevenZipBackend::discover()?, archive, cancelled, policy)
 }
 
 pub fn create_zip_archive(
@@ -264,6 +297,7 @@ fn extract_archive_with<B: ArchiveBackend>(
     backend: &B,
     archive: &Path,
     cancelled: Arc<AtomicBool>,
+    policy: &mut ConflictPolicy,
 ) -> Result<ArchiveOutcome> {
     let parent = archive.parent().context("Archive has no containing directory")?;
     let extract_to_staging = |archive: &Path| -> Result<(tempfile::TempDir, Vec<StagedEntry>)> {
@@ -291,36 +325,105 @@ fn extract_archive_with<B: ArchiveBackend>(
             entry.map(|entry| entry.path()).context("Could not read archive staging entry")
         })
         .collect::<Result<Vec<_>>>()?;
-    let published = match top_level.as_slice() {
+    // One item is published as itself; several are published together under
+    // the archive's name, which means publishing the staging directory.
+    let (source, whole_staging, destination) = match top_level.as_slice() {
         [] => bail!("Archive contains no extractable entries"),
         [source] => {
-            let destination =
-                parent.join(source.file_name().context("Extracted item has no filename")?);
-            ensure_unoccupied(&destination)?;
-            rename_no_replace(source, &destination)
-                .at("Could not publish extracted item", &destination)?;
-            destination
+            let name = source.file_name().context("Extracted item has no filename")?;
+            (source.clone(), false, parent.join(name))
         }
-        _ => {
-            let destination = parent.join(archive_stem(archive));
-            ensure_unoccupied(&destination)?;
-            let source = staging.keep();
-            if let Err(error) = rename_no_replace(&source, &destination) {
-                let message = format!(
-                    "Could not publish extracted directory “{}”: {error}",
-                    destination.display()
-                );
-                return Err(match fs::remove_dir_all(&source) {
-                    Ok(()) => anyhow::anyhow!(message),
-                    Err(cleanup) => {
-                        anyhow::anyhow!("{message}; staging cleanup also failed: {cleanup}")
-                    }
-                });
-            }
-            destination
-        }
+        _ => (staging.path().to_path_buf(), true, parent.join(archive_stem(archive))),
     };
-    Ok(ArchiveOutcome { published })
+    publish_extracted(staging, source, whole_staging, parent, destination, &cancelled, policy)
+}
+
+/// Move the extracted output out of staging to where the user will find it.
+///
+/// An occupied destination is answered the way a copy's is: the same
+/// question, the same skip, rename, replace, and merge. A replacement holds
+/// the displaced item aside for undo and puts it back if publishing fails; a
+/// merge copies into the existing folder and keeps what is already there.
+fn publish_extracted(
+    staging: tempfile::TempDir,
+    source: PathBuf,
+    whole_staging: bool,
+    parent: &Path,
+    destination: PathBuf,
+    cancelled: &AtomicBool,
+    policy: &mut ConflictPolicy,
+) -> Result<ArchiveOutcome> {
+    let plan = plan_source(&source, parent, destination, TransferMode::Copy, policy);
+    let (target, displaced) = match plan {
+        SourcePlan::Transfer(target) => (target, None),
+        SourcePlan::Replace(target) => {
+            let item = quarantine_for_replacement(&target)?;
+            (target, Some(item))
+        }
+        SourcePlan::Merge(target) => {
+            // Staging is dropped afterwards whether or not the merge finished,
+            // since what it still holds is what the merge chose to leave.
+            let outcome = merge_directories(&source, &target, cancelled, None, UNDO_SNAPSHOT_LIMIT);
+            match outcome.stopped {
+                None => {}
+                Some(MergeStop::Cancelled) => bail!(
+                    "Extraction cancelled; “{}” kept what had been merged into it so far",
+                    target.display()
+                ),
+                Some(MergeStop::Failed(error)) => {
+                    return Err(error.context(format!(
+                        "Could not merge the archive into “{}”",
+                        target.display()
+                    )));
+                }
+            }
+            return Ok(ArchiveOutcome {
+                published: target,
+                replaced: Vec::new(),
+                merged: Some(MergeAdded { added: outcome.created, undoable: outcome.undoable }),
+            });
+        }
+        SourcePlan::Skip | SourcePlan::Cancel => bail!("Extraction cancelled; nothing was written"),
+        SourcePlan::AlreadyInPlace => bail!("Extracted output cannot already be in place"),
+        SourcePlan::Failed(message) => bail!("{message}"),
+    };
+
+    // Commit: one rename. Publishing the whole staging directory means keeping
+    // it first, so a failed rename has to clean it up by hand.
+    let published = if whole_staging {
+        let kept = staging.keep();
+        rename_no_replace(&kept, &target).map_err(|error| {
+            let message =
+                format!("Could not publish extracted directory “{}”: {error}", target.display());
+            match fs::remove_dir_all(&kept) {
+                Ok(()) => anyhow::anyhow!(message),
+                Err(cleanup) => {
+                    anyhow::anyhow!("{message}; staging cleanup also failed: {cleanup}")
+                }
+            }
+        })
+    } else {
+        rename_no_replace(&source, &target).at("Could not publish extracted item", &target)
+    };
+    match published {
+        Ok(()) => Ok(ArchiveOutcome {
+            published: target,
+            replaced: displaced.into_iter().collect(),
+            merged: None,
+        }),
+        Err(error) => {
+            // Put back what was displaced rather than leaving the destination
+            // empty; if even that fails the quarantine is the user's only
+            // copy, so it moves to recovery storage before this is reported.
+            let mut message = error.to_string();
+            if let Some(item) = displaced
+                && let Err(unrestored) = restore_replaced_items(std::slice::from_ref(&item))
+            {
+                message.push_str(&format!("; {}", preserve_unrestored(unrestored)));
+            }
+            bail!(message)
+        }
+    }
 }
 
 fn create_zip_archive_with<B: ArchiveBackend>(
@@ -349,7 +452,7 @@ fn create_zip_archive_with<B: ArchiveBackend>(
     validate_preflight(&backend.list(&staged_archive, cancelled)?)?;
     ensure_unoccupied(destination)?;
     rename_no_replace(&staged_archive, destination).at("Could not publish ZIP", destination)?;
-    Ok(ArchiveOutcome { published: destination.to_path_buf() })
+    Ok(ArchiveOutcome::fresh(destination.to_path_buf()))
 }
 
 fn archive_staging(parent: &Path) -> Result<tempfile::TempDir> {
@@ -728,7 +831,13 @@ fn validate_archive_path(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Sandbox, no_cancel, read};
+    use crate::{
+        fsops::{
+            conflict::{ConflictDecision, ConflictRequest, ConflictResolver, ConflictResponse},
+            quarantine::{erase_replacement_quarantine, is_replacement_quarantine_name},
+        },
+        testing::{Sandbox, no_cancel, read},
+    };
 
     /// What the fake backend leaves in the staging directory.
     #[derive(Clone, Copy)]
@@ -781,7 +890,7 @@ mod tests {
     }
 
     fn extract(fake: Fake, archive: &Path) -> Result<ArchiveOutcome> {
-        extract_archive_with(&fake, archive, no_cancel())
+        extract_archive_with(&fake, archive, no_cancel(), &mut ConflictPolicy::refusing())
     }
 
     /// The real 7-Zip, when the environment has one.
@@ -931,6 +1040,93 @@ Folder = -
         assert_eq!(read(occupied), b"occupied");
     }
 
+    /// A policy that answers every conflict the same way.
+    fn answering(response: ConflictResponse) -> ConflictPolicy {
+        struct Always(ConflictResponse);
+        impl ConflictResolver for Always {
+            fn resolve(&self, _: &ConflictRequest) -> ConflictDecision {
+                ConflictDecision::once(self.0.clone())
+            }
+        }
+        ConflictPolicy::interactive(Arc::new(Always(response)))
+    }
+
+    /// An occupied destination is a question, answered the way a copy's is:
+    /// keep both under a free name, give up, or hold the occupant aside so
+    /// undo can bring it back. Whatever the answer, staging leaves no trace.
+    #[test]
+    fn extraction_answers_an_occupied_destination_like_a_copy() {
+        let sandbox = Sandbox::new();
+        let archive = sandbox.file("bundle.zip", b"archive");
+        let occupied = sandbox.file("file.txt", b"occupied");
+
+        let outcome = extract_archive_with(
+            &Fake::One,
+            &archive,
+            no_cancel(),
+            &mut answering(ConflictResponse::AutoRename),
+        )
+        .unwrap();
+        assert_eq!(outcome.published, sandbox.path("file (2).txt"));
+        assert_eq!(read(&outcome.published), b"test");
+        assert_eq!(read(&occupied), b"occupied");
+        assert!(outcome.replaced.is_empty());
+        fs::remove_file(&outcome.published).unwrap();
+
+        let error = extract_archive_with(
+            &Fake::One,
+            &archive,
+            no_cancel(),
+            &mut answering(ConflictResponse::Skip),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("nothing was written"), "{error}");
+        assert_eq!(sandbox.names(""), ["bundle.zip", "file.txt"]);
+
+        let outcome = extract_archive_with(
+            &Fake::One,
+            &archive,
+            no_cancel(),
+            &mut answering(ConflictResponse::Replace),
+        )
+        .unwrap();
+        assert_eq!(outcome.published, occupied);
+        assert_eq!(read(&occupied), b"test");
+        let [displaced] = outcome.replaced.as_slice() else {
+            panic!("the occupant should be held aside");
+        };
+        assert_eq!(read(displaced.quarantine()), b"occupied");
+        assert!(is_replacement_quarantine_name(displaced.quarantine().file_name().unwrap()));
+        erase_replacement_quarantine(displaced);
+        assert_eq!(sandbox.names(""), ["bundle.zip", "file.txt"]);
+    }
+
+    /// Two folders meeting is a merge: the folder that was there keeps
+    /// everything it had and gains what the archive adds.
+    #[test]
+    fn extraction_merges_into_an_existing_folder_when_asked() {
+        let sandbox = Sandbox::new();
+        let archive = sandbox.file("bundle.zip", b"archive");
+        sandbox.file("bundle/existing.txt", b"keep");
+        sandbox.file("bundle/one.txt", b"mine");
+
+        let outcome = extract_archive_with(
+            &Fake::Multiple,
+            &archive,
+            no_cancel(),
+            &mut answering(ConflictResponse::Replace),
+        )
+        .unwrap();
+        assert_eq!(outcome.published, sandbox.path("bundle"));
+        assert_eq!(read(sandbox.path("bundle/existing.txt")), b"keep");
+        assert_eq!(read(sandbox.path("bundle/one.txt")), b"mine", "a merge keeps what is there");
+        assert_eq!(read(sandbox.path("bundle/two.txt")), b"two");
+        let merged = outcome.merged.expect("a merge records what it added");
+        assert!(merged.undoable);
+        assert_eq!(merged.added.len(), 1);
+        assert_eq!(sandbox.names(""), ["bundle", "bundle.zip"], "staging must be cleaned up");
+    }
+
     #[test]
     fn unsafe_extractions_are_rejected_and_staging_is_cleaned() {
         let sandbox = Sandbox::new();
@@ -1008,7 +1204,9 @@ Folder = -
         create_zip_archive_with(&backend, std::slice::from_ref(&source), &archive, no_cancel())
             .unwrap();
         fs::remove_file(&source).unwrap();
-        let outcome = extract_archive_with(&backend, &archive, no_cancel()).unwrap();
+        let outcome =
+            extract_archive_with(&backend, &archive, no_cancel(), &mut ConflictPolicy::refusing())
+                .unwrap();
 
         assert_eq!(outcome.published, source);
         assert_eq!(read(outcome.published), b"round trip");
@@ -1032,8 +1230,13 @@ Folder = -
             ("bundle.tar.gz", &payload, b"compound tar".as_slice()),
             ("native.7z", &native, b"native 7z"),
         ] {
-            let outcome =
-                extract_archive_with(&backend, &sandbox.path(archive), no_cancel()).unwrap();
+            let outcome = extract_archive_with(
+                &backend,
+                &sandbox.path(archive),
+                no_cancel(),
+                &mut ConflictPolicy::refusing(),
+            )
+            .unwrap();
             assert_eq!(&outcome.published, member);
             assert_eq!(read(outcome.published), contents);
         }

@@ -183,17 +183,19 @@ manual acceptance phase are intentionally parked, not current commitments.
 4. Complete the distribution-hardening checklist below and test the flake
    install on a clean minimal NixOS environment.
 5. Cut `v0.1.0` and prepare the nixpkgs package.
-6. Add Move To. New File, Duplicate, and Properties landed in
+6. Make the permissions in the Properties dialog editable: an rwx grid
+   and a journalled `chmod`, so it is undoable like every other mutation.
+   New File, Duplicate, Move To, and read-only Properties landed in
    [Sprint 25](sprints/025-conventional-actions.md).
-9. Finish X11 source support and manual acceptance for the implemented
+7. Finish X11 source support and manual acceptance for the implemented
    bilateral native desktop drag-and-drop, then add desktop clipboard
    interoperability.
-10. Add cross-filesystem transfers, explicit conflict decisions, and the
+8. Add cross-filesystem transfers, explicit conflict decisions, and the
    documented symbolic-link policy.
-11. Add removable volumes, mounts, and common remote locations.
-12. Consolidate broader settings, sorting, grouping, zoom,
+9. Add removable volumes, mounts, and common remote locations.
+10. Consolidate broader settings, sorting, grouping, zoom,
    and other UI refinements.
-13. Add media playback and optional ebook previews after the file-manager and
+11. Add media playback and optional ebook previews after the file-manager and
    desktop-integration foundation is complete.
 
 Interrupted permanent-delete quarantine recovery, large-directory benchmarks,
@@ -339,8 +341,10 @@ The packaging contract, current dependency caveats, target formats, and
   in-progress rename across them. A churning directory (a build tree) can loop
   full reloads today, each one clearing the user's selection
   ([`review-2026-08-20.md`](review-2026-08-20.md)).
-- [x] Implement New File, Duplicate, and Properties behind their shared
-  commands ([Sprint 25](sprints/025-conventional-actions.md)).
+- [x] Implement New File, Duplicate, Move To, and Properties behind their
+  shared commands ([Sprint 25](sprints/025-conventional-actions.md)).
+- [ ] Let the Properties dialog edit permissions, recorded in the journal so
+  a `chmod` undoes like everything else.
 - [x] Implement Open in Terminal through the shared current-directory command,
   preferring `xdg-terminal-exec`, then `TERMINAL`, then explicit
   working-directory fallbacks.
@@ -349,9 +353,9 @@ The packaging contract, current dependency caveats, target formats, and
 - Create folders and files.
 - [x] Rename files with a pointer-friendly inline interaction, `F2`, atomic
   no-overwrite publication, and identity-validating Undo/Redo.
-- Finish desktop clipboard interoperability and queued transfers; then add
-  duplicate and move-to. Cross-filesystem cut/paste remains explicitly parked
-  until its safety and UX work is scheduled.
+- Finish desktop clipboard interoperability and queued transfers.
+  Cross-filesystem cut/paste remains explicitly parked until its safety and
+  UX work is scheduled.
 - [x] Ask about an occupied destination instead of failing, with skip, rename,
   replace, and cancel, each able to answer the rest of the operation. Never
   overwrite without an explicit decision, hold a replaced item aside so undo

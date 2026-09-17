@@ -81,7 +81,11 @@ pub enum OperationRecord {
     ArchiveExtract {
         source: Vec<PathSnapshot>,
         output: PathBuf,
+        /// The published tree; empty when the output was merged instead.
         created: Vec<PathSnapshot>,
+        replaced: Vec<ReplacedItem>,
+        /// What a merge added to a folder that was already at `output`.
+        merged: Vec<PathSnapshot>,
     },
 }
 
@@ -141,7 +145,9 @@ impl OperationRecord {
     /// The objects this record is holding aside so undo can restore them.
     pub fn replaced_items(&self) -> &[ReplacedItem] {
         match self {
-            Self::Copy { replaced, .. } | Self::Move { replaced, .. } => replaced,
+            Self::Copy { replaced, .. }
+            | Self::Move { replaced, .. }
+            | Self::ArchiveExtract { replaced, .. } => replaced,
             _ => &[],
         }
     }

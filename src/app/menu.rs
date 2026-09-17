@@ -145,7 +145,7 @@ impl Marcel {
             command("Duplicate", Some("Ctrl+D"), DuplicateSelection),
             Separator,
             command("Rename…", Some("F2"), RenameSelection),
-            Planned("Move To…"),
+            command("Move To…", None, MoveToSelection),
             if trash {
                 command("Restore", None, RestoreSelection)
             } else {

@@ -30,7 +30,7 @@ The preview pane handles text and code files, images, continuously scrolling PDF
 
 ### File operations
 
-Copy and move operations show progress and can be cancelled. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge the two folders. One answer can apply to the rest of the operation. Undo and redo cover copy, move, duplicate, rename, Trash, restore, archive creation, and extraction. Permanent deletion requires confirmation and stays out of undo history. Marcel also creates folders, empty files, and zip archives, and extracts most common archive formats.
+Copy and move operations show progress and can be cancelled. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge the two folders. One answer can apply to the rest of the operation. Undo and redo cover copy, move, duplicate, rename, Trash, restore, archive creation, and extraction. Permanent deletion requires confirmation and stays out of undo history. Marcel also creates folders, empty files, and zip archives, and extracts most common archive formats; an extraction that lands on an existing name asks the same replace, rename, skip, or merge question a copy does. Move To… asks for a folder in the same chooser other applications get from Marcel and moves the selection there.
 
 Properties (`Ctrl+I`, or `Alt+Enter` if your hands know KDE) shows what an item is, where it lives, who owns it, and its permissions and timestamps. What its kind adds comes from the same code that draws the preview: an image reports its dimensions, a PDF its page count, a text file its line count, an archive how many entries it holds and how big they unpack. A folder is measured in the background while the dialog is open, and a multi-selection gets a summary.
 
@@ -75,7 +75,6 @@ Known gaps, roughly in the order they are likely to be addressed:
 
 * No search. You can filter the folder you are in, but there is no recursive search by name or content.
 * Moving between filesystems is refused. Marcel will not quietly turn a move across drives into a copy followed by a delete. It says it cannot do it. Copying across drives works.
-* No Move To. Moving something somewhere else is still cut, navigate, paste.
 * No removable volumes, network shares, or remote locations. Local paths only.
 * No media playback, and no thumbnails for video.
 * Sorting is fixed, and preferences other than view mode and hidden files are not persisted.

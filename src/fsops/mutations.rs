@@ -20,12 +20,14 @@ use anyhow::{Context as _, Result, bail};
 use super::{
     DirectoryChanges,
     archive::{MAX_ARCHIVE_ENTRIES, create_zip_archive, extract_archive},
+    conflict::ConflictPolicy,
     identity::FileIdentity,
     journal::{
         CommittedOperation, OperationRecord, PathSnapshot, SnapshotKind, reject_special_entries,
         snapshot_removable_tree,
     },
     local::{ensure_unoccupied, inspect, rename_no_replace, sorted_children},
+    quarantine::{REPLACEMENT_UNDO_BYTE_LIMIT, ReplacedItem, erase_replacement_quarantine},
 };
 
 pub fn validate_entry_name(name: &str) -> Result<()> {
@@ -175,6 +177,7 @@ pub fn create_zip_operation(
 pub fn extract_archive_operation(
     archive: &Path,
     cancelled: Arc<AtomicBool>,
+    policy: &mut ConflictPolicy,
 ) -> Result<CommittedOperation> {
     if cancelled.load(Ordering::Acquire) {
         bail!("Archive operation cancelled");
@@ -182,11 +185,43 @@ pub fn extract_archive_operation(
     // Prepare.
     let source = snapshot_removable_tree(archive)?;
     // Commit.
-    let published = extract_archive(archive, cancelled)?.published;
-    // Finalize.
-    let record = snapshot_removable_tree(&published).ok().map(|created| {
-        OperationRecord::ArchiveExtract { source, output: published.clone(), created }
-    });
+    let outcome = extract_archive(archive, cancelled, policy)?;
+    let published = outcome.published;
+    // Finalize: the output is on disk, or folded into the folder that was
+    // there. Whatever cannot be described costs undo, never the extraction.
+    let record = match outcome.merged {
+        // A merge added to a tree that was already there, so the record
+        // names those additions rather than the tree.
+        Some(merge) => merge.undoable.then(|| OperationRecord::ArchiveExtract {
+            source,
+            output: published.clone(),
+            created: Vec::new(),
+            replaced: Vec::new(),
+            merged: merge.added,
+        }),
+        None => {
+            // Holding a displaced item is what makes replacing it undoable.
+            // Past the budget the replacement stands and simply cannot be
+            // taken back, the same rule a transfer applies.
+            let replaced = outcome.replaced;
+            let within_budget = replaced.iter().map(ReplacedItem::bytes).sum::<u64>()
+                <= REPLACEMENT_UNDO_BYTE_LIMIT;
+            if !within_budget {
+                for item in &replaced {
+                    erase_replacement_quarantine(item);
+                }
+            }
+            snapshot_removable_tree(&published).ok().filter(|_| within_budget).map(|created| {
+                OperationRecord::ArchiveExtract {
+                    source,
+                    output: published.clone(),
+                    created,
+                    replaced,
+                    merged: Vec::new(),
+                }
+            })
+        }
+    };
     Ok(CommittedOperation::published(published, record))
 }
 

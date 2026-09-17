@@ -194,7 +194,9 @@ summary for multiple items.
 
 `Compress…` initially creates ZIP archives from the complete preserved
 selection. `Extract` is a single-item action for supported archives and always
-publishes beside the archive; Marcel does not expose `Extract To…`. `Open`,
+publishes beside the archive; Marcel does not expose `Extract To…`. When the
+name it would publish under is taken, it asks the copy conflict question:
+skip, rename, keep both, replace, or merge into the existing folder. `Open`,
 Enter, and double-click continue to use the configured MIME application rather
 than extracting implicitly.
 
@@ -203,9 +205,11 @@ configured MIME default without prompting, while `Open With…` explicitly
 requests the desktop application chooser. Cut, Copy, and Paste are active
 through the shared transfer commands. Move to Trash is active in ordinary
 filesystem locations; the same row becomes Restore in the system Trash view.
-Remaining planned commands are disabled and prefixed with `–`: Move To,
-Create Link, and Copy Path. Duplicate copies the selection beside itself and
-lets the transfer choose the free names. Properties opens for any selection,
+Remaining planned commands are disabled and prefixed with `–`: Create Link
+and Copy Path. Duplicate copies the selection beside itself and lets the
+transfer choose the free names. Move To… opens the folder chooser (the same
+window the portal backend shows) and moves the selection to the folder
+chosen; the transfer, its conflicts, and its undo are those of cut and paste. Properties opens for any selection,
 or for the displayed folder when nothing is selected. Rename is active for
 exactly one ordinary filesystem selection and edits the name inline in both
 views.

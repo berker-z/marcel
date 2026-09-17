@@ -570,8 +570,13 @@ impl OperationCoordinator {
         let Some(started) = self.begin_prepared(card) else {
             return;
         };
+        // Publishing the output can meet an occupied destination, which is
+        // the same question a copy asks and gets the same dialog.
+        let (resolver, questions) = PromptingResolver::new();
+        conflict_dialog::serve(questions, origin, cx);
         self.run_committing(origin, cx, "Extracted", move || {
-            extract_archive_operation(&archive, started.cancel)
+            let mut policy = ConflictPolicy::interactive(resolver);
+            extract_archive_operation(&archive, started.cancel, &mut policy)
         });
     }
 

@@ -16,6 +16,7 @@ use anyhow::{Context as _, Result, bail};
 
 use super::{
     DirectoryChanges,
+    conflict::ConflictPolicy,
     copy::remove_merged_items,
     journal::{
         CommittedOperation, MoveRecord, MutationOutcome, OperationRecord, rebase_snapshots,
@@ -93,8 +94,11 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
         OperationRecord::Copy { created, .. }
         | OperationRecord::ArchiveCreate { created, .. }
         | OperationRecord::ArchiveExtract { created, .. } => {
+            // An extraction publishes the way a copy does, so it can displace
+            // or merge the way a copy does, and undoes the same way.
             let (replaced, merged) = match operation {
-                OperationRecord::Copy { replaced, merged, .. } => {
+                OperationRecord::Copy { replaced, merged, .. }
+                | OperationRecord::ArchiveExtract { replaced, merged, .. } => {
                     (replaced.as_slice(), merged.as_slice())
                 }
                 _ => (&[][..], &[][..]),
@@ -317,7 +321,9 @@ pub fn redo_operation(operation: &OperationRecord) -> MutationOutcome {
                     "Archive operation has no source"
                 ));
             };
-            extract_archive_operation(&archive, no_cancel()).into()
+            // Nobody is asked on a redo: an occupied destination refuses, and the
+            // user can extract again and answer.
+            extract_archive_operation(&archive, no_cancel(), &mut ConflictPolicy::refusing()).into()
         }
     }
 }

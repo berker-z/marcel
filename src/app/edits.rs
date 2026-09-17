@@ -14,7 +14,7 @@ use gpui_component::{
 
 use crate::{
     browse::entries::{FileEntry, display_filename},
-    desktop::picker::{PickerMode, PickerResponse},
+    desktop::picker::{PickerMode, PickerRequest, PickerResponse},
     fsops::{TransferMode, archive::default_zip_name, validate_entry_name},
     operations::{FileClipboard, OperationProgressKind},
     preview::PreviewState as PreviewContent,
@@ -386,6 +386,62 @@ impl Marcel {
         self.with_operations(window, cx, |ops, origin, cx| {
             ops.start_duplicate(sources, destination, origin, cx);
         });
+    }
+
+    /// Ask for a folder, then move the selection there.
+    ///
+    /// The folder chooser is the same window the portal backend shows, with
+    /// the transfer as its caller instead of another application. Its answer
+    /// arrives on a channel; the move then starts through the application's
+    /// operation owner, so it happens even if this window has gone by then.
+    pub(super) fn open_move_to_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sources = self.selected_paths();
+        if sources.is_empty() {
+            return;
+        }
+        self.ui.entry_menu = None;
+        let (reply, answer) = async_channel::bounded(1);
+        // A picker closes itself when its caller withdraws the request; this
+        // caller never does, and dropping the sender says so.
+        let (_never_withdrawn, closed) = async_channel::bounded::<()>(1);
+        let request = PickerRequest {
+            title: "Move To".to_string(),
+            mode: PickerMode::OpenDirectories,
+            multiple: false,
+            accept_label: Some("Move".to_string()),
+            start_directory: Some(self.directory.current_dir.clone()),
+            current_name: None,
+            filters: Vec::new(),
+            current_filter: None,
+            reply,
+            closed,
+        };
+        if let Err(error) = crate::window::open_picker(request, cx) {
+            window.push_notification(Notification::error(error.to_string()), cx);
+            return;
+        }
+        let origin = Self::origin(window);
+        cx.spawn(async move |_, cx| {
+            let Ok(PickerResponse::Chosen { paths, .. }) = answer.recv().await else {
+                return;
+            };
+            let Some(destination) = paths.into_iter().next() else {
+                return;
+            };
+            cx.update(|cx| {
+                crate::operations::global(cx).update(cx, |operations, cx| {
+                    operations.start_transfer(
+                        sources,
+                        destination,
+                        TransferMode::Move,
+                        None,
+                        origin,
+                        cx,
+                    );
+                });
+            });
+        })
+        .detach();
     }
 
     pub(super) fn open_compress_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
