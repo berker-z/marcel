@@ -15,9 +15,11 @@ work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
 - One clean restart cycle of the release build to confirm `state.conf` keeps
   view, sort, hidden files, and theme. Sprint 26 saw one unexplained reset
   during a hand run that did not reproduce.
-- `nix build .#marcel-rs` and `nix flake check` on the release commit.
-- Add `CONTRIBUTING.md` and `SECURITY.md`. Short; a reviewer clicks them
-  first.
+- `nix build .#marcel-rs` and `nix flake check` on the release commit, and a
+  `ci.yml` dispatch on it so both architectures have built the tree before
+  the immutable tag exists.
+- A fresh screenshot for the README and the AppStream file. The current one
+  is from 2026-08-18, before sorting, the Trash view, audio, and video.
 - `scripts/check_version.sh v0.1.0`, then `git tag -s v0.1.0`, push, and a
   GitHub release with the changelog entry. The rest of the gate is in
   [`release.md`](release.md#v010-release-gate).
@@ -77,7 +79,8 @@ for real users; Flatpak also costs the portal backend and D-Bus activation,
 and Flathub's policy currently blocks the submission regardless.
 
 First, before any of those: get the packaging out of Nix. The program is
-portable already (no build script, no store paths, assets in the binary,
+portable already (no build script, no store paths, the font compiled in and
+the icons read from `share/marcel/icons/nordzy` beside the executable,
 `7zz` found beside the exe or on `PATH`, Poppler on `PATH`), but the two
 desktop entries exist only as `makeDesktopItem` calls in `nix/package.nix`,
 the D-Bus and portal files live under `nix/` with `@marcel@` substitution,

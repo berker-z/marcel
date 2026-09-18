@@ -71,13 +71,19 @@ Shortcuts are registered in two places, so check both before editing the list:
   once: its GPUI action, its key bindings if it has any, and the `BrowserCommand`
   menus and toolbar buttons dispatch through. Enablement lives in
   `command_enabled` and behaviour in `execute`, in the same file.
-- `on_window_key_down` in the same file handles the ones that must keep working
-  while another surface holds focus, currently `Ctrl+L` and `Ctrl+F`.
+- `on_window_key_down` in the same file handles the keys that must keep
+  working while another surface holds focus. Today that is `Ctrl+L` and
+  `Ctrl+F` from anywhere; Escape three ways (dismiss the context menu,
+  cancel a picker dialog, cancel a location edit) plus clearing the filter;
+  and, while a filter is active with focus elsewhere, Enter, Backspace, Up,
+  and Down against the filtered results. Any printable character starts
+  type-to-filter from the same place. If you add a key that has to survive
+  focus in a text field, it goes here; everything else is a binding.
 
 ## Module map
 
 `src/lib.rs` carries the map. In short: `app/` is the window (one `Marcel`
-view split by concern — navigation, edits, pointer, preview, menus, sidebar,
+view split by concern: navigation, edits, pointer, preview, menus, sidebar,
 chrome), `browse/` is the read side (entries, the directory session, the
 watcher, selection, history), `fsops/` is everything that changes the disk
 (`local` primitives, `identity`, `journal`, then the mutations), `preview/`
@@ -92,7 +98,7 @@ Before considering a change complete, run:
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 

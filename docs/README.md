@@ -26,6 +26,10 @@ open. [`TODO.md`](TODO.md) is the one list of what is left, in order, and
   xdg-desktop-portal file chooser, and how to test it.
 - [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md): upstream reuse,
   bundled assets, and their licenses.
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md) and
+  [`../SECURITY.md`](../SECURITY.md): how a change gets in, and where a
+  vulnerability report goes. [`../AGENTS.md`](../AGENTS.md) has the rules
+  both point at.
 - [`sprints/`](sprints/): numbered records of each slice of work, with the
   acceptance checks as they stood. Older ones keep the status of their own
   time; read them as history.
