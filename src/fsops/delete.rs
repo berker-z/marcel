@@ -14,6 +14,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs, io,
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
@@ -25,6 +26,7 @@ use std::{
 
 use super::local::PathContext as _;
 use anyhow::{Context as _, Result, bail};
+use rustix::fs::{AtFlags, Mode, OFlags};
 
 use super::{
     PathFailure, TransferProgress,
@@ -61,22 +63,13 @@ impl DeleteIdentity {
     /// Removing one hard link moves the shared inode's ctime, so a plan holding
     /// both links to a file cannot compare ctime for the second one: its own
     /// earlier removal is what changed it. Directories have the same problem
-    /// and solve it by refreshing after each child; a file has no parent to
-    /// refresh, so the relaxation is here instead, and only for objects that
-    /// said up front that another name for them exists.
+    /// with every child removed and are compared by `same_object` alone; a
+    /// file gets the relaxation here instead, and only when it said up front
+    /// that another name for it exists.
     ///
     /// Device, inode, and mode still pin the object either way.
     fn describes(self, found: Self) -> bool {
         self.same_object(found) && (self.identity == found.identity || self.links > 1)
-    }
-
-    fn validate(self, path: &Path) -> Result<()> {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("Cannot continue: “{}” is missing", path.display()))?;
-        if !self.describes(Self::of(&metadata)) {
-            bail!("Cannot continue: “{}” changed or was replaced", path.display());
-        }
-        Ok(())
     }
 }
 
@@ -255,31 +248,56 @@ fn stage_root(
 }
 
 /// Erase one quarantined root leaf by leaf, returning what could not go.
+///
+/// Nothing here resolves a whole path. Each entry is unlinked on a descriptor
+/// of its parent, and that parent is reached from the quarantine root one
+/// component at a time with `O_NOFOLLOW`, each directory checked against the
+/// plan as it is opened. A `remove_file` by path would resolve the path all over
+/// again after the check, and a subdirectory swapped for a symbolic link in
+/// that gap would carry the unlink to wherever the link points; opened this
+/// way, the swap fails to open instead.
 fn erase_root(root: &QuarantinedRoot, progress: &TransferProgress) -> Vec<PathFailure> {
-    let mut directory_identities = root
+    let directories = root
         .entries
         .iter()
         .filter(|entry| entry.kind == DeleteKind::Directory)
         .map(|entry| (entry.path.clone(), entry.identity))
         .collect::<HashMap<_, _>>();
+    let mut ancestors = match OpenAncestors::open(&root.quarantine, &directories) {
+        Ok(ancestors) => ancestors,
+        Err(error) => {
+            return vec![PathFailure { path: root.original.clone(), message: error.to_string() }];
+        }
+    };
     let mut failures = Vec::new();
     for entry in root.entries.iter().rev() {
         progress.set_current_path(Some(root.display_path(&entry.path)));
-        let expected = directory_identities.get(&entry.path).copied().unwrap_or(entry.identity);
-        let result = validate_ancestors(&entry.path, &root.quarantine, &directory_identities)
-            .and_then(|()| expected.validate(&entry.path))
-            .and_then(|()| {
-                match entry.kind {
-                    DeleteKind::Directory => fs::remove_dir(&entry.path),
-                    DeleteKind::Other => fs::remove_file(&entry.path),
-                }
-                .at("Could not permanently delete", &entry.path)
-            })
-            .and_then(|()| {
-                progress.complete_item();
-                progress.complete_bytes(entry.bytes);
-                refresh_parent_identity(&entry.path, &root.quarantine, &mut directory_identities)
-            });
+        let result = ancestors.parent_of(&entry.path).and_then(|parent| {
+            let name = entry.path.file_name().context("Delete entry has no name")?;
+            let pinned = pin_entry(parent, name, &entry.path)?;
+            let found =
+                DeleteIdentity::of(&pinned.metadata().at("Could not inspect", &entry.path)?);
+            // Removing a directory's children moves its ctime, so the plan's
+            // ctime cannot be held against it; device, inode, and mode still
+            // pin it. `DeleteIdentity::describes` says why a file may relax.
+            let still_planned = match entry.kind {
+                DeleteKind::Directory => entry.identity.same_object(found),
+                DeleteKind::Other => entry.identity.describes(found),
+            };
+            if !still_planned {
+                bail!("Cannot continue: “{}” changed or was replaced", entry.path.display());
+            }
+            let flags = match entry.kind {
+                DeleteKind::Directory => AtFlags::REMOVEDIR,
+                DeleteKind::Other => AtFlags::empty(),
+            };
+            rustix::fs::unlinkat(parent, name, flags)
+                .map_err(io::Error::from)
+                .at("Could not permanently delete", &entry.path)?;
+            progress.complete_item();
+            progress.complete_bytes(entry.bytes);
+            Ok(())
+        });
         if let Err(error) = result {
             failures.push(PathFailure {
                 path: root.display_path(&entry.path),
@@ -288,6 +306,151 @@ fn erase_root(root: &QuarantinedRoot, progress: &TransferProgress) -> Vec<PathFa
         }
     }
     failures
+}
+
+/// Descriptors for the directories a delete plan is currently erasing inside.
+///
+/// Entries arrive children before parents and siblings together, so the parent
+/// of one entry is usually the parent of the next; that one descriptor is kept.
+/// Any other parent is reached again from the pinned root, which costs one open
+/// per component per change of directory and never holds more than three
+/// descriptors, however deep the tree. Holding the whole chain open would be
+/// faster and would run out of descriptors on a tree a few hundred levels deep.
+///
+/// The `openat`-based primitives here belong in `local.rs` beside
+/// `open_regular_file`; they live here until that file is next touched.
+struct OpenAncestors<'a> {
+    quarantine: &'a Path,
+    directories: &'a HashMap<PathBuf, DeleteIdentity>,
+    /// The folder the quarantine root was renamed within. Opened by path, and
+    /// following links: it is the folder the user is looking at, and the rename
+    /// that staged the root resolved exactly the same way.
+    outside: fs::File,
+    /// The quarantine root itself, once a child has needed it.
+    root: Option<fs::File>,
+    /// The most recently used parent below the root.
+    parent: Option<(PathBuf, fs::File)>,
+}
+
+impl<'a> OpenAncestors<'a> {
+    fn open(
+        quarantine: &'a Path,
+        directories: &'a HashMap<PathBuf, DeleteIdentity>,
+    ) -> Result<Self> {
+        let outside = quarantine.parent().context("Quarantine path has no parent")?;
+        let outside = rustix::fs::open(
+            outside,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(fs::File::from)
+        .map_err(io::Error::from)
+        .at("Could not open", outside)?;
+        Ok(Self { quarantine, directories, outside, root: None, parent: None })
+    }
+
+    /// A descriptor for the directory holding `path`, every component below
+    /// the quarantine root opened without following links and checked against
+    /// the plan.
+    fn parent_of(&mut self, path: &Path) -> Result<&fs::File> {
+        let parent = path.parent().context("Delete entry has no parent")?;
+        if !parent.starts_with(self.quarantine) {
+            // The root itself is going: let its descriptors go first.
+            self.parent = None;
+            self.root = None;
+            return Ok(&self.outside);
+        }
+        if self.root.is_none() {
+            let name = self.quarantine.file_name().context("Quarantine path has no name")?;
+            let root = open_directory_at(&self.outside, name, self.quarantine)?;
+            check_planned(self.directories, self.quarantine, &root)?;
+            self.root = Some(root);
+        }
+        let root = self.root.as_ref().context("Quarantine root is not open")?;
+        if parent == self.quarantine {
+            self.parent = None;
+            return Ok(root);
+        }
+        if !self.parent.as_ref().is_some_and(|(open, _)| open == parent) {
+            let mut current = self.quarantine.to_path_buf();
+            let mut directory: Option<fs::File> = None;
+            for component in parent.strip_prefix(self.quarantine)?.components() {
+                current.push(component);
+                let opened = open_directory_at(
+                    directory.as_ref().unwrap_or(root),
+                    component.as_os_str(),
+                    &current,
+                )?;
+                check_planned(self.directories, &current, &opened)?;
+                directory = Some(opened);
+            }
+            let directory = directory.context("Delete entry has no parent below the quarantine")?;
+            self.parent = Some((parent.to_path_buf(), directory));
+        }
+        let (_, directory) = self.parent.as_ref().context("Parent directory is not open")?;
+        Ok(directory)
+    }
+}
+
+/// Refuse a directory that is not the one the plan recorded at `path`.
+fn check_planned(
+    directories: &HashMap<PathBuf, DeleteIdentity>,
+    path: &Path,
+    directory: &fs::File,
+) -> Result<()> {
+    let expected = directories.get(path).with_context(|| {
+        format!("Cannot continue: ancestor “{}” was not in the delete plan", path.display())
+    })?;
+    let found = DeleteIdentity::of(&directory.metadata().at("Could not inspect", path)?);
+    if !expected.same_object(found) {
+        bail!("Cannot continue: ancestor “{}” changed or was replaced", path.display());
+    }
+    Ok(())
+}
+
+/// Open the directory named `name` inside `directory`, refusing a link.
+///
+/// `path` is what the directory is called in messages; the syscall itself
+/// never sees more than the one name.
+fn open_directory_at(directory: &fs::File, name: &OsStr, path: &Path) -> Result<fs::File> {
+    rustix::fs::openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "Cannot continue: “{}” is no longer a directory that can be opened: {}",
+            path.display(),
+            io::Error::from(error)
+        )
+    })
+}
+
+/// A descriptor for whatever `name` is inside `directory`, without following a
+/// link and without opening the object.
+///
+/// `O_PATH` is what lets this describe anything the plan may hold: a FIFO is
+/// not opened, so nothing blocks; a device is not opened, so nothing is
+/// triggered; a socket, which cannot be opened at all, still yields a
+/// descriptor to `fstat`.
+fn pin_entry(directory: &fs::File, name: &OsStr, path: &Path) -> Result<fs::File> {
+    rustix::fs::openat(
+        directory,
+        name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "Cannot continue: “{}” could not be inspected: {}",
+            path.display(),
+            io::Error::from(error)
+        )
+    })
 }
 
 /// Build the delete plan in pre-order using an explicit stack.
@@ -360,54 +523,6 @@ fn reserve_quarantine_path(original: &Path) -> Result<PathBuf> {
         }
     }
     bail!("Could not reserve a unique permanent-delete quarantine path")
-}
-
-fn validate_ancestors(
-    path: &Path,
-    quarantine_root: &Path,
-    directories: &HashMap<PathBuf, DeleteIdentity>,
-) -> Result<()> {
-    let mut ancestor = path.parent();
-    while let Some(directory) = ancestor {
-        if !directory.starts_with(quarantine_root) {
-            break;
-        }
-        let expected = directories.get(directory).with_context(|| {
-            format!(
-                "Cannot continue: ancestor “{}” was not in the delete plan",
-                directory.display()
-            )
-        })?;
-        expected.validate(directory)?;
-        if directory == quarantine_root {
-            break;
-        }
-        ancestor = directory.parent();
-    }
-    Ok(())
-}
-
-/// Removing a child moves its parent's ctime, so re-read the parent so the next
-/// child's ancestor check compares against the identity this removal produced.
-fn refresh_parent_identity(
-    removed_path: &Path,
-    quarantine_root: &Path,
-    directories: &mut HashMap<PathBuf, DeleteIdentity>,
-) -> Result<()> {
-    let Some(parent) = removed_path.parent().filter(|p| p.starts_with(quarantine_root)) else {
-        return Ok(());
-    };
-    let previous = directories.get(parent).copied().with_context(|| {
-        format!("Cannot continue: parent “{}” was not in the delete plan", parent.display())
-    })?;
-    let metadata = fs::symlink_metadata(parent)
-        .with_context(|| format!("Cannot continue: parent “{}” is missing", parent.display()))?;
-    let current = DeleteIdentity::of(&metadata);
-    if !previous.same_object(current) {
-        bail!("Cannot continue: parent “{}” changed or was replaced", parent.display());
-    }
-    directories.insert(parent.to_path_buf(), current);
-    Ok(())
 }
 
 fn failed_after_rollback(
@@ -529,24 +644,87 @@ mod tests {
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
     }
 
+    /// A root already staged and planned, as `delete_paths_with_policy` hands
+    /// it to `erase_root`.
+    fn planned_root(sandbox: &Sandbox, quarantine: &str) -> QuarantinedRoot {
+        let mut root = QuarantinedRoot {
+            original: sandbox.path("target"),
+            quarantine: sandbox.path(quarantine),
+            entries: Vec::new(),
+        };
+        collect_delete_plan(&root.quarantine, &mut root.entries, &TransferProgress::default())
+            .unwrap();
+        root
+    }
+
+    /// The plan listed `child/` as a directory; before it is erased, something
+    /// with write access to the quarantine swaps it for a link to a folder the
+    /// user never selected. By path, `remove_file(child/keep.txt)` would
+    /// follow the link and delete the target's file.
     #[test]
-    fn ancestor_replacement_cannot_redirect_deletion_through_a_symlink() {
+    fn a_subdirectory_swapped_for_a_link_after_planning_does_not_delete_its_target() {
         let sandbox = Sandbox::new();
-        let quarantine = sandbox.dir("quarantine");
-        let child_dir = sandbox.dir("quarantine/child");
+        sandbox.file("quarantine/child/keep.txt", b"doomed");
         let outside = sandbox.dir("outside");
         let kept = sandbox.file("outside/keep.txt", b"keep");
-        let identity = |path: &Path| DeleteIdentity::of(&fs::symlink_metadata(path).unwrap());
-        let directories = HashMap::from([
-            (quarantine.clone(), identity(&quarantine)),
-            (child_dir.clone(), identity(&child_dir)),
-        ]);
-        fs::remove_dir(&child_dir).unwrap();
-        std::os::unix::fs::symlink(&outside, &child_dir).unwrap();
+        let root = planned_root(&sandbox, "quarantine");
+        assert_eq!(root.entries.len(), 3);
 
-        assert!(
-            validate_ancestors(&child_dir.join("keep.txt"), &quarantine, &directories).is_err()
-        );
-        assert_eq!(read(kept), b"keep");
+        let child = sandbox.path("quarantine/child");
+        fs::remove_file(child.join("keep.txt")).unwrap();
+        fs::remove_dir(&child).unwrap();
+        std::os::unix::fs::symlink(&outside, &child).unwrap();
+
+        let failures = erase_root(&root, &TransferProgress::default());
+
+        assert!(!failures.is_empty(), "the swap must be reported, not walked through");
+        assert_eq!(read(&kept), b"keep");
+        assert!(fs::symlink_metadata(&child).unwrap().file_type().is_symlink());
+        // Nothing was erased, so the quarantine stands for the user to inspect.
+        assert!(root.quarantine.is_dir());
+    }
+
+    /// The same swap one level up: the quarantine root itself becomes a link.
+    /// Its own entry then fails the identity check rather than `rmdir`-ing
+    /// through the link.
+    #[test]
+    fn a_quarantine_root_swapped_for_a_link_is_refused() {
+        let sandbox = Sandbox::new();
+        sandbox.file("quarantine/note.txt", b"doomed");
+        let outside = sandbox.dir("outside");
+        let kept = sandbox.file("outside/note.txt", b"keep");
+        let root = planned_root(&sandbox, "quarantine");
+
+        fs::remove_file(root.quarantine.join("note.txt")).unwrap();
+        fs::remove_dir(&root.quarantine).unwrap();
+        std::os::unix::fs::symlink(&outside, &root.quarantine).unwrap();
+
+        let failures = erase_root(&root, &TransferProgress::default());
+
+        assert_eq!(failures.len(), 2, "{failures:#?}");
+        assert_eq!(read(&kept), b"keep");
+        assert!(outside.is_dir());
+    }
+
+    /// Special files cannot be opened without consequence, but they can be
+    /// pinned and identified, so a tree holding one is still deleted.
+    #[test]
+    fn a_tree_holding_a_socket_and_a_fifo_is_deleted_completely() {
+        let sandbox = Sandbox::new();
+        let target = sandbox.dir("tree");
+        let _listener = sandbox.socket("tree/socket");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            target.join("fifo"),
+            rustix::fs::FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+
+        let outcome = delete(std::slice::from_ref(&target));
+
+        assert!(outcome.failures.is_empty(), "{outcome:?}");
+        assert!(!target.exists());
     }
 }
