@@ -1,6 +1,13 @@
 //! Archives, through a 7-Zip subprocess that never sees a path it could
-//! misread as an option and never writes anywhere but a private staging
-//! directory.
+//! misread as an option or a wildcard and never writes anywhere but a private
+//! staging directory.
+//!
+//! Extraction publishes only regular files and directories: link and special
+//! entries are refused from the listing before anything is written, and again
+//! from the staged tree in case the listing lied. Mode bits are 7-Zip's to
+//! apply, and it drops setuid, setgid and sticky on extraction (verified with
+//! 7zz 26.02 for zip, 7z and tar), so an archive cannot publish a privileged
+//! binary; the copy path's policy on those bits is its own.
 
 use std::{
     env,
@@ -27,8 +34,10 @@ use super::{
     copy::{MergeStop, merge_directories},
     journal::{PathSnapshot, UNDO_SNAPSHOT_LIMIT},
     local::{ensure_unoccupied, inspect, rename_no_replace},
+    mutations::validate_entry_os_name,
     quarantine::{
-        ReplacedItem, preserve_unrestored, quarantine_for_replacement, restore_replaced_items,
+        ReplacedItem, WorkingKind, preserve_unrestored, quarantine_for_replacement,
+        restore_replaced_items, staging_prefix,
     },
     transfer::{SourcePlan, TransferMode, plan_source},
 };
@@ -113,6 +122,24 @@ impl SevenZipBackend {
         Self { program }
     }
 
+    /// The backend process before its arguments: nothing on stdin, both
+    /// outputs captured, its own process group so cancellation can kill
+    /// whatever it spawned.
+    ///
+    /// The installed wrapper sets `LD_LIBRARY_PATH` to Marcel's private
+    /// runtime, and `src/desktop/open.rs` explains why that must not leak to
+    /// a child that was linked against a different glibc. This 7-Zip is one.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command
+            .env_remove("LD_LIBRARY_PATH")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        command
+    }
+
     fn run<I, S>(
         &self,
         arguments: I,
@@ -127,13 +154,8 @@ impl SevenZipBackend {
     {
         check_cancelled(&cancelled)?;
 
-        let mut command = Command::new(&self.program);
-        command
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+        let mut command = self.command();
+        command.args(arguments);
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
         }
@@ -191,6 +213,12 @@ impl SevenZipBackend {
     }
 }
 
+/// Take file names literally. 7-Zip expands `*` and `?` in every name it is
+/// given, the archive's included, and `--` does not stop it: without this, a
+/// file called `*` beside secrets puts the secrets in the ZIP too, and
+/// extracting `*.zip` extracts every ZIP beside it.
+const LITERAL_NAMES: &str = "-spd";
+
 impl ArchiveBackend for SevenZipBackend {
     fn list(&self, archive: &Path, cancelled: Arc<AtomicBool>) -> Result<Vec<ArchiveEntry>> {
         let arguments = [
@@ -199,6 +227,7 @@ impl ArchiveBackend for SevenZipBackend {
             OsString::from("-slt"),
             OsString::from("-sccUTF-8"),
             OsString::from("-p"),
+            OsString::from(LITERAL_NAMES),
             OsString::from("--"),
             archive.as_os_str().to_owned(),
         ];
@@ -229,6 +258,7 @@ impl ArchiveBackend for SevenZipBackend {
             OsString::from("-aos"),
             OsString::from("-sccUTF-8"),
             OsString::from("-p"),
+            OsString::from(LITERAL_NAMES),
             output_directory,
             OsString::from("--"),
             archive.as_os_str().to_owned(),
@@ -251,6 +281,7 @@ impl ArchiveBackend for SevenZipBackend {
             OsString::from("-mx=5"),
             OsString::from("-y"),
             OsString::from("-sccUTF-8"),
+            OsString::from(LITERAL_NAMES),
             destination.as_os_str().to_owned(),
             OsString::from("--"),
         ];
@@ -300,12 +331,12 @@ fn extract_archive_with<B: ArchiveBackend>(
     policy: &mut ConflictPolicy,
 ) -> Result<ArchiveOutcome> {
     let parent = archive.parent().context("Archive has no containing directory")?;
-    let extract_to_staging = |archive: &Path| -> Result<(tempfile::TempDir, Vec<StagedEntry>)> {
+    let extract_to_staging = |archive: &Path| -> Result<(Staging, Vec<StagedEntry>)> {
         validate_preflight(&backend.list(archive, cancelled.clone())?)?;
-        let staging = archive_staging(parent)?;
-        backend.extract(archive, staging.path(), cancelled.clone())?;
+        let staging = Staging::reserve(parent)?;
+        backend.extract(archive, &staging.root, cancelled.clone())?;
         check_cancelled(&cancelled)?;
-        let staged = walk_staged(staging.path(), false, &cancelled)?;
+        let staged = walk_staged(&staging.root, false, &cancelled)?;
         Ok((staging, staged))
     };
 
@@ -319,23 +350,56 @@ fn extract_archive_with<B: ArchiveBackend>(
         staging = extract_to_staging(&only.path)?.0;
     }
 
-    let top_level = fs::read_dir(staging.path())
-        .at("Could not inspect archive staging", staging.path())?
+    let top_level = fs::read_dir(&staging.root)
+        .at("Could not inspect archive staging", &staging.root)?
         .map(|entry| {
             entry.map(|entry| entry.path()).context("Could not read archive staging entry")
         })
         .collect::<Result<Vec<_>>>()?;
     // One item is published as itself; several are published together under
-    // the archive's name, which means publishing the staging directory.
-    let (source, whole_staging, destination) = match top_level.as_slice() {
+    // the archive's name, which means publishing the output root.
+    let (source, destination) = match top_level.as_slice() {
         [] => bail!("Archive contains no extractable entries"),
         [source] => {
             let name = source.file_name().context("Extracted item has no filename")?;
-            (source.clone(), false, parent.join(name))
+            // The archive's own naming is published verbatim here, so it has
+            // to clear the bar Rename does: a `.marcel-` name would be hidden
+            // and perhaps swept.
+            if let Err(error) = validate_entry_os_name(name) {
+                bail!(
+                    "Cannot publish the archive's only entry “{}”: {error}",
+                    name.to_string_lossy()
+                );
+            }
+            (source.clone(), parent.join(name))
         }
-        _ => (staging.path().to_path_buf(), true, parent.join(archive_stem(archive))),
+        _ => (staging.root.clone(), parent.join(archive_stem(archive))),
     };
-    publish_extracted(staging, source, whole_staging, parent, destination, &cancelled, policy)
+    // Staging outlives publication and is removed on the way out, whatever
+    // the outcome; whether the rename emptied it or a merge left the rest.
+    publish_extracted(source, parent, destination, &cancelled, policy)
+}
+
+/// One extraction's private working space.
+///
+/// The directory is `tempfile`'s, so it is created atomically under a unique
+/// name and removed on drop, and it is `0700`: nothing is readable by anyone
+/// else until published. The output root inside it is what a multi-entry
+/// archive publishes as its folder, so it is created the way New Folder would
+/// be — with the umask's mode — rather than inheriting the staging directory's.
+struct Staging {
+    /// Held for its drop, which removes whatever publication left behind.
+    _directory: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl Staging {
+    fn reserve(parent: &Path) -> Result<Self> {
+        let directory = archive_staging(parent)?;
+        let root = directory.path().join("extracted");
+        fs::create_dir(&root).at("Could not create archive output root in", directory.path())?;
+        Ok(Self { _directory: directory, root })
+    }
 }
 
 /// Move the extracted output out of staging to where the user will find it.
@@ -345,9 +409,7 @@ fn extract_archive_with<B: ArchiveBackend>(
 /// the displaced item aside for undo and puts it back if publishing fails; a
 /// merge copies into the existing folder and keeps what is already there.
 fn publish_extracted(
-    staging: tempfile::TempDir,
     source: PathBuf,
-    whole_staging: bool,
     parent: &Path,
     destination: PathBuf,
     cancelled: &AtomicBool,
@@ -388,23 +450,9 @@ fn publish_extracted(
         SourcePlan::Failed(message) => bail!("{message}"),
     };
 
-    // Commit: one rename. Publishing the whole staging directory means keeping
-    // it first, so a failed rename has to clean it up by hand.
-    let published = if whole_staging {
-        let kept = staging.keep();
-        rename_no_replace(&kept, &target).map_err(|error| {
-            let message =
-                format!("Could not publish extracted directory “{}”: {error}", target.display());
-            match fs::remove_dir_all(&kept) {
-                Ok(()) => anyhow::anyhow!(message),
-                Err(cleanup) => {
-                    anyhow::anyhow!("{message}; staging cleanup also failed: {cleanup}")
-                }
-            }
-        })
-    } else {
-        rename_no_replace(&source, &target).at("Could not publish extracted item", &target)
-    };
+    // Commit: one rename.
+    let published =
+        rename_no_replace(&source, &target).at("Could not publish extracted item", &target);
     match published {
         Ok(()) => Ok(ArchiveOutcome {
             published: target,
@@ -457,7 +505,7 @@ fn create_zip_archive_with<B: ArchiveBackend>(
 
 fn archive_staging(parent: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
-        .prefix(".marcel-archive-")
+        .prefix(&staging_prefix(WorkingKind::Archive))
         .tempdir_in(parent)
         .at("Could not create private archive staging in", parent)
 }
@@ -744,6 +792,11 @@ pub fn default_zip_name(sources: &[PathBuf], single_is_directory: bool) -> Strin
 
 /// The archive's name with every archive extension peeled off, so
 /// `backup.tar.gz` extracts into `backup`.
+///
+/// The result becomes a folder the user did not name, so it has to clear the
+/// bar New Folder does. `..zip` peels to `.`, `...zip` to `..`, and
+/// `.marcel-copy-x.zip` to a name the browser would hide; each falls back to
+/// `Archive` instead.
 pub fn archive_stem(path: &Path) -> String {
     let mut name =
         path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -757,7 +810,7 @@ pub fn archive_stem(path: &Path) -> String {
         }
         name.truncate(stem.len());
     }
-    if name.is_empty() { "Archive".to_string() } else { name }
+    if validate_entry_os_name(OsStr::new(&name)).is_err() { "Archive".to_string() } else { name }
 }
 
 fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
@@ -768,6 +821,7 @@ fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
         let mut size = None;
         let mut is_dir = false;
         let mut is_link = false;
+        let mut special = None;
         let mut is_encrypted = false;
         for line in block.lines() {
             let Some((key, value)) = line.split_once(" = ") else {
@@ -783,9 +837,19 @@ fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
                     );
                 }
                 "Folder" => is_dir = value == "+",
-                "Attributes" => {
+                // `Attributes` is zip and 7z: Windows flags, then for entries
+                // made on Unix the `ls -l` mode after a space. `Mode` is
+                // tar's, the mode alone. `L` is the Windows reparse flag; the
+                // mode's type character is what says link on Unix.
+                "Attributes" | "Mode" => {
                     is_dir |= value.starts_with('D');
                     is_link |= value.contains('L');
+                    if let Some(kind) = posix_file_type(value) {
+                        is_dir |= kind == 'd';
+                        if !matches!(kind, '-' | 'd') {
+                            special = Some(kind);
+                        }
+                    }
                 }
                 "Symbolic Link" | "Hard Link" => is_link |= !value.is_empty(),
                 "Encrypted" => is_encrypted = value == "+",
@@ -799,6 +863,9 @@ fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
         if is_link {
             bail!("Archive contains unsupported link entry “{path}”");
         }
+        if let Some(kind) = special {
+            bail!("Archive contains unsupported {} entry “{path}”", describe_file_type(kind));
+        }
         if is_encrypted {
             bail!("Password-protected archives are not supported yet");
         }
@@ -809,6 +876,31 @@ fn parse_listing(output: &str) -> Result<Vec<ArchiveEntry>> {
         bail!("Archive contains no extractable entries");
     }
     Ok(entries)
+}
+
+/// The type character of an `ls -l`-style mode string ending `value`, if one
+/// does.
+///
+/// 7zz prints ` lrwxrwxrwx`, `A lrwxrwxrwx` and `D drwxr-xr-x`; p7zip prefixes
+/// the mode with its own flag spellings such as `_` and `D_`. Only the last
+/// token matters, and only when it has a mode's ten characters, so a
+/// Windows-made entry with flags alone (`Attributes = A`) reads as no mode
+/// rather than as a file of type `A`.
+fn posix_file_type(value: &str) -> Option<char> {
+    let mode = value.split_whitespace().next_back()?;
+    (mode.len() == 10).then(|| mode.chars().next()).flatten()
+}
+
+/// What a mode's type character calls the entry, for a refusal.
+fn describe_file_type(kind: char) -> &'static str {
+    match kind {
+        'l' => "symbolic link",
+        'p' => "named pipe",
+        'c' => "character device",
+        'b' => "block device",
+        's' => "socket",
+        _ => "special",
+    }
 }
 
 fn validate_archive_path(value: &str) -> Result<()> {
@@ -834,7 +926,10 @@ mod tests {
     use crate::{
         fsops::{
             conflict::{ConflictDecision, ConflictRequest, ConflictResolver, ConflictResponse},
-            quarantine::{erase_replacement_quarantine, is_replacement_quarantine_name},
+            quarantine::{
+                erase_replacement_quarantine, is_internal_working_name,
+                is_replacement_quarantine_name,
+            },
         },
         testing::{Sandbox, no_cancel, read},
     };
@@ -847,6 +942,7 @@ mod tests {
         Symlink,
         Empty,
         OversizedSparse,
+        ReservedName,
     }
 
     impl ArchiveBackend for Fake {
@@ -860,6 +956,10 @@ mod tests {
             destination: &Path,
             _cancelled: Arc<AtomicBool>,
         ) -> Result<()> {
+            // The output root sits inside staging that the browser must hide
+            // while this runs and a later Marcel must be able to reclaim.
+            let staging = destination.parent().unwrap().file_name().unwrap();
+            assert!(is_internal_working_name(staging), "{staging:?}");
             match self {
                 Fake::One => fs::write(destination.join("file.txt"), b"test")?,
                 Fake::Multiple => {
@@ -870,6 +970,10 @@ mod tests {
                     std::os::unix::fs::symlink("../outside", destination.join("link"))?;
                 }
                 Fake::Empty => {}
+                Fake::ReservedName => {
+                    fs::create_dir(destination.join(".marcel-copy-x"))?;
+                    fs::write(destination.join(".marcel-copy-x/file.txt"), b"hidden")?;
+                }
                 Fake::OversizedSparse => {
                     let file = fs::File::create(destination.join("dishonest.bin"))?;
                     file.set_len(MAX_EXPANDED_BYTES + 1)?;
@@ -894,8 +998,17 @@ mod tests {
     }
 
     /// The real 7-Zip, when the environment has one.
+    ///
+    /// Without it the tests that need it pass without testing anything, which
+    /// a CI run should not be allowed to call green: `MARCEL_TEST_REQUIRE_7ZZ=1`
+    /// turns the skip into a failure.
     fn official_backend() -> Option<(SevenZipBackend, PathBuf)> {
-        let program = find_on_path("7zz", env::var_os("PATH").as_deref())?;
+        let Some(program) = find_on_path("7zz", env::var_os("PATH").as_deref()) else {
+            let required = env::var_os("MARCEL_TEST_REQUIRE_7ZZ").is_some_and(|value| value == "1");
+            assert!(!required, "MARCEL_TEST_REQUIRE_7ZZ=1 is set but no 7zz is on PATH");
+            eprintln!("skipping: no 7zz on PATH; set MARCEL_TEST_REQUIRE_7ZZ=1 to fail instead");
+            return None;
+        };
         Some((SevenZipBackend::from_program(program.clone()), program))
     }
 
@@ -904,7 +1017,7 @@ mod tests {
     fn seven_zip_pack(program: &Path, sandbox: &Sandbox, kind: &str, archive: &str, member: &str) {
         let status = Command::new(program)
             .current_dir(sandbox.root())
-            .args(["a", &format!("-t{kind}"), archive, member])
+            .args(["a", &format!("-t{kind}"), LITERAL_NAMES, archive, member])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -983,6 +1096,92 @@ Folder = -
                 .to_string()
                 .contains("Password-protected")
         );
+    }
+
+    /// `7zz l -slt` output for archives 7zz and GNU tar made from a tree with
+    /// links and special files; see `fixtures/`. Only tar has a `Symbolic
+    /// Link` key, so zip and 7z links are found by the mode 7zz appends to
+    /// `Attributes`, and the same reading catches every other non-file type.
+    #[test]
+    fn listing_parser_refuses_links_and_special_files_in_zip_7z_and_tar_listings() {
+        const ZIP: &str = include_str!("fixtures/listing-zip-symlink.txt");
+        const SEVEN_Z: &str = include_str!("fixtures/listing-7z-symlink.txt");
+        const TAR: &str = include_str!("fixtures/listing-tar-special.txt");
+
+        // The unabridged listings all name a link before anything else.
+        for (listing, first_link) in [(ZIP, "tree/abslink"), (SEVEN_Z, "tree/abslink")] {
+            let error = parse_listing(listing).unwrap_err().to_string();
+            assert!(error.contains("symbolic link") && error.contains(first_link), "{error}");
+        }
+        let error = parse_listing(TAR).unwrap_err().to_string();
+        assert!(error.contains("named pipe") && error.contains("special/fifo"), "{error}");
+
+        // Block by block: each unsupported type is refused by name, and the
+        // regular entries beside them are accepted with their kinds intact.
+        let blocks =
+            |listing: &'static str| listing.split("\n\n").filter(|block| !block.trim().is_empty());
+        // Tar's `Symbolic Link` key is read before its mode, so its refusal
+        // says "link" without the "symbolic".
+        let refused = [
+            ("tree/abslink", "symbolic link"),
+            ("tree/link", "symbolic link"),
+            ("special/link", "link"),
+            ("special/fifo", "named pipe"),
+            ("special/null", "character device"),
+        ];
+        let mut seen = 0;
+        for block in blocks(ZIP).chain(blocks(SEVEN_Z)).chain(blocks(TAR)) {
+            let path = block.lines().find_map(|line| line.strip_prefix("Path = ")).unwrap();
+            let result = parse_listing(block);
+            match refused.iter().find(|(refused, _)| *refused == path) {
+                Some((_, kind)) => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains(kind), "{path}: {error}");
+                    seen += 1;
+                }
+                None => {
+                    let [entry] = result.unwrap().try_into().unwrap_or_else(|_| panic!("{path}"));
+                    assert_eq!(entry.path, Path::new(path));
+                    assert_eq!(entry.is_dir, matches!(path, "tree" | "special"), "{path}");
+                }
+            }
+        }
+        assert_eq!(seen, 7, "two links each in zip and 7z, three non-files in tar");
+
+        // Types the fixtures could not carry (a block device needs one to
+        // exist; tar skips sockets), in the exact shapes 7zz and p7zip print.
+        for (attributes, kind) in [
+            ("Attributes =  brw-rw----", "block device"),
+            ("Attributes = A srwxr-xr-x", "socket"),
+            ("Attributes = _ prw-r--r--", "named pipe"),
+            ("Attributes = D_ lrwxrwxrwx", "symbolic link"),
+            ("Mode = crw-rw-rw-", "character device"),
+            ("Mode = brw-rw----", "block device"),
+        ] {
+            let listing = format!("Path = entry\nSize = 0\n{attributes}\n");
+            let error = parse_listing(&listing).unwrap_err().to_string();
+            assert!(error.contains(kind), "{attributes}: {error}");
+        }
+        // Windows flags alone are not a mode, and a `D` flag is still a folder.
+        let entries = parse_listing("Path = made-on-windows\nSize = 0\nAttributes = A\n").unwrap();
+        assert!(!entries[0].is_dir);
+        let entries = parse_listing("Path = folder\nSize = 0\nAttributes = D\n").unwrap();
+        assert!(entries[0].is_dir);
+        let entries =
+            parse_listing("Path = folder\nSize = 0\nAttributes = _ drwxr-xr-x\n").unwrap();
+        assert!(entries[0].is_dir);
+    }
+
+    /// The stem names a folder the user did not choose, so it must be a name
+    /// the user could have chosen.
+    #[test]
+    fn archive_stem_never_yields_a_name_marcel_would_refuse() {
+        for name in ["..zip", "...zip", ".marcel-copy-x.zip", " .zip", "..tar.gz"] {
+            assert_eq!(archive_stem(Path::new(name)), "Archive", "{name}");
+        }
+        assert_eq!(archive_stem(Path::new(".hidden.zip")), ".hidden");
+        assert_eq!(archive_stem(Path::new("a.b.zip")), "a.b");
+        assert_eq!(archive_stem(Path::new(".zip")), ".zip", "no stem to peel is not an error");
     }
 
     #[test]
@@ -1140,6 +1339,47 @@ Folder = -
         assert_eq!(sandbox.names(""), ["unsafe.zip"], "staging must be cleaned up");
     }
 
+    /// An archive whose one entry is named like Marcel's working files would
+    /// be published straight into hiding, and possibly swept; the archive's
+    /// own stem gets the same scrutiny when it names the folder.
+    #[test]
+    fn extraction_refuses_to_publish_under_a_reserved_name() {
+        let sandbox = Sandbox::new();
+        let archive = sandbox.file("bundle.zip", b"archive");
+        let error = extract(Fake::ReservedName, &archive).unwrap_err().to_string();
+        assert!(error.contains("reserved") && error.contains(".marcel-copy-x"), "{error}");
+        assert_eq!(sandbox.names(""), ["bundle.zip"], "staging must be cleaned up");
+
+        let archive = sandbox.file("..zip", b"archive");
+        let outcome = extract(Fake::Multiple, &archive).unwrap();
+        assert_eq!(outcome.published, sandbox.path("Archive"));
+        assert_eq!(read(outcome.published.join("two.txt")), b"two");
+    }
+
+    /// Staging is private while the backend writes; the folder that comes out
+    /// of it is the user's and gets the mode a folder they made would.
+    #[test]
+    fn multi_entry_extraction_publishes_a_folder_with_a_normal_mode() {
+        let sandbox = Sandbox::new();
+        let archive = sandbox.file("bundle.zip", b"archive");
+        let outcome = extract(Fake::Multiple, &archive).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let probe = sandbox.dir("made-by-hand");
+        assert_eq!(mode(&outcome.published), mode(&probe), "not the 0700 of staging");
+    }
+
+    /// The private runtime path the installed wrapper sets must not reach a
+    /// 7-Zip linked against another glibc.
+    #[test]
+    fn backend_process_does_not_inherit_the_private_library_path() {
+        let backend = SevenZipBackend::from_program(PathBuf::from("/nonexistent/7zz"));
+        let command = backend.command();
+        let removed = command
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new("LD_LIBRARY_PATH") && value.is_none());
+        assert!(removed);
+    }
+
     #[test]
     fn listing_limits_entry_count_and_declared_expanded_size() {
         let oversized = format!("Path = huge.bin\nSize = {}\nFolder = -\n", MAX_EXPANDED_BYTES + 1);
@@ -1240,6 +1480,47 @@ Folder = -
             assert_eq!(&outcome.published, member);
             assert_eq!(read(outcome.published), contents);
         }
+    }
+
+    /// 7-Zip treats `*` and `?` in a name as patterns unless told not to, and
+    /// `--` does not tell it. A file called `*.txt` must archive alone, and an
+    /// archive called `*.zip` must extract alone.
+    #[test]
+    fn official_backend_takes_wildcard_names_literally_when_available() {
+        let Some((backend, _)) = official_backend() else {
+            return;
+        };
+        let sandbox = Sandbox::new();
+        let star = sandbox.file("*.txt", b"star");
+        sandbox.file("z.txt", b"secret");
+        sandbox.file("a?.txt", b"question");
+        let archive = sandbox.path("*.zip");
+        create_zip_archive_with(&backend, std::slice::from_ref(&star), &archive, no_cancel())
+            .unwrap();
+        let listed = backend.list(&archive, no_cancel()).unwrap();
+        assert_eq!(
+            listed.iter().map(|entry| entry.path.as_path()).collect::<Vec<_>>(),
+            [Path::new("*.txt")]
+        );
+
+        let other = sandbox.file("other.txt", b"other");
+        let other_archive = sandbox.path("other.zip");
+        create_zip_archive_with(
+            &backend,
+            std::slice::from_ref(&other),
+            &other_archive,
+            no_cancel(),
+        )
+        .unwrap();
+        fs::remove_file(&star).unwrap();
+        fs::remove_file(&other).unwrap();
+        let outcome =
+            extract_archive_with(&backend, &archive, no_cancel(), &mut ConflictPolicy::refusing())
+                .unwrap();
+        assert_eq!(outcome.published, star);
+        assert_eq!(read(&star), b"star");
+        assert!(!other.exists(), "the sibling archive was not extracted too");
+        assert_eq!(sandbox.names(""), ["*.txt", "*.zip", "a?.txt", "other.zip", "z.txt"]);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use super::{
     local::{inspect, quarantined_name, rename_no_replace},
 };
 
-static REPLACEMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static WORKING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// How many bytes of replaced data one operation may hold aside for undo.
 ///
@@ -35,18 +35,59 @@ static REPLACEMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// user already asked.
 pub const REPLACEMENT_UNDO_BYTE_LIMIT: u64 = 1024 * 1024 * 1024;
 
-/// The name prefix Marcel gives an object it has displaced.
+/// What Marcel is keeping in a working file or directory of its own.
 ///
-/// The full name is `.marcel-replaced-<boot>-<pid>-<sequence>-<original>`.
-/// The process id lets a later Marcel tell its own live quarantines from
-/// those a dead process abandoned, which is the same rule permanent deletion
+/// Every kind is named `.marcel-<kind>-<boot>-<pid>-<sequence>-<rest>`. The
+/// process id lets a later Marcel tell its own live working state from what
+/// a dead process abandoned, which is the same rule permanent deletion
 /// already uses for its own remnants. The boot id is what makes that rule
 /// safe to act on: process ids are only meaningful within one boot and one
 /// pid namespace, and a name can arrive from anywhere — a backup restored
 /// mid-operation, an `rsync` from another machine, an archive made from a
-/// folder that had one. A name from another boot is never reclaimed, and is
-/// not hidden either, so it cannot become invisible garbage.
-const REPLACEMENT_PREFIX: &[u8] = b".marcel-replaced-";
+/// folder that had one. A name from another boot is never hidden, so it
+/// cannot become invisible garbage; whether it is reclaimed depends on the
+/// kind, see [`WorkingOwner::is_abandoned`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkingKind {
+    /// An object a replacement displaced, held so undo can put it back. The
+    /// rest of the name is the original's.
+    Replaced,
+    /// A copy's output, private until one rename publishes it. The rest of
+    /// the name is `tempfile`'s random suffix.
+    Copy,
+    /// An archive's extracted or created output, likewise.
+    Archive,
+}
+
+impl WorkingKind {
+    const ALL: [Self; 3] = [Self::Replaced, Self::Copy, Self::Archive];
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Replaced => ".marcel-replaced-",
+            Self::Copy => ".marcel-copy-",
+            Self::Archive => ".marcel-archive-",
+        }
+    }
+}
+
+/// What this process's working names of `kind` begin with, up to the sequence
+/// number: `.marcel-<kind>-<boot>-<pid>-`.
+fn owner_prefix(kind: WorkingKind) -> String {
+    format!("{}{}-{}-", kind.prefix(), boot_id(), std::process::id())
+}
+
+/// A fresh `.marcel-<kind>-<boot>-<pid>-<sequence>-`, for a staging directory
+/// that `tempfile::Builder` completes with its own random suffix.
+///
+/// Staging carries an owner for the same reason a replacement quarantine
+/// does: a crash mid-copy or mid-extraction leaves the directory behind, and
+/// only a name that says who made it lets the next Marcel reclaim it instead
+/// of hiding it forever.
+pub fn staging_prefix(kind: WorkingKind) -> String {
+    let sequence = WORKING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}{sequence}-", owner_prefix(kind))
+}
 
 /// This boot, as `/proc/sys/kernel/random/boot_id` names it: 32 hex digits.
 ///
@@ -81,7 +122,7 @@ const BOOT_ID_LENGTH: usize = 32;
 pub const RECOVERY_REMNANT_PREFIX: &str = ".marcel-recovered-";
 
 pub fn is_replacement_quarantine_name(name: &OsStr) -> bool {
-    os_bytes(name).starts_with(REPLACEMENT_PREFIX)
+    os_bytes(name).starts_with(WorkingKind::Replaced.prefix().as_bytes())
 }
 
 pub fn is_recovery_remnant_name(name: &OsStr) -> bool {
@@ -95,16 +136,16 @@ pub fn is_recovery_remnant_name(name: &OsStr) -> bool {
 /// file watches a cryptic sibling appear beside it and vanish later. Copy and
 /// archive staging have the same problem while an operation runs.
 ///
-/// Permanent-delete quarantines and recovery remnants are deliberately
-/// excluded: their recovery guidance points the user straight at the path, so
-/// hiding them would make that advice impossible to follow. So is a
-/// replacement quarantine from another boot: nothing will ever sweep it, and
-/// a file nothing sweeps and nothing shows is lost disk.
+/// Only a name this boot's Marcel wrote qualifies. Permanent-delete
+/// quarantines and recovery remnants are deliberately excluded: their recovery
+/// guidance points the user straight at the path, so hiding them would make
+/// that advice impossible to follow. So is anything from another boot, and any
+/// staging name from before staging carried an owner: the sweep either
+/// reclaims it on the next visit or never can, and a file nothing sweeps and
+/// nothing shows is lost disk. Showing it costs a glance; hiding it costs the
+/// disk.
 pub fn is_internal_working_name(name: &OsStr) -> bool {
-    let bytes = os_bytes(name);
-    quarantine_owner(name).is_some_and(|owner| owner.boot == boot_id().as_bytes())
-        || bytes.starts_with(b".marcel-copy-")
-        || bytes.starts_with(b".marcel-archive-")
+    working_owner(name).is_some_and(|owner| owner.boot == boot_id().as_bytes())
 }
 
 /// Whether a name is a replacement quarantine some other boot left behind.
@@ -112,7 +153,9 @@ pub fn is_internal_working_name(name: &OsStr) -> bool {
 /// Its owner is certainly gone, but so is the only context in which its name
 /// meant anything, so it is left for the user rather than swept.
 pub fn is_quarantine_from_another_boot(name: &OsStr) -> bool {
-    quarantine_owner(name).is_some_and(|owner| owner.boot != boot_id().as_bytes())
+    working_owner(name).is_some_and(|owner| {
+        owner.kind == WorkingKind::Replaced && owner.boot != boot_id().as_bytes()
+    })
 }
 
 fn os_bytes(name: &OsStr) -> &[u8] {
@@ -120,18 +163,42 @@ fn os_bytes(name: &OsStr) -> &[u8] {
     name.as_bytes()
 }
 
-/// Who made a replacement quarantine, as its name records it.
+/// Who made a working file, and what for, as its name records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct QuarantineOwner<'a> {
+struct WorkingOwner<'a> {
+    kind: WorkingKind,
     boot: &'a [u8],
     process: u32,
 }
 
-/// The owner a replacement quarantine's name carries, if it has the shape
-/// Marcel writes. Names from before the boot id was added parse as nobody's,
-/// which leaves them alone.
-fn quarantine_owner(name: &OsStr) -> Option<QuarantineOwner<'_>> {
-    let rest = os_bytes(name).strip_prefix(REPLACEMENT_PREFIX)?;
+impl WorkingOwner<'_> {
+    /// Whether nothing can want this any more.
+    ///
+    /// Within this boot the rule is the same for every kind: a dead owner can
+    /// neither undo nor finish, so what it left is garbage. Across boots the
+    /// kinds part ways. A replacement quarantine holds a displaced original,
+    /// and a name from another boot cannot prove Marcel made it — it may be
+    /// the only copy of something restored from a backup — so it is kept and
+    /// shown. Staging holds a partial copy of a source that still exists,
+    /// because neither a copy nor an extraction consumes its source, so
+    /// another boot is proof enough that nobody is coming back for it.
+    fn is_abandoned(&self) -> bool {
+        if self.boot == boot_id().as_bytes() {
+            self.process != std::process::id() && !process_is_running(self.process)
+        } else {
+            matches!(self.kind, WorkingKind::Copy | WorkingKind::Archive)
+        }
+    }
+}
+
+/// The owner a working name carries, if it has the shape Marcel writes.
+/// Names from before the boot id was added parse as nobody's, which leaves
+/// them alone — and visible.
+fn working_owner(name: &OsStr) -> Option<WorkingOwner<'_>> {
+    let bytes = os_bytes(name);
+    let (kind, rest) = WorkingKind::ALL
+        .into_iter()
+        .find_map(|kind| bytes.strip_prefix(kind.prefix().as_bytes()).map(|rest| (kind, rest)))?;
     let (boot, rest) = rest.split_at_checked(BOOT_ID_LENGTH)?;
     if !boot.iter().all(u8::is_ascii_hexdigit) {
         return None;
@@ -139,7 +206,7 @@ fn quarantine_owner(name: &OsStr) -> Option<QuarantineOwner<'_>> {
     let rest = rest.strip_prefix(b"-")?;
     let end = rest.iter().position(|byte| *byte == b'-')?;
     let process = std::str::from_utf8(&rest[..end]).ok()?.parse().ok()?;
-    Some(QuarantineOwner { boot, process })
+    Some(WorkingOwner { kind, boot, process })
 }
 
 /// Whether a process is still running, and so might still be able to undo.
@@ -151,30 +218,25 @@ pub fn process_is_running(process: u32) -> bool {
     Path::new(&format!("/proc/{process}")).exists()
 }
 
-/// Release replacement quarantines abandoned by processes that are gone.
+/// Release working state abandoned by processes that are gone: replacement
+/// quarantines, and copy and archive staging.
 ///
 /// Unlike an interrupted permanent deletion, this needs no user involvement.
 /// A replaced file is one the user chose to overwrite, and once the process
 /// holding its record is gone nothing can ever restore it, so it is provably
-/// unreachable rather than possibly-wanted. Returns how many were released.
+/// unreachable rather than possibly-wanted. Staging is the unfinished output
+/// of a copy or extraction whose source is still where it was, so a crash
+/// mid-way leaves nothing worth keeping — only up to the whole expanded size
+/// of an archive in the user's folder. Returns how many were released.
 ///
-/// Only this boot's quarantines qualify. The pid in a name from another boot
-/// says nothing about any process now, and the name alone cannot prove Marcel
-/// made the file; see [`REPLACEMENT_PREFIX`].
+/// What counts as abandoned is [`WorkingOwner::is_abandoned`]'s call.
 pub fn reclaim_abandoned_quarantines(directory: &Path) -> usize {
-    let current = std::process::id();
     let Ok(entries) = fs::read_dir(directory) else {
         return 0;
     };
     entries
         .flatten()
-        .filter(|entry| {
-            quarantine_owner(&entry.file_name()).is_some_and(|owner| {
-                owner.boot == boot_id().as_bytes()
-                    && owner.process != current
-                    && !process_is_running(owner.process)
-            })
-        })
+        .filter(|entry| working_owner(&entry.file_name()).is_some_and(|owner| owner.is_abandoned()))
         // No record survives to say what this was, so the identity read while
         // scanning stands in for one.
         .filter(|entry| {
@@ -231,10 +293,10 @@ pub(super) fn quarantine_for_replacement(path: &Path) -> Result<ReplacedItem> {
     let parent = path.parent().context("Replacement target has no parent directory")?;
     let name = path.file_name().context("Replacement target has no file name")?;
     let expected = FileIdentity::read(path)?;
-    let prefix = format!(".marcel-replaced-{}-{}-", boot_id(), std::process::id());
+    let prefix = owner_prefix(WorkingKind::Replaced);
 
     for _ in 0..1024 {
-        let sequence = REPLACEMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = WORKING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(quarantined_name(&prefix, sequence, name));
         match fs::symlink_metadata(&candidate) {
             Ok(_) => continue,
@@ -359,7 +421,7 @@ fn promote_to_recovery(item: &ReplacedItem) -> Result<PathBuf> {
     let parent = item.quarantine.parent().context("Quarantined item has no parent directory")?;
     let name = item.path.file_name().context("Replaced item has no file name")?;
     for _ in 0..1024 {
-        let sequence = REPLACEMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = WORKING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(quarantined_name(RECOVERY_REMNANT_PREFIX, sequence, name));
         match rename_no_replace(&item.quarantine, &candidate) {
             Ok(()) => return Ok(candidate),
@@ -373,4 +435,75 @@ fn promote_to_recovery(item: &ReplacedItem) -> Result<PathBuf> {
         }
     }
     bail!("Could not reserve a unique recovery path")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    /// A staging name says who made it, so the hiding rule and the sweep can
+    /// tell live work from what a crash left behind.
+    #[test]
+    fn staging_names_carry_a_parseable_owner() {
+        for kind in [WorkingKind::Copy, WorkingKind::Archive] {
+            let name = format!("{}a1b2c3", staging_prefix(kind));
+            let owner = working_owner(OsStr::new(&name)).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(owner.kind, kind);
+            assert_eq!(owner.boot, boot_id().as_bytes());
+            assert_eq!(owner.process, std::process::id());
+            assert!(is_internal_working_name(OsStr::new(&name)), "{name}");
+            assert!(!is_quarantine_from_another_boot(OsStr::new(&name)), "{name}");
+        }
+        assert_ne!(staging_prefix(WorkingKind::Copy), staging_prefix(WorkingKind::Copy));
+    }
+
+    /// Hidden is a promise that something will sweep. Staging from another
+    /// boot will be swept on the next visit but is shown until then, in case
+    /// the sweep cannot; a staging name without an owner will never be swept,
+    /// so it is shown for good.
+    #[test]
+    fn only_this_boots_working_names_are_hidden() {
+        let other_boot = "a".repeat(BOOT_ID_LENGTH);
+        for name in [
+            format!(".marcel-copy-{other_boot}-1-0-a1b2c3"),
+            format!(".marcel-archive-{other_boot}-1-0-a1b2c3"),
+            ".marcel-copy-1-0-staging".to_string(),
+            ".marcel-archive-abc".to_string(),
+            ".marcel-archive-".to_string(),
+        ] {
+            assert!(!is_internal_working_name(OsStr::new(&name)), "{name}");
+            assert!(!is_quarantine_from_another_boot(OsStr::new(&name)), "{name}");
+        }
+    }
+
+    /// Process id 0 is never a real process, so it stands in for a Marcel
+    /// that is gone.
+    #[test]
+    fn the_sweep_reclaims_dead_and_foreign_staging_but_only_dead_replacements() {
+        let sandbox = Sandbox::new();
+        let boot = boot_id();
+        let other_boot = "f".repeat(BOOT_ID_LENGTH);
+        let live = sandbox.dir(&format!("{}a1b2c3", staging_prefix(WorkingKind::Copy)));
+        let dead_copy = sandbox.dir(&format!(".marcel-copy-{boot}-0-0-a1b2c3"));
+        let dead_archive = sandbox.dir(&format!(".marcel-archive-{boot}-0-0-a1b2c3"));
+        sandbox.file(&format!(".marcel-archive-{boot}-0-0-a1b2c3/extracted/partial.bin"), b"?");
+        let foreign_copy = sandbox.dir(&format!(".marcel-copy-{other_boot}-0-0-a1b2c3"));
+        let foreign_replaced =
+            sandbox.file(&format!(".marcel-replaced-{other_boot}-0-0-report.txt"), b"?");
+        let legacy_copy = sandbox.dir(".marcel-copy-1-0-staging");
+        let legacy_archive = sandbox.dir(".marcel-archive-abc");
+        let ordinary = sandbox.file("report.txt", b"payload");
+
+        assert_eq!(reclaim_abandoned_quarantines(sandbox.root()), 3);
+
+        assert!(live.exists(), "this process may still be writing here");
+        assert!(!dead_copy.exists(), "a dead owner's copy staging is partial output");
+        assert!(!dead_archive.exists(), "a dead owner's extraction is partial output");
+        assert!(!foreign_copy.exists(), "staging from another boot has no one coming back");
+        assert!(foreign_replaced.exists(), "a displaced original from another boot is kept");
+        assert!(legacy_copy.exists(), "a name without an owner is shown, not swept");
+        assert!(legacy_archive.exists(), "a name without an owner is shown, not swept");
+        assert!(ordinary.exists(), "user data is never touched");
+    }
 }
