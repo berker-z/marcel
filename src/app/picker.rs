@@ -25,21 +25,21 @@ use gpui_component::{
 };
 
 use crate::{
-    browse::{
-        directory_session::ContentFilter,
-        entries::{FileEntry, display_filename},
-    },
+    browse::{directory_session::ContentFilter, entries::FileEntry},
     desktop::picker::{PickerMode, PickerRequest, PickerResponse},
     fsops::validate_entry_name,
+    names::{display_path_name, select_stem},
 };
 
-use super::{
-    Marcel, dialogs::Confirm, edits::select_stem, navigation::unblock, state::PickerState,
-};
+use super::{Marcel, dialogs::Confirm, navigation::unblock, state::PickerState};
 
 impl Marcel {
     /// A window that answers a file-chooser request.
-    pub fn new_picker(request: PickerRequest, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new_picker(
+        request: PickerRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let home_dir =
             std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
         let mut this = Self::new(request.initial_directory(&home_dir), window, cx);
@@ -85,7 +85,7 @@ impl Marcel {
 
     /// Where typing should land when a picker opens: the name field of a save
     /// dialog, otherwise the listing.
-    pub fn focus_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.picker.as_ref().and_then(|picker| picker.name_input.clone()) {
             // Select the stem, as Rename does: the name is the part that
             // usually changes, the extension the part the caller chose.
@@ -134,7 +134,7 @@ impl Marcel {
     }
 
     /// The caller withdrew the request; there is nobody left to answer.
-    pub fn withdraw_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn withdraw_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.answer_picker(PickerResponse::Closed, window, cx);
     }
 
@@ -244,12 +244,9 @@ impl Marcel {
                     return;
                 }
                 let description = match existing.as_slice() {
-                    [only] => format!(
-                        "“{}” already exists. Replace it?",
-                        only.file_name()
-                            .map(display_filename)
-                            .unwrap_or_else(|| only.display().to_string())
-                    ),
+                    [only] => {
+                        format!("“{}” already exists. Replace it?", display_path_name(only))
+                    }
                     _ => format!("{} of these files already exist. Replace them?", existing.len()),
                 };
                 this.confirm(

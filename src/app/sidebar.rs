@@ -245,7 +245,11 @@ impl Marcel {
         let bounds_path = place.path.clone();
         self.sidebar_row(("place", index), &place.path, active, !is_trash, cx)
             .when(is_trash, |this| {
-                this.on_click(cx.listener(|this, _, _, cx| this.start_trash_load(true, cx)))
+                this.on_click(cx.listener(|this, _, _, cx| {
+                    this.start_trash_load(true, cx);
+                    // The load clears the session's filter; the field follows.
+                    this.show_filter_text(String::new(), cx);
+                }))
             })
             .child(icon)
             .child(div().flex_none().text_base().child(place.label))

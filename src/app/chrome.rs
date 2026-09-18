@@ -15,7 +15,7 @@ use gpui_component::{
     resizable::{h_resizable, resizable_panel},
 };
 
-use crate::browse::entries::format_size;
+use crate::{browse::entries::format_size, names::display_path_name};
 
 use super::{
     MAX_PREVIEW_WIDTH, MIN_BROWSER_WIDTH, MIN_PREVIEW_WIDTH, Marcel,
@@ -236,11 +236,7 @@ impl Marcel {
         } else {
             format!("{} of {} items", snapshot.completed_items, snapshot.total_items)
         };
-        let current_name = snapshot.current_path.as_ref().map(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string())
-        });
+        let current_name = snapshot.current_path.as_deref().map(display_path_name);
         let cancel_button = Button::new("cancel-active-transfer")
             .small()
             .danger()
@@ -358,10 +354,6 @@ impl Marcel {
 
 impl Render for Marcel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.ui.search_input.read(cx).value().as_ref() != self.directory.filter_query {
-            let query = self.directory.filter_query.clone();
-            self.ui.search_input.update(cx, |input, cx| input.set_value(query, window, cx));
-        }
         let colors = cx.theme().colors;
         self.sidebar.place_drop_bounds.borrow_mut().clear();
         self.sidebar.bookmark_row_bounds.borrow_mut().clear();

@@ -180,12 +180,12 @@ pub fn init(chosen: Option<Palette>, cx: &mut App) {
     }
 }
 
-pub fn active() -> Palette {
+pub(crate) fn active() -> Palette {
     Palette::ALL[ACTIVE_PALETTE.load(Ordering::Relaxed) as usize]
 }
 
 /// The theme someone picked, if anyone has.
-pub fn chosen() -> Option<Palette> {
+pub(crate) fn chosen() -> Option<Palette> {
     match CHOSEN_PALETTE.load(Ordering::Relaxed) {
         NO_CHOICE => None,
         index => Some(Palette::ALL[index as usize]),
@@ -193,12 +193,12 @@ pub fn chosen() -> Option<Palette> {
 }
 
 /// Apply a palette as the user's choice, which outlives this process.
-pub fn choose(palette: Palette, cx: &mut App) {
+pub(crate) fn choose(palette: Palette, cx: &mut App) {
     apply(palette, cx);
     CHOSEN_PALETTE.store(palette as u8, Ordering::Relaxed);
 }
 
-pub fn apply(palette: Palette, cx: &mut App) {
+pub(crate) fn apply(palette: Palette, cx: &mut App) {
     let typography = {
         let theme = Theme::global(cx);
         (

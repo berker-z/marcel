@@ -39,6 +39,7 @@ mod state;
 
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -51,10 +52,10 @@ use crate::{
     browse::{directory_session::DirectorySession, entries::FileEntry, history::NavigationHistory},
     config::{self, BrowserState},
     operations::{OperationCoordinator, OperationEvent},
+    surface::{self, Report},
 };
 
 pub use actions::init_key_bindings;
-pub(crate) use edits::select_stem;
 use preview::PreviewState;
 use state::{DragState, PickerState, SidebarState, UiState};
 
@@ -93,7 +94,7 @@ pub struct Marcel {
 }
 
 impl Marcel {
-    pub fn new(start_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(start_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let start_dir = normalize_start_directory(start_dir);
         let home_dir =
             std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| start_dir.clone());
@@ -118,16 +119,25 @@ impl Marcel {
             ),
         ];
         let mono_font_size = gpui_component::ActiveTheme::theme(&**cx).mono_font_size;
-        let state_path = config::path(&home_dir, config::STATE_FILE);
-        let browser_state = config::load(&state_path).unwrap_or_else(|error| {
-            eprintln!("Could not load Marcel browser state: {error:#}");
-            BrowserState::default()
-        });
+        let state_file = config::StateFile::open(config::path(&home_dir, config::STATE_FILE));
+        let browser_state = state_file.state;
+        let state_unreadable = state_file.read_only().map(str::to_string);
+        // One writer per window, saving in order on the blocking pool. A save
+        // that fails — including one the file refuses because it could not be
+        // read — is said on this window, not on stderr.
         let (state_save_sender, state_save_receiver) = async_channel::unbounded();
-        let state_save_task = cx.background_executor().spawn(async move {
+        let state_file = Arc::new(state_file);
+        let origin = Self::origin(window);
+        let state_save_task = cx.spawn(async move |_, cx| {
             while let Ok(browser_state) = state_save_receiver.recv().await {
-                if let Err(error) = config::save(&state_path, browser_state) {
-                    eprintln!("Could not save Marcel browser state: {error:#}");
+                let file = state_file.clone();
+                let saved = cx
+                    .background_executor()
+                    .spawn(smol::unblock(move || file.save(browser_state)))
+                    .await;
+                if let Err(error) = saved {
+                    let report = Report::Error(format!("Could not save view settings: {error:#}"));
+                    surface::deliver(origin, Some(report), cx);
                 }
             }
         });
@@ -171,15 +181,53 @@ impl Marcel {
         };
         this.start_places_load(home_dir, cx);
         this.start_directory_load(true, cx);
+        // Said once the window is up: the file is left as it is, and the
+        // user should know why their settings will not stick this session.
+        if let Some(reason) = state_unreadable {
+            this.report(Report::Error(reason), cx);
+        }
         this
     }
 
-    pub fn focus_browser(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_browser(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.browser_focus.focus(window, cx);
     }
 
     pub(crate) fn origin(window: &Window) -> AnyWindowHandle {
         window.window_handle()
+    }
+
+    /// Show `report` on this window from a place that has no `Window` in hand.
+    ///
+    /// The window cannot be borrowed while this view is being updated inside
+    /// it, so the report waits for the update to finish and then goes to the
+    /// window this view was last drawn in.
+    pub(crate) fn report(&self, report: Report, cx: &mut Context<Self>) {
+        let view = cx.entity_id();
+        cx.defer(move |cx| {
+            cx.with_window(view, |window, cx| report.show(window, cx));
+        });
+    }
+
+    /// Make the filter field show `query` from a place that has no `Window`
+    /// in hand: a navigation that cleared the session's filter.
+    ///
+    /// The field lays its text out against the window, so, as with `report`,
+    /// the write waits for the current update to finish. Nothing else keeps
+    /// the field and the session's query aligned: the field's own edits reach
+    /// the session through its Change event, and a programmatic write emits
+    /// no such event.
+    pub(crate) fn show_filter_text(&self, query: String, cx: &mut Context<Self>) {
+        if self.ui.search_input.read(cx).value().as_ref() == query {
+            return;
+        }
+        let input = self.ui.search_input.clone();
+        let view = cx.entity_id();
+        cx.defer(move |cx| {
+            cx.with_window(view, |window, cx| {
+                input.update(cx, |input, cx| input.set_value(query, window, cx));
+            });
+        });
     }
 
     /// Hand work to the application's operation owner on this window's behalf.

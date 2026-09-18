@@ -28,7 +28,7 @@ impl Report {
 }
 
 /// Show a report on whichever window still speaks for `origin`.
-pub fn deliver(origin: AnyWindowHandle, report: Option<Report>, cx: &mut AsyncApp) {
+pub(crate) fn deliver(origin: AnyWindowHandle, report: Option<Report>, cx: &mut AsyncApp) {
     let Some(report) = report else {
         return;
     };

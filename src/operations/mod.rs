@@ -51,6 +51,7 @@ use crate::{
         },
         undo_operation,
     },
+    names::display_path_name,
     surface::{self, Report},
 };
 
@@ -60,13 +61,13 @@ mod conflict_dialog;
 const PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Debug)]
-pub struct FileClipboard {
+pub(crate) struct FileClipboard {
     pub mode: TransferMode,
     pub paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationProgressKind {
+pub(crate) enum OperationProgressKind {
     Copy,
     Move,
     Compress,
@@ -89,7 +90,7 @@ impl OperationProgressKind {
 }
 
 /// What the progress card says about the running operation.
-pub struct ActiveOperationProgress {
+pub(crate) struct ActiveOperationProgress {
     pub kind: OperationProgressKind,
     pub source_count: usize,
     pub detail: String,
@@ -104,7 +105,7 @@ pub struct ActiveOperationProgress {
 /// destination folder now reconciles from the operation itself instead of
 /// waiting for a watcher event, and a window that has since closed simply is
 /// not there to hear it.
-pub enum OperationEvent {
+pub(crate) enum OperationEvent {
     /// Paths the operation created, changed, or removed.
     Applied {
         changes: DirectoryChanges,
@@ -142,12 +143,12 @@ pub fn init(cx: &mut App) {
 }
 
 /// The application's operation owner.
-pub fn global(cx: &App) -> Entity<OperationCoordinator> {
+pub(crate) fn global(cx: &App) -> Entity<OperationCoordinator> {
     cx.global::<GlobalOperations>().0.clone()
 }
 
 #[derive(Default)]
-pub struct OperationCoordinator {
+pub(crate) struct OperationCoordinator {
     journal: OperationJournal,
     clipboard: Option<FileClipboard>,
     busy: bool,
@@ -445,8 +446,7 @@ impl OperationCoordinator {
         cx: &mut Context<Self>,
     ) -> Report {
         let path = committed.path().to_path_buf();
-        let name =
-            path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = display_path_name(&path);
         let undoable = self.apply_committed(committed, vec![path], origin, cx);
         Report::Success(format!(
             "{verb} “{name}”{}",
@@ -981,7 +981,7 @@ fn backing_paths(records: &[TrashRecord]) -> Vec<PathBuf> {
 }
 
 fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> String {
-    let name = operation.path().file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+    let name = display_path_name(operation.path());
     let redo = direction == HistoryDirection::Redo;
     match (operation, redo) {
         (OperationRecord::CreateDirectory { .. }, false) => {
@@ -1001,8 +1001,7 @@ fn history_message(operation: &OperationRecord, direction: HistoryDirection) -> 
         }
         (OperationRecord::Restore { .. }, true) => "Restored item(s) again".to_string(),
         (OperationRecord::Rename { source, .. }, false) => {
-            let original =
-                source.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+            let original = display_path_name(source);
             format!("Restored name “{original}”")
         }
         (OperationRecord::Rename { .. }, true) => format!("Renamed to “{name}” again"),

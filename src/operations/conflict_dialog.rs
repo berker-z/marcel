@@ -27,6 +27,7 @@ use gpui_component::{
 use crate::{
     browse::entries::display_filename,
     fsops::conflict::{ConflictDecision, ConflictResponse, PendingConflict, unique_name_in},
+    names::select_stem,
     surface,
 };
 
@@ -208,5 +209,5 @@ fn ask(
     });
     // The suggested name is selected, so typing over it replaces it and Rename
     // works without reaching for the pointer.
-    crate::app::select_stem(input, request.source_is_directory, window, cx);
+    select_stem(input, request.source_is_directory, window, cx);
 }

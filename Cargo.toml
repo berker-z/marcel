@@ -30,11 +30,16 @@ zed-rev = "5e1fd392f67e27fa1da91bad43eef7db1a5dec23"
 name = "marcel-rs"
 path = "src/main.rs"
 
+# Marcel is Linux-only (src/lib.rs refuses any other target), so the desktop
+# dependencies are ordinary ones rather than a `cfg(target_os)` table that
+# would suggest the rest of the crate builds without them.
 [dependencies]
 anyhow = "1"
+ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 async-channel = "2.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = "0.18.2"
+freedesktop-icons = "0.4"
 globset = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
@@ -54,10 +59,6 @@ trash = "5"
 unicode-width = "0.2"
 url = "2"
 xattr = "1"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
-freedesktop-icons = "0.4"
 zbus = { version = "5.18", default-features = false, features = ["async-io"] }
 
 [profile.dev]

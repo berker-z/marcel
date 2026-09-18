@@ -17,7 +17,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, h_flex};
 
-use crate::browse::entries::EntryKind;
+use crate::{browse::entries::EntryKind, names::display_path_name};
 
 use super::{
     Marcel, POINTER_EDGE_SCROLL_INTERVAL,
@@ -56,7 +56,7 @@ impl FileDrag {
     /// The floating label under the pointer.
     pub fn preview(&self, cx: &mut gpui::App) -> gpui::Entity<DragPreview> {
         let label = match self.paths.as_ref() {
-            [only] => file_name(only),
+            [only] => display_path_name(only),
             paths => format!("{} selected items", paths.len()),
         };
         cx.new(|_| DragPreview { label, detail: "Move" })
@@ -71,14 +71,8 @@ pub struct BookmarkDrag {
 
 impl BookmarkDrag {
     pub fn preview(&self, cx: &mut gpui::App) -> gpui::Entity<DragPreview> {
-        cx.new(|_| DragPreview { label: file_name(&self.path), detail: "Bookmark" })
+        cx.new(|_| DragPreview { label: display_path_name(&self.path), detail: "Bookmark" })
     }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 pub struct DragPreview {
