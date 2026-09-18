@@ -765,8 +765,8 @@ mod tests {
         session.merge_batch(vec![
             file("report.txt"),
             file(&format!(".marcel-replaced-{}-1-0-report.txt", crate::fsops::boot_id())),
-            dir(".marcel-copy-1-0-staging"),
-            dir(".marcel-archive-abc"),
+            dir(&format!(".marcel-copy-{}-1-0-a1b2c3", crate::fsops::boot_id())),
+            dir(&format!(".marcel-archive-{}-1-0-a1b2c3", crate::fsops::boot_id())),
             dir(".marcel-delete-1-0-old"),
             dir(".config"),
         ]);

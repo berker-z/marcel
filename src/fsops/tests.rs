@@ -844,17 +844,23 @@ fn an_identity_refresh_refuses_an_object_it_did_not_commit() {
 
 #[test]
 fn marcel_working_names_are_recognized_without_catching_user_data() {
-    let mine = format!(".marcel-replaced-{}-1-0-report.txt", boot_id());
-    for name in [mine.as_str(), ".marcel-copy-1-0-abc", ".marcel-archive-abc"] {
+    let boot = boot_id();
+    let mine = format!(".marcel-replaced-{boot}-1-0-report.txt");
+    let copy_staging = format!(".marcel-copy-{boot}-1-0-a1b2c3");
+    let archive_staging = format!(".marcel-archive-{boot}-1-0-a1b2c3");
+    for name in [mine.as_str(), copy_staging.as_str(), archive_staging.as_str()] {
         assert!(is_internal_working_name(OsStr::new(name)), "{name}");
     }
     // Recovery guidance points the user straight at the first of these, and
-    // nothing will ever sweep the next two, so the browser shows them too.
+    // nothing will ever sweep the next four (staging without an owner in its
+    // name included), so the browser shows them too.
     let other_boot = format!(".marcel-replaced-{}-1-0-report.txt", "a".repeat(32));
     for name in [
         ".marcel-delete-1-0-report.txt",
         other_boot.as_str(),
         ".marcel-replaced-1-0-report.txt",
+        ".marcel-copy-1-0-abc",
+        ".marcel-archive-abc",
         "report.txt",
         ".hidden",
         "marcel-replaced-1-0",
