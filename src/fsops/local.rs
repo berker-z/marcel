@@ -5,9 +5,15 @@
 //! directory creation that keeps derived data private. Keeping them in one
 //! short file is what makes the safety story reviewable.
 
-use std::{ffi::OsString, fs, io, path::Path};
+use std::{
+    ffi::{OsStr, OsString},
+    fs, io,
+    os::fd::{AsFd as _, BorrowedFd},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context as _, Result, bail};
+use rustix::fs::OFlags;
 
 /// Name the path an error is about, the way every message in this layer
 /// does: `Could not create “/home/me/photos”`.
@@ -83,6 +89,14 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
 }
 
+/// What every open in this file starts from.
+///
+/// `O_CLOEXEC` keeps a descriptor out of the helpers Marcel spawns, and
+/// `O_NOCTTY` means a terminal device planted under a file's name cannot
+/// become the process's controlling terminal when Marcel opens it. `std` adds
+/// the first on its own; the raw `openat` calls below have to ask for it.
+const OPEN_FLAGS: OFlags = OFlags::CLOEXEC.union(OFlags::NOCTTY);
+
 /// Open `path` for reading, refusing anything but a regular file.
 ///
 /// `open(2)` on a FIFO with no writer blocks forever, and a blocked open cannot
@@ -90,13 +104,21 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
 /// life of the process. Opening with `O_NONBLOCK` and verifying the *opened*
 /// descriptor closes that hole without a stat-then-open race; on a regular
 /// file the flag has no effect on reads.
+///
+/// Symbolic links are followed: previews and openers work on what the user
+/// pointed at. The copier, which recreates links instead, uses
+/// [`open_regular_file_at`].
 pub fn open_regular_file(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     let file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .custom_flags((OFlags::NONBLOCK | OFlags::NOCTTY).bits() as i32)
         .open(path)?;
+    ensure_regular(file, path)
+}
+
+fn ensure_regular(file: fs::File, path: &Path) -> io::Result<fs::File> {
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -104,6 +126,98 @@ pub fn open_regular_file(path: &Path) -> io::Result<fs::File> {
         ));
     }
     Ok(file)
+}
+
+/// The directory a name is resolved in when the caller holds no parent: the
+/// working directory, which makes an absolute path behave as itself.
+pub const CWD: BorrowedFd<'static> = rustix::fs::CWD;
+
+/// Take hold of `name` inside `dir` without opening it.
+///
+/// An `O_PATH` descriptor refers to the object itself — its `metadata()` is
+/// what `lstat` would report — but opens nothing, so a FIFO cannot block it
+/// and a device cannot react to it. It is the copier's `symlink_metadata`,
+/// with the difference that a real open of the same name can then be checked
+/// against the object that was inspected. The final component is never
+/// followed.
+pub fn hold_entry(dir: BorrowedFd<'_>, name: &Path) -> io::Result<fs::File> {
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        OPEN_FLAGS | OFlags::PATH | OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )?;
+    Ok(fs::File::from(fd))
+}
+
+/// Take hold of the directory `path` leads to, following links on the way.
+///
+/// Like [`hold_entry`] this opens nothing, so it needs only search permission
+/// on the directory — the self-containment check walks ancestors the user may
+/// not be allowed to list — and it fails with `ENOTDIR` for anything else.
+pub fn hold_directory(dir: BorrowedFd<'_>, path: &Path) -> io::Result<fs::File> {
+    let fd = rustix::fs::openat(
+        dir,
+        path,
+        OPEN_FLAGS | OFlags::PATH | OFlags::DIRECTORY,
+        rustix::fs::Mode::empty(),
+    )?;
+    Ok(fs::File::from(fd))
+}
+
+/// Open the directory `name` inside `dir`, refusing to follow a link there.
+///
+/// Walking a tree one descriptor per level is what closes the window a
+/// path-based walker leaves open: once a level is held, renaming a component
+/// above it cannot redirect the rest of the walk.
+pub fn open_directory_at(dir: BorrowedFd<'_>, name: &Path) -> io::Result<fs::File> {
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        OPEN_FLAGS | OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )?;
+    Ok(fs::File::from(fd))
+}
+
+/// [`open_regular_file`] relative to a held directory, refusing to follow a
+/// link in the final component.
+pub fn open_regular_file_at(dir: BorrowedFd<'_>, name: &Path) -> io::Result<fs::File> {
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        OPEN_FLAGS | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )?;
+    ensure_regular(fs::File::from(fd), name)
+}
+
+/// The target of a held symbolic link.
+///
+/// Reading through the descriptor rather than the path means the link whose
+/// metadata was inspected is the link whose target is copied.
+pub fn read_link_target(link: &fs::File) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let target = rustix::fs::readlinkat(link.as_fd(), "", Vec::new())?;
+    Ok(PathBuf::from(OsString::from_vec(target.into_bytes())))
+}
+
+/// [`sorted_children`] for a held directory: its names in name order, fully
+/// read before any is used.
+pub fn sorted_child_names(dir: &fs::File) -> io::Result<Vec<OsString>> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let mut names = rustix::fs::Dir::read_from(dir)?
+        .map(|entry| {
+            entry
+                .map(|entry| OsStr::from_bytes(entry.file_name().to_bytes()).to_owned())
+                .map_err(io::Error::from)
+        })
+        .filter(|name| !matches!(name.as_deref(), Ok(name) if name == "." || name == ".."))
+        .collect::<io::Result<Vec<_>>>()?;
+    names.sort();
+    Ok(names)
 }
 
 pub fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
