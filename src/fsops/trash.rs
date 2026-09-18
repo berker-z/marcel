@@ -14,7 +14,8 @@
 use std::{
     collections::HashSet,
     ffi::OsStr,
-    fs,
+    fs, io,
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -26,7 +27,7 @@ use super::{
     PathFailure, TransferProgress,
     delete::delete_trash_backings,
     identity::{FileIdentity, ObjectKey},
-    local::{PathOccupancy, inspect, path_occupancy, rename_no_replace},
+    local::{PathOccupancy, create_private_dir_all, inspect, path_occupancy, rename_no_replace},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,10 +233,19 @@ fn ensure_home_trash() {
     }
 }
 
+/// The Trash holds whatever the user threw away, so it is exactly as private as
+/// their files: the specification asks for `0700`, and leaving the mode to the
+/// umask on a shared machine would show every deleted document to the group.
+/// The directories above it (`~/.local/share`) are shared with every other
+/// program and keep the ordinary mode.
 fn ensure_trash_dir(trash_dir: &Path) {
-    if !trash_dir.is_dir() {
-        let _ = fs::create_dir_all(trash_dir);
+    if trash_dir.is_dir() {
+        return;
     }
+    if let Some(parent) = trash_dir.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = create_private_dir_all(trash_dir);
 }
 
 pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
@@ -245,6 +255,17 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         Err(error) => {
             return TrashOutcome::all_failed(paths, || {
                 format!("Could not resolve the system Trash: {error}")
+            });
+        }
+    };
+    let sites = match home_trash_dir()
+        .context("Neither XDG_DATA_HOME nor HOME is set")
+        .and_then(|home_trash| TrashSites::discover(&home_trash))
+    {
+        Ok(sites) => sites,
+        Err(error) => {
+            return TrashOutcome::all_failed(paths, || {
+                format!("Could not resolve the system Trash: {error:#}")
             });
         }
     };
@@ -270,8 +291,8 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
             ));
             continue;
         }
-        let source_object = match fs::symlink_metadata(path) {
-            Ok(metadata) => ObjectKey::of(&metadata),
+        let source = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
             Err(error) => {
                 failures.push(PathFailure::new(
                     path,
@@ -280,6 +301,11 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
                 continue;
             }
         };
+        if let Some(refusal) = sites.crossing_refusal(path, &source) {
+            failures.push(PathFailure::new(path, refusal));
+            continue;
+        }
+        let source_object = ObjectKey::of(&source);
         match trash::delete(path) {
             Ok(()) => successful.push((path.clone(), source_object)),
             Err(error) => failures.push(PathFailure::new(
@@ -294,7 +320,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         return TrashOutcome { records: Vec::new(), completed, failures, undo_unavailable: false };
     }
 
-    let mut new_items = match trash::os_limited::list() {
+    let new_items = match trash::os_limited::list() {
         Ok(items) => {
             items.into_iter().filter(|item| !existing_ids.contains(&item.id)).collect::<Vec<_>>()
         }
@@ -314,6 +340,27 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         }
     };
 
+    let records = bind_records(successful, new_items, &mut failures);
+    TrashOutcome {
+        undo_unavailable: records.len() != completed.len(),
+        records,
+        completed,
+        failures,
+    }
+}
+
+/// Bind each path that reached the Trash to the entry now holding it.
+///
+/// The entry has to hold the very object that left the original path. A
+/// payload with another key is a copy the `trash` crate made when its rename
+/// failed with `EXDEV` (see [`TrashSites`]); the restore rename could not bring
+/// a copy back across that boundary either, so the entry is reported and kept
+/// out of the record rather than promised to Undo.
+fn bind_records(
+    successful: Vec<(PathBuf, ObjectKey)>,
+    mut new_items: Vec<trash::TrashItem>,
+    failures: &mut Vec<PathFailure>,
+) -> Vec<TrashRecord> {
     let mut records = Vec::with_capacity(successful.len());
     for (original, source_object) in successful {
         let Some(index) = match_trashed_item(&new_items, &original, source_object) else {
@@ -324,6 +371,15 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
             continue;
         };
         match TrashRecord::from_item(new_items.swap_remove(index)) {
+            Ok(record) if record.payload_identity.key != source_object => {
+                failures.push(PathFailure::new(
+                    &original,
+                    format!(
+                        "“{}” reached Trash as a copy on another filesystem, so Undo cannot return it",
+                        original.display()
+                    ),
+                ));
+            }
             Ok(record) => records.push(record),
             Err(error) => failures.push(PathFailure::new(
                 &original,
@@ -333,13 +389,169 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
             )),
         }
     }
+    records
+}
 
-    TrashOutcome {
-        undo_unavailable: records.len() != completed.len(),
-        records,
-        completed,
-        failures,
+/// Where the `trash` crate will put an item, worked out by the crate's own
+/// rules (`freedesktop.rs`, `delete_all_canonicalized`): the home Trash when
+/// the item's mount is the home Trash's mount, otherwise `.Trash/<uid>` or
+/// `.Trash-<uid>` at the top of the item's mount.
+///
+/// Marcel needs the answer before the crate is called. The crate meets a rename
+/// that fails with `EXDEV` by copying and deleting instead, which drops
+/// extended attributes, ACLs, and times, and the copy it leaves in the Trash is
+/// a new object that the restore rename cannot move back either. A mount table
+/// cannot see every such boundary — a Btrfs subvolume inside a mount is one —
+/// so the deciding comparison is between device numbers, not paths.
+struct TrashSites {
+    home_trash: PathBuf,
+    /// Mount points, longest first, so the first prefix match is the deepest.
+    mounts: Vec<PathBuf>,
+    uid: u32,
+}
+
+impl TrashSites {
+    fn discover(home_trash: &Path) -> Result<Self> {
+        Ok(Self::new(
+            canonicalize_or_parents(home_trash),
+            read_mount_points()?,
+            rustix::process::getuid().as_raw(),
+        ))
     }
+
+    fn new(home_trash: PathBuf, mut mounts: Vec<PathBuf>, uid: u32) -> Self {
+        mounts.sort_by_key(|mount| std::cmp::Reverse(mount.as_os_str().len()));
+        Self { home_trash, mounts, uid }
+    }
+
+    fn topdir_of<'a>(&'a self, path: &Path) -> &'a Path {
+        self.mounts
+            .iter()
+            .find(|mount| path.starts_with(mount))
+            .map_or(Path::new("/"), PathBuf::as_path)
+    }
+
+    /// The Trash directory the crate will rename `path` into.
+    fn trash_for(&self, path: &Path) -> PathBuf {
+        // The crate resolves the parent and keeps the final name as given.
+        let path = resolve_parent_of(path);
+        let topdir = self.topdir_of(&path);
+        if topdir == self.topdir_of(&self.home_trash) {
+            return self.home_trash.clone();
+        }
+        let shared = topdir.join(".Trash");
+        if is_valid_shared_trash(&shared) {
+            let mine = shared.join(self.uid.to_string());
+            if mine.is_dir() {
+                return mine;
+            }
+        }
+        topdir.join(format!(".Trash-{}", self.uid))
+    }
+
+    /// Why `path` must not be handed to the crate, if its rename would cross
+    /// a filesystem boundary. Worded the way a move refuses the same thing.
+    fn crossing_refusal(&self, path: &Path, source: &fs::Metadata) -> Option<String> {
+        let trash = self.trash_for(path);
+        // A Trash whose device cannot be read is left for the crate to report.
+        let trash_device = device_of_nearest_existing(&trash)?;
+        (source.dev() != trash_device).then(|| {
+            format!(
+                "Could not move “{}” to Trash: it is on a different filesystem from “{}”; cross-filesystem moves are not supported yet",
+                path.display(),
+                trash.display()
+            )
+        })
+    }
+}
+
+/// The spec's shared `$topdir/.Trash`: a real directory with the sticky bit,
+/// as the crate's `folder_validity` checks it.
+fn is_valid_shared_trash(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_dir() && metadata.mode() & 0o1000 != 0)
+}
+
+/// The device of `path`, or of the nearest ancestor that exists when the crate
+/// has yet to create it.
+fn device_of_nearest_existing(path: &Path) -> Option<u64> {
+    let mut candidate = path;
+    loop {
+        match fs::metadata(candidate) {
+            Ok(metadata) => return Some(metadata.dev()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                candidate = candidate.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// `canonicalize`, extended to a path that does not exist yet by resolving
+/// the deepest ancestor that does — the crate's `canonicalize_path_or_parents`.
+fn canonicalize_or_parents(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut candidate = path;
+    loop {
+        match candidate.canonicalize() {
+            Ok(resolved) => {
+                return missing.iter().rev().fold(resolved, |path, name| path.join(name));
+            }
+            Err(_) => match (candidate.parent(), candidate.file_name()) {
+                (Some(parent), Some(name)) => {
+                    missing.push(name);
+                    candidate = parent;
+                }
+                _ => return path.to_path_buf(),
+            },
+        }
+    }
+}
+
+/// Every mount point the kernel reports, from the same two tables the crate
+/// reads with `getmntent`, which is where the escaping of spaces in a mount
+/// path is undone.
+fn read_mount_points() -> Result<Vec<PathBuf>> {
+    let table = fs::read("/proc/self/mounts")
+        .or_else(|_| fs::read("/etc/mtab"))
+        .context("Could not read the mount table")?;
+    Ok(parse_mount_points(&table))
+}
+
+fn parse_mount_points(table: &[u8]) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    table
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.split(|byte| *byte == b' ').nth(1))
+        .map(|field| PathBuf::from(std::ffi::OsString::from_vec(unescape_mount_field(field))))
+        .collect()
+}
+
+/// Undo the `\ooo` octal escapes `/proc/mounts` uses for the bytes that would
+/// break its space-separated format.
+fn unescape_mount_field(field: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(field.len());
+    let mut bytes = field.iter().copied();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            out.push(byte);
+            continue;
+        }
+        let digits = [bytes.next(), bytes.next(), bytes.next()];
+        let value = digits.iter().try_fold(0u8, |acc, digit| {
+            let digit = digit.filter(|digit| (b'0'..=b'7').contains(digit))? - b'0';
+            acc.checked_mul(8)?.checked_add(digit)
+        });
+        match value {
+            Some(value) => out.push(value),
+            None => {
+                out.push(b'\\');
+                out.extend(digits.iter().flatten());
+            }
+        }
+    }
+    out
 }
 
 /// Which new Trash entry holds `original`, if exactly one can be said to.
@@ -425,39 +637,23 @@ pub fn restore_trash_records(
 ) -> Result<TrashRestore, TrashMutationFailure> {
     // Prepare: every check runs before the first rename, so a refusal here
     // provably left the Trash untouched.
+    let mut targets = Vec::with_capacity(records.len());
     for record in records {
-        let prepared = record.validate().and_then(|()| {
-            let original = record.original_path();
-            let parent = fs::symlink_metadata(&record.original_parent).with_context(|| {
-                format!(
-                    "Cannot restore “{}”: its original parent no longer exists",
-                    original.display()
-                )
-            })?;
-            if !parent.file_type().is_dir() {
-                bail!(
-                    "Cannot restore “{}”: its original parent is no longer a directory",
-                    original.display()
-                );
-            }
-            match path_occupancy(original) {
-                Ok(PathOccupancy::Occupied) => {
-                    bail!("Cannot restore: “{}” is already occupied", original.display())
-                }
-                Ok(PathOccupancy::Vacant) => Ok(()),
-                Err(error) => Err(error).at("Could not inspect restore target", original),
-            }
-        });
-        if let Err(error) = prepared {
-            return Err(TrashMutationFailure::unchanged(error));
+        match record.validate().and_then(|()| RestoreTarget::prepare(record)) {
+            Ok(target) => targets.push(target),
+            Err(error) => return Err(TrashMutationFailure::unchanged(error)),
         }
     }
 
-    let mut restored = Vec::with_capacity(records.len());
-    for record in records {
-        let original = record.original_path();
-        // Commit.
-        if let Err(error) = rename_no_replace(&record.backing_path, original) {
+    let mut restored: Vec<&RestoreTarget> = Vec::with_capacity(records.len());
+    for target in &targets {
+        let original = target.record.original_path();
+        // Commit, into the directory the preparation resolved and not into
+        // whatever the path resolves to now.
+        let committed = target.parent_key.validate(&target.parent).and_then(|()| {
+            rename_no_replace(&target.record.backing_path, &target.path).map_err(Into::into)
+        });
+        if let Err(error) = committed {
             let message = format!("Could not restore “{}” from Trash: {error}", original.display());
             if restored.is_empty() {
                 // The first rename failed, so the Trash is untouched and the
@@ -473,7 +669,7 @@ pub fn restore_trash_records(
                 )),
             });
         }
-        restored.push(record);
+        restored.push(target);
     }
 
     // Finalize. Every payload is already restored, so nothing below may fail
@@ -482,17 +678,59 @@ pub fn restore_trash_records(
     // user data.
     let mut result = Vec::with_capacity(records.len());
     let mut undoable = true;
-    for record in records {
-        let _ = record.remove_matching_info();
-        match fs::symlink_metadata(record.original_path()) {
+    for target in &targets {
+        let _ = target.record.remove_matching_info();
+        match fs::symlink_metadata(&target.path) {
             Ok(metadata) => result.push(TrashRecord {
                 payload_identity: FileIdentity::of(&metadata),
-                ..record.clone()
+                ..target.record.clone()
             }),
             Err(_) => undoable = false,
         }
     }
     Ok(TrashRestore { records: result, undoable })
+}
+
+/// Where one record's payload goes back to, resolved once.
+///
+/// The original parent is resolved through any symbolic links, so a user whose
+/// `~/Documents` is a link to another disk can restore into it; the identity of
+/// the directory it resolves to is what the commit then checks. The parent is
+/// never created: a Trash entry whose home has gone is for the user to place,
+/// not for Marcel to guess a directory for.
+struct RestoreTarget<'r> {
+    record: &'r TrashRecord,
+    parent: PathBuf,
+    parent_key: ObjectKey,
+    path: PathBuf,
+}
+
+impl<'r> RestoreTarget<'r> {
+    fn prepare(record: &'r TrashRecord) -> Result<Self> {
+        let original = record.original_path();
+        let parent = record.original_parent.canonicalize().with_context(|| {
+            format!("Cannot restore “{}”: its original parent no longer exists", original.display())
+        })?;
+        let parent_metadata = inspect(&parent)?;
+        if !parent_metadata.file_type().is_dir() {
+            bail!(
+                "Cannot restore “{}”: its original parent is no longer a directory",
+                original.display()
+            );
+        }
+        let name = original
+            .file_name()
+            .with_context(|| format!("Cannot restore “{}”: it has no name", original.display()))?;
+        let path = parent.join(name);
+        match path_occupancy(&path) {
+            Ok(PathOccupancy::Occupied) => {
+                bail!("Cannot restore: “{}” is already occupied", original.display())
+            }
+            Ok(PathOccupancy::Vacant) => {}
+            Err(error) => return Err(error).at("Could not inspect restore target", original),
+        }
+        Ok(Self { record, parent, parent_key: ObjectKey::of(&parent_metadata), path })
+    }
 }
 
 pub fn retrash_records(records: &[TrashRecord]) -> Result<Vec<TrashRecord>, TrashMutationFailure> {
@@ -554,10 +792,10 @@ fn backing_path_from_info(info_path: &Path) -> Result<PathBuf> {
     Ok(trash_root.join("files").join(name))
 }
 
-fn rollback_restored(restored: &[&TrashRecord]) -> Result<()> {
-    for record in restored.iter().rev() {
-        rename_no_replace(record.original_path(), &record.backing_path).with_context(|| {
-            format!("Could not return “{}” to Trash", record.original_path().display())
+fn rollback_restored(restored: &[&RestoreTarget<'_>]) -> Result<()> {
+    for target in restored.iter().rev() {
+        rename_no_replace(&target.path, &target.record.backing_path).with_context(|| {
+            format!("Could not return “{}” to Trash", target.record.original_path().display())
         })?;
     }
     Ok(())
@@ -666,6 +904,30 @@ mod tests {
         assert!(kept.is_file());
     }
 
+    /// The Trash holds what the user threw away, so it gets the mode the
+    /// specification asks for rather than whatever the umask allows.
+    #[test]
+    fn a_new_home_trash_is_private_and_an_existing_one_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let sandbox = Sandbox::new();
+        let trash_dir = sandbox.path("share/Trash");
+
+        ensure_trash_dir(&trash_dir);
+
+        assert_eq!(fs::metadata(&trash_dir).unwrap().permissions().mode() & 0o777, 0o700);
+        // The directories above it are shared with every other program.
+        assert_ne!(
+            fs::metadata(sandbox.path("share")).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let existing = sandbox.dir("other/Trash");
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_trash_dir(&existing);
+        assert_eq!(fs::metadata(&existing).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+
     #[test]
     fn an_unwritable_parent_leaves_the_trash_directory_to_the_caller() {
         // Best effort by design: the resolution that follows reports why it
@@ -729,6 +991,128 @@ mod tests {
         let many =
             unreadable_trash_warning(&["bad.trashinfo".to_string(), "worse".to_string()]).unwrap();
         assert!(many.contains('2'), "{many}");
+    }
+
+    /// A Trash laid out the way the `trash` crate expects one, so its choice
+    /// of destination can be predicted without calling it. Mount points are
+    /// given resolved, as the kernel reports them.
+    fn sites(sandbox: &Sandbox, mounts: &[&str]) -> TrashSites {
+        TrashSites::new(
+            sandbox.dir("home/.local/share/Trash"),
+            mounts.iter().map(|mount| sandbox.dir(mount).canonicalize().unwrap()).collect(),
+            4242,
+        )
+    }
+
+    #[test]
+    fn the_trash_the_crate_would_choose_is_predicted_by_its_rules() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let sandbox = Sandbox::new();
+        let sites = sites(&sandbox, &["disk", "disk/nested"]);
+        let disk = sandbox.path("disk").canonicalize().unwrap();
+
+        // The same mount as the home Trash: the home Trash.
+        assert_eq!(sites.trash_for(&sandbox.path("home/report.pdf")), sites.home_trash);
+        // Another mount without a shared Trash: `.Trash-<uid>` at its top,
+        // and the deepest mount wins.
+        assert_eq!(sites.trash_for(&sandbox.path("disk/a.txt")), disk.join(".Trash-4242"));
+        assert_eq!(
+            sites.trash_for(&sandbox.path("disk/nested/b.txt")),
+            disk.join("nested/.Trash-4242")
+        );
+        // A path spelled through a link is placed by where it resolves.
+        std::os::unix::fs::symlink(&disk, sandbox.path("shortcut")).unwrap();
+        assert_eq!(sites.trash_for(&sandbox.path("shortcut/a.txt")), disk.join(".Trash-4242"));
+
+        // A shared `.Trash` counts only with the sticky bit and a directory
+        // for this user inside it.
+        let shared = sandbox.dir("disk/.Trash");
+        sandbox.dir("disk/.Trash/4242");
+        assert_eq!(sites.trash_for(&sandbox.path("disk/a.txt")), disk.join(".Trash-4242"));
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert_eq!(sites.trash_for(&sandbox.path("disk/a.txt")), disk.join(".Trash/4242"));
+    }
+
+    /// The deciding comparison is between devices, because a mount table
+    /// cannot see every boundary a rename fails to cross. `/proc` is the one
+    /// filesystem guaranteed to be another device than any writable one.
+    #[test]
+    fn a_source_on_another_device_than_its_trash_is_refused_before_the_crate_copies_it() {
+        let sandbox = Sandbox::new();
+        let source = sandbox.file("home/report.pdf", b"payload");
+        let metadata = fs::symlink_metadata(&source).unwrap();
+
+        let same_device = sites(&sandbox, &[]);
+        assert_eq!(same_device.crossing_refusal(&source, &metadata), None);
+
+        let Ok(proc_metadata) = fs::metadata("/proc") else {
+            return;
+        };
+        assert_ne!(proc_metadata.dev(), metadata.dev(), "the fixture needs two devices");
+        let other_device =
+            TrashSites::new(PathBuf::from("/proc/marcel-test/Trash"), Vec::new(), 4242);
+        let refusal = other_device.crossing_refusal(&source, &metadata).expect("must refuse");
+        assert!(refusal.contains("different filesystem"), "{refusal}");
+        assert!(refusal.contains("cross-filesystem moves are not supported yet"), "{refusal}");
+        assert_eq!(read(&source), b"payload", "a refusal touches nothing");
+    }
+
+    /// One new Trash entry claiming the original path, as the crate lists it.
+    fn listed_item(sandbox: &Sandbox, original: &Path) -> trash::TrashItem {
+        let name = original.file_name().unwrap();
+        let info_path = sandbox.file(
+            &format!("Trash/info/{}.trashinfo", name.to_string_lossy()),
+            format!("[Trash Info]\nPath={}\n", original.display()),
+        );
+        trash::TrashItem {
+            id: info_path.into_os_string(),
+            name: name.to_os_string(),
+            original_parent: original.parent().unwrap().to_path_buf(),
+            time_deleted: 0,
+        }
+    }
+
+    /// Should the crate copy anyway, the entry holds a new object. Binding it
+    /// would promise an Undo whose rename fails across the same boundary, so
+    /// it is reported instead and the outcome says Undo is unavailable.
+    #[test]
+    fn an_entry_holding_a_copy_rather_than_the_object_is_not_bound_for_undo() {
+        let sandbox = Sandbox::new();
+        let original = sandbox.file("original/note.txt", b"payload");
+        let source_object = ObjectKey::of(&fs::symlink_metadata(&original).unwrap());
+        let items = vec![listed_item(&sandbox, &original)];
+        sandbox.dir("Trash/files");
+
+        // A copy, as the crate leaves one after `EXDEV`.
+        fs::copy(&original, sandbox.path("Trash/files/note.txt")).unwrap();
+        fs::remove_file(&original).unwrap();
+        let mut failures = Vec::new();
+        let records =
+            bind_records(vec![(original.clone(), source_object)], items.clone(), &mut failures);
+        assert!(records.is_empty(), "{records:?}");
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].message.contains("copy"), "{}", failures[0].message);
+
+        // The object itself, as a rename leaves it: bound.
+        fs::remove_file(sandbox.path("Trash/files/note.txt")).unwrap();
+        let original = sandbox.file("original/note.txt", b"payload");
+        let source_object = ObjectKey::of(&fs::symlink_metadata(&original).unwrap());
+        fs::rename(&original, sandbox.path("Trash/files/note.txt")).unwrap();
+        let mut failures = Vec::new();
+        let records = bind_records(vec![(original.clone(), source_object)], items, &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].original_path(), original);
+    }
+
+    #[test]
+    fn mount_points_are_read_the_way_getmntent_reads_them() {
+        let table = b"tmpfs /tmp tmpfs rw 0 0\n/dev/sda1 /mnt/my\\040disk ext4 rw 0 0\nnone /odd\\x path 0 0\n\n";
+        assert_eq!(
+            parse_mount_points(table),
+            [PathBuf::from("/tmp"), PathBuf::from("/mnt/my disk"), PathBuf::from("/odd\\x")]
+        );
     }
 
     #[test]
@@ -802,6 +1186,51 @@ mod tests {
         let record = seeded_record(&sandbox, "Trash", &sandbox.path("missing"), "note.txt");
 
         assert!(restore_trash_records(std::slice::from_ref(&record)).is_err());
+        assert!(record.backing_path.exists());
+    }
+
+    /// `~/Documents` as a link to another disk is an ordinary setup, and an
+    /// entry another program trashed from there names the link as its parent.
+    /// Refusing that as "no longer a directory" made such entries unrestorable.
+    #[test]
+    fn restore_follows_a_linked_original_parent_into_the_directory_it_names() {
+        let sandbox = Sandbox::new();
+        let real = sandbox.dir("disk/Documents");
+        let link = sandbox.path("home/Documents");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let record = seeded_record(&sandbox, "Trash", &link, "note.txt");
+
+        let restored = restore_trash_records(std::slice::from_ref(&record)).unwrap();
+
+        assert_eq!(read(real.join("note.txt")), b"payload");
+        assert!(!record.backing_path.exists());
+        assert!(!record.info_path.exists());
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays");
+        assert!(restored.undoable);
+        assert_eq!(restored.records[0].original_path(), link.join("note.txt"));
+    }
+
+    /// A link whose target is gone is a missing parent, and a link to a file
+    /// is not a directory; neither is created or replaced.
+    #[test]
+    fn restore_refuses_a_linked_parent_that_does_not_resolve_to_a_directory() {
+        let sandbox = Sandbox::new();
+        let dangling = sandbox.path("dangling");
+        std::os::unix::fs::symlink(sandbox.path("gone"), &dangling).unwrap();
+        let record = seeded_record(&sandbox, "TrashA", &dangling, "note.txt");
+        let error = restore_trash_records(std::slice::from_ref(&record)).unwrap_err();
+        assert!(error.error.to_string().contains("no longer exists"), "{}", error.error);
+        assert!(!error.committed);
+        assert!(record.backing_path.exists());
+        assert!(!sandbox.path("gone").exists());
+
+        let file = sandbox.file("file", b"");
+        let to_file = sandbox.path("to-file");
+        std::os::unix::fs::symlink(&file, &to_file).unwrap();
+        let record = seeded_record(&sandbox, "TrashB", &to_file, "note.txt");
+        let error = restore_trash_records(std::slice::from_ref(&record)).unwrap_err();
+        assert!(error.error.to_string().contains("no longer a directory"), "{}", error.error);
         assert!(record.backing_path.exists());
     }
 
