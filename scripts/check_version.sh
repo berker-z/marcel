@@ -8,7 +8,8 @@
 # the only place it can be pinned, so the lock is held to the value Cargo.toml
 # records.
 #
-# Run with a tag name to also check that the tag matches:
+# Run with a tag name to also check that the tag matches, and that the newest
+# AppStream release is not dated before the commit being tagged:
 #
 #   scripts/check_version.sh v0.1.0
 
@@ -103,6 +104,31 @@ if [ -n "$tag" ]; then
 	else
 		report "requested tag" "$tag"
 	fi
+fi
+
+# Software centres show the release date from the AppStream file, and nothing
+# else reads it, so it drifted a month behind the tree once already. The tag
+# is immutable, so the date has to be at least the date of the commit being
+# tagged. Ordinary commits after a release legitimately postdate it, which is
+# why this only fails when a tag was asked for; without one it is a reminder.
+echo
+release_date="$(sed -nE 's/.*<release version="[^"]+" date="([0-9]{4}-[0-9]{2}-[0-9]{2})".*/\1/p' \
+	nix/io.github.berker_z.Marcel.metainfo.xml | head -n 1)"
+head_date="$(git log -1 --format=%cs HEAD 2>/dev/null || true)"
+if [ -z "$release_date" ]; then
+	report "AppStream newest release date" "NOT FOUND"
+	fail=1
+elif [ -z "$head_date" ]; then
+	report "AppStream newest release date" "$release_date  (no git history to compare against)"
+elif [ "$release_date" \< "$head_date" ]; then
+	if [ -n "$tag" ]; then
+		report "AppStream newest release date" "$release_date  <- older than HEAD's $head_date"
+		fail=1
+	else
+		report "AppStream newest release date" "$release_date  (HEAD is $head_date; set the date in the release commit)"
+	fi
+else
+	report "AppStream newest release date" "$release_date"
 fi
 
 echo

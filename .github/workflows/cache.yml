@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Reclaim runner disk
         run: |
@@ -32,12 +32,12 @@ jobs:
             /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           df -h /
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - uses: cachix/cachix-action@v17
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: marcel-rs
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"

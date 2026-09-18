@@ -112,7 +112,7 @@ immutable v* tag
 
 When the user's requested derivation exactly matches a cached output, Nix
 downloads the substitute and its closure instead of compiling Marcel. A local
-build remains the correct fallback when the cache lacks that derivation—for
+build remains the correct fallback when the cache lacks that derivation, for
 example after an input override or a lock-file update that the release builders
 have not built. The flake advertises the public Cachix substituter and its
 signing key. The compiled-dependency output is published first so subsequent
@@ -133,8 +133,9 @@ Packaging follow-up checks (2026-09-16):
       derivation, and a release-profile edit invalidates it.
 - [x] Verify the standalone recipe still produces the previously cached path.
 - [x] Pass fmt, Clippy, all 268 tests, and cache-workflow lint.
-- [ ] Complete a release build of the new Crane recipe and publish both
-      outputs before advancing downstream system lockfiles to it.
+- [x] Complete a release build of the new Crane recipe and publish both
+      outputs before advancing downstream system lockfiles to it. Every
+      `cache.yml` run on `master` has done this since.
 
 ## Current packaging audit
 
@@ -178,9 +179,13 @@ part of the release gate.
 
 The flake exports `homeManagerModules.default` and `nixosModules.default`.
 Both install a configured Marcel wrapper through `programs.marcel.settings`;
-the supported settings are initial palette, explicit icon theme, and UI font
-family. The overlay's `pkgs.marcel-rs.withSettings` constructor exposes the same
-mechanism without a module. The configured application-specific D-Bus service
+the supported settings are the initial palette (`theme`), an explicit icon
+theme (`icon_theme`), the UI font family (`ui_font`), and `media`, which puts
+`ffmpeg-headless` on the wrapper's `PATH` for video posters and the audio
+formats symphonia does not decode. The overlay's `pkgs.marcel-rs.withSettings`
+constructor exposes the same mechanism without a module. The wrapper is only
+environment variables and `PATH`; the section on runtime environment variables
+below lists what each one does. The configured application-specific D-Bus service
 points at the wrapper so desktop activation receives the same settings as a
 shell launch. Neither module changes MIME associations nor claims generic
 FileManager1 ownership unless asked: `programs.marcel.defaultDirectoryHandler`
@@ -192,12 +197,37 @@ directory before `XDG_DATA_DIRS` and keeps the first file it finds for a
 name, which is what makes the choice deterministic when Nautilus or Dolphin
 is also installed. Both options default to off.
 
-List/grid view and hidden-file visibility are interaction state rather than
-declarative package configuration. Marcel loads them from
-`$XDG_CONFIG_HOME/marcel/state.conf` (falling back to
-`~/.config/marcel/state.conf`) and serially writes a tiny versioned replacement
-file after each switch. A missing or invalid file recovers to grid view with
-hidden files visible.
+List/grid view, hidden-file visibility, the sort key and direction, and the
+theme picked in Settings are interaction state rather than declarative package
+configuration. Marcel loads them from `$XDG_CONFIG_HOME/marcel/state.conf`
+(falling back to `~/.config/marcel/state.conf`) and serially writes a tiny
+versioned replacement file after each switch (`src/config.rs`). A missing or
+invalid file recovers to grid view with hidden files visible, sorted by name.
+The theme line is only written once a theme has been chosen in Settings;
+until then `MARCEL_THEME`, and so the module's `settings.theme`, decides.
+
+### Runtime environment variables
+
+Everything Marcel reads from the environment, apart from the XDG base
+directories. The Nix wrappers set the first five; the rest are for running
+Marcel outside them or for debugging.
+
+| Variable | Effect |
+| --- | --- |
+| `MARCEL_THEME` | The palette to start with, by the name shown in Settings (`nord`, `tokyo-night`, ...; `src/theme.rs` lists them). A theme chosen in Settings is saved to `state.conf` and wins over this. |
+| `MARCEL_ICON_THEME` | A freedesktop icon theme name to use ahead of Marcel's bundled Nordzy subset and the desktop's theme. |
+| `MARCEL_FONT_FAMILY` | An installed font family to use for the interface instead of the bundled Marcel Iosevka subset. |
+| `MARCEL_CLAIM_FILE_MANAGER1` | Set (to anything) to also own `org.freedesktop.FileManager1` on the session bus. The `file-manager1-service` variant sets it. If another file manager owns the name, Marcel says so on stderr and carries on. |
+| `MARCEL_CLAIM_FILE_CHOOSER` | Set (to anything) to also own `org.freedesktop.impl.portal.desktop.marcel`, the portal backend name. The `file-chooser-portal` variant sets it. Same fallback as above. |
+| `MARCEL_7ZZ` | Path to the 7-Zip executable. Without it Marcel looks for `libexec/marcel/7zz` beside its own `bin/`, then `7zz` and `7z` on `PATH`. A value that is not an executable file is an error, not a fallback. |
+| `MARCEL_ENABLE_RAR` | `1`, `true`, `yes`, or `on` enables RAR and CBR extraction. Off by default because the free `7zz` cannot read them; set it only with a 7-Zip that can. |
+| `MARCEL_ASSET_DIR` | A directory holding `icons/nordzy`, looked at before `share/marcel/icons/nordzy` beside the executable and before the source tree. For running an uninstalled build against installed assets. |
+
+Two more are read only by the test suite: `MARCEL_TEST_DBUS_SESSION_CONFIG`
+names the `dbus-daemon` configuration the private-bus test starts a session
+with (`nix/test-session.conf`; the dev shell and the package set it), and
+`MARCEL_PRIVATE_BUS_TEST_CHILD` marks the re-executed test binary as the
+child half of that test. Neither means anything to a running Marcel.
 
 ### Marcel application icon
 
@@ -492,7 +522,8 @@ jobs:
   rather than installing a toolchain and a list of system libraries, because
   the dev shell already declares that list and a second copy of it would drift.
 - `metadata` validates the AppStream file and runs `scripts/check_version.sh`
-  (versions and the Zed revision).
+  (versions and the Zed revision, and on a tag the tag name and the AppStream
+  release date, which has to be no older than the tagged commit).
   Both are quick, so they do not queue behind a compile.
 - `package` runs `nix build .#marcel-rs` on `x86_64-linux` and `aarch64-linux`,
   then checks the installed tree for the binary, metainfo, desktop entry, D-Bus
@@ -528,7 +559,14 @@ between a mistake and the tag, which is why it is not optional.
 
 The `quality` job needs `dbus-run-session` and a session bus configuration with
 no system includes; see `nix/test-session.conf` for why. The dev shell provides
-both.
+both, and `7zz` for the archive tests. Those tests skip on a machine without
+7-Zip, which is fine locally and not in CI, so the job and the package's
+`preCheck` set `MARCEL_TEST_REQUIRE_7ZZ=1` to turn that skip into a failure.
+
+The actions are pinned to commit SHAs with the version in a trailing comment.
+Bumping one means resolving the new tag (`gh api
+repos/<owner>/<repo>/git/ref/tags/<tag>`, then dereferencing an annotated tag
+object) and updating both.
 
 ## Release automation
 
@@ -545,7 +583,7 @@ For every release it should:
 
    ```sh
    cargo fmt --check
-   cargo clippy --all-targets --all-features -- -D warnings
+   cargo clippy --all-targets -- -D warnings
    cargo test --all-targets
    ```
 
@@ -586,8 +624,9 @@ Before creating the first tag:
 - [x] Add a changelog and write `0.1.0` release notes.
 - [ ] Verify the version is consistent everywhere. `scripts/check_version.sh`
       does this, and takes the intended tag as an argument:
-      `scripts/check_version.sh v0.1.0`. CI runs it without the tag argument on
-      tags and pull requests.
+      `scripts/check_version.sh v0.1.0`, which also checks the AppStream
+      release date against the commit. CI passes the tag name on tag builds
+      and runs the file-only comparison on pull requests.
 - [ ] Run all Rust quality checks.
 - [ ] Run the release-only Nix build and flake check.
 - [ ] Install and launch from a clean committed revision.

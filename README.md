@@ -20,7 +20,9 @@ Linux only. Wayland is the tested target. X11 mostly works, but dragging files o
 
 ### Browsing
 
-List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. `Ctrl+L` to type a path, or just start typing to filter the folder with fuzzy matching. Sort by name, modified time, size, or kind from the button next to the location bar, or by clicking a column heading in list view; folders stay first. Folders update as they change on disk instead of reloading, and 50,000 entries remain comfortable.
+List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. `Ctrl+L` to type a path, or just start typing to filter the folder with fuzzy matching. Sort by name, modified time, size, or kind from the button next to the location bar, or by clicking a column heading in list view; folders stay first. Folders update as they change on disk instead of reloading, and 50,000 entries remain comfortable. Refresh, in the right-click menu on empty space, is there for the filesystems that do not send change notifications.
+
+The Trash is the last place in the sidebar. It shows what is in every freedesktop Trash Marcel can find, previews it, and offers Restore where the item menu would otherwise say Move to Trash; Empty Trash is in the empty-space menu there, behind the same confirmation as permanent deletion.
 
 ### Preview
 
@@ -36,7 +38,7 @@ Properties (`Ctrl+I`, or `Alt+Enter` if your hands know KDE) shows what an item 
 
 ### Desktop integration
 
-On Wayland, files drag to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. One process per session; each `marcel-rs` invocation opens a new window rather than taking over one you were using.
+On Wayland, files drag to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. One process per session; each `marcel-rs` invocation opens a new window rather than taking over one you were using. Enter opens a file with its default application; Open With… in the item menu asks the desktop's application chooser instead. Open in Terminal, in the empty-space menu, starts a terminal in the current folder, trying `xdg-terminal-exec`, then `$TERMINAL`, then the usual emulators.
 
 Marcel can also be the file dialog. Applications on a modern Linux desktop ask xdg-desktop-portal for open and save dialogs, and the portal hands the job to a backend. Marcel implements that backend, so with it enabled the dialog from a browser, an editor, or a chat client is a Marcel window: the same browser, preview, bookmarks, and filter, plus a bar with the name field, the file-type filter the application asked for, Cancel, and the accept button. If Marcel is not running, D-Bus starts it. How to turn it on is under Installing.
 
@@ -52,7 +54,7 @@ Several themes, picked in Settings and remembered. Marcel ships its own icons an
 | Home / End                                       | First / last item    |
 | Page Up / Page Down                              | Move a page          |
 | Enter                                            | Open                 |
-| Escape                                           | Clear selection      |
+| Escape                                           | Dismiss the frontmost thing, see below |
 | Ctrl+Up                                          | Parent folder        |
 | Ctrl+Left / Ctrl+Right                           | Back / forward       |
 | Ctrl+L                                           | Edit the location    |
@@ -69,6 +71,8 @@ Several themes, picked in Settings and remembered. Marcel ships its own icons an
 | Ctrl+I or Alt+Enter                              | Properties           |
 | Ctrl+Z / Ctrl+Y                                  | Undo / redo          |
 
+Escape has a stack of meanings and takes the topmost one: it closes an open context menu, then cancels a running file operation (from the window that started it), then clears the filter, then cancels a rename or location edit in progress, then closes a file-chooser dialog, and only when none of those apply does it clear the selection.
+
 ## What it does not do
 
 Known gaps, roughly in the order they are likely to be addressed:
@@ -76,9 +80,14 @@ Known gaps, roughly in the order they are likely to be addressed:
 * No search. You can filter the folder you are in, but there is no recursive search by name or content.
 * Moving between filesystems is refused rather than quietly turned into a copy and a delete. Copying across drives works.
 * No removable volumes, network shares, or remote locations. Local paths only.
+* The file clipboard is Marcel's own. Ctrl+C in Marcel and Ctrl+V in Nautilus, a terminal, or a chat client does nothing, and the other way round does nothing either. Drag and drop is how files cross into other applications. Copy Path puts the paths on the real clipboard as text.
+* Undo history lives in the running process. Close Marcel and the operations it could have undone are just history.
+* No dual pane. Open a second window (Open in New Window on a folder, or run `marcel-rs` again) and drag between the two.
 * No video playback; the preview pane shows a frame and a play button for your player.
+* Create Link is in the menu, greyed out, until it exists.
+* Some conventional shortcuts are not bound: `Ctrl+H` for hidden files (it is a toggle in the sidebar footer and the empty-space menu), `F5` for refresh, `Alt+Up` and `Alt+Left` for parent and back (Marcel uses `Ctrl+Up` and `Ctrl+Left`), and `Ctrl+Shift+Z` for redo (`Ctrl+Y`).
 * The window needs to be at least 900 pixels wide; below that the preview pane runs off the edge. Marcel asks the desktop not to shrink it further, and a tiling compositor can insist anyway.
-* Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer.
+* Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer, and screen readers see nothing.
 * RAR extraction needs a separate build. The default package ships only free components.
 * Nix is the only packaging route today. One file operation runs at a time; a second is refused until the first finishes.
 
@@ -174,6 +183,8 @@ programs.marcel.settings = {
 Leaving `icon_theme` and `ui_font` as `null` keeps Marcel's bundled icons and font, which is the default.
 
 View mode, sort order, and hidden files are interaction state, not Nix options; Marcel remembers them in `$XDG_CONFIG_HOME/marcel/state.conf`. The theme is both: `settings.theme` is the default, and a theme picked in Settings is written to the same file and wins from then on. Delete its `theme=` line to follow the Nix option again.
+
+Under the module, these settings are environment variables on a wrapper: `MARCEL_THEME`, `MARCEL_ICON_THEME`, `MARCEL_FONT_FAMILY`, and `PATH` for `media`. Without Nix you can set them yourself, along with `MARCEL_7ZZ` to point at a 7-Zip, `MARCEL_ENABLE_RAR=1` if that 7-Zip can read RAR, and `MARCEL_CLAIM_FILE_MANAGER1` / `MARCEL_CLAIM_FILE_CHOOSER` to take the D-Bus names the two package variants take. The full list, with what each one does, is in [`docs/release.md`](docs/release.md#runtime-environment-variables).
 
 ## Building
 

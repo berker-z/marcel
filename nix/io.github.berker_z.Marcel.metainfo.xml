@@ -23,6 +23,7 @@
     <p>Browsing:</p>
     <ul>
       <li>List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar</li>
+      <li>Sort by name, modified time, size, or kind, with folders first</li>
       <li>Type a path directly, or start typing to filter the current folder with fuzzy matching</li>
       <li>Marquee and keyboard selection</li>
       <li>Folders update as they change on disk rather than reloading</li>
@@ -30,15 +31,25 @@
     <p>Preview:</p>
     <ul>
       <li>Text and code files, images, continuously scrolling PDFs, and folder listings</li>
+      <li>Audio plays in the pane, with cover art, tags, a seekable waveform, and spectrum bars</li>
+      <li>Video shows a poster frame, its duration and codecs, and a button that hands it to your player</li>
       <li>Thumbnails come from the freedesktop cache, shared with other applications</li>
     </ul>
     <p>File operations:</p>
     <ul>
       <li>Copy and move with progress and cancellation</li>
       <li>Replace, rename, skip, or merge when a destination is taken, answered once for the rest of the operation</li>
-      <li>Undo and redo across copy, move, rename, Trash, restore, archive creation, and extraction</li>
+      <li>Undo and redo across copy, move, duplicate, rename, Trash, restore, archive creation, extraction, and permission changes</li>
+      <li>Move To, through a small folder dialog</li>
+      <li>Properties with editable permission bits, ownership, timestamps, and what the preview loaders know about the file</li>
       <li>Permanent deletion behind a confirmation, deliberately outside undo history</li>
       <li>Zip archive creation and extraction of most common formats</li>
+    </ul>
+    <p>Desktop:</p>
+    <ul>
+      <li>A file manager over D-Bus, so "show in folder" from other applications opens Marcel</li>
+      <li>An xdg-desktop-portal FileChooser backend, so the open and save dialogs of other applications can be Marcel windows</li>
+      <li>File drag and drop with other applications on Wayland</li>
     </ul>
     <p>
       Marcel checks that files are still what and where it thinks they are
@@ -90,13 +101,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
-    <release version="0.1.0" date="2026-08-21">
+    <release version="0.1.0" date="2026-09-18">
       <description>
         <p>
-          First release. Browsing, previews, selection and filtering,
-          bookmarks, incremental directory watching, undoable copy, move,
-          rename, Trash and restore, archive creation and extraction, D-Bus
-          file-manager registration, and bilateral Wayland file drag and drop.
+          First release. Browsing with sorting and filtering, bookmarks,
+          incremental directory watching, a preview pane for text, images,
+          PDFs, audio, and video posters, undoable copy, move, duplicate,
+          rename, Move To, Trash and restore, archive creation and extraction,
+          a Properties dialog with editable permissions, D-Bus file-manager
+          registration, an xdg-desktop-portal FileChooser backend, and
+          bilateral Wayland file drag and drop.
         </p>
       </description>
       <url type="details">https://github.com/berker-z/marcel/releases/tag/v0.1.0</url>

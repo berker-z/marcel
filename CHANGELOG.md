@@ -34,8 +34,9 @@ cannot decode itself (Opus) need ffmpeg on `PATH`.
 
 Copy and move with progress and cancellation. When a destination is taken,
 Marcel asks whether to replace, rename, skip, or merge, and one answer can
-apply to the rest of the operation. Undo and redo cover copy, move, rename,
-Trash, restore, archive creation, and extraction. Permanent deletion needs a
+apply to the rest of the operation. Undo and redo cover copy, move, duplicate,
+rename, Trash, restore, archive creation, extraction, and permission changes.
+Permanent deletion needs a
 confirmation and stays out of undo history. Inline rename, new folders and
 files, Duplicate, Move To, zip creation, and extraction of the common free
 formats. An extraction whose output name is taken asks the same question a
@@ -61,8 +62,22 @@ as a file manager over D-Bus, so "show in folder" works from elsewhere. One
 process per graphical session, with each `marcel-rs` invocation opening its own
 window rather than taking over one you were already using.
 
-Installing Marcel does not change your MIME associations and does not claim the
-generic `org.freedesktop.FileManager1` name. Both are opt-in.
+Marcel is also an xdg-desktop-portal `FileChooser` backend. With the portal
+variant installed and named in `portals.conf`, the open and save dialogs of
+any application that asks the portal for one (most of them, on Wayland) are
+Marcel windows: the same browser, preview, bookmarks, and filter, with a bar
+for the name field, the application's file-type filter, Cancel, and the accept
+button. Single-file pickers hold the selection to one item, save dialogs ask
+before replacing, and if Marcel is not running the bus starts it.
+
+Installing Marcel does not change your MIME associations, does not claim the
+generic `org.freedesktop.FileManager1` name, and does not become the portal
+backend. All three are opt-in.
+
+Open With… asks the desktop's application chooser, Open in Terminal starts a
+terminal in the folder, and the Trash is a place in the sidebar where items
+show Restore instead of Move to Trash and the empty-space menu offers Empty
+Trash.
 
 ### Appearance
 
@@ -73,10 +88,24 @@ system, falling back to the system icon theme only for icons it does not ship.
 ### Packaging
 
 A Nix flake with a package, an overlay, an app, and NixOS and Home Manager
-modules for theme, icon theme, and font. The package installs a desktop entry,
-branded icons, AppStream metadata, and a D-Bus service file, and carries a
-private free `7zz` for archives. RAR and CBR extraction are off by default
-because the decoder is not free.
+modules. `programs.marcel.enable` installs Marcel and changes nothing else;
+three switches, each off by default, take something over:
+`defaultDirectoryHandler` makes Marcel the `inode/directory` handler,
+`fileManager1` makes it answer `org.freedesktop.FileManager1` (the Home
+Manager module writes the activation file where D-Bus looks first, so Marcel
+wins over Nautilus or Dolphin), and `fileChooserPortal` adds the portal
+variant to `xdg.portal.extraPortals` and names it for `FileChooser`.
+
+`programs.marcel.settings` covers `theme`, `icon_theme`, `ui_font`, and
+`media`, which wraps ffmpeg and ffprobe into Marcel's `PATH` for video posters
+and the audio formats Marcel does not decode itself; it is off by default
+because ffmpeg's closure is larger than Marcel's. The same `settings` are
+available without the module as `pkgs.marcel-rs.withSettings`.
+
+The package installs a desktop entry, branded icons, AppStream metadata, a
+D-Bus service file, and the licenses, and carries a private free `7zz` for
+archives. RAR and CBR extraction are off by default because the decoder is
+not free.
 
 ### Known gaps
 
@@ -85,5 +114,8 @@ wider than the window and the preview pane runs off the edge, so the window
 refuses to shrink below it on desktops that honour a minimum size.
 
 No search. Moves between filesystems are refused rather than silently turned
-into a copy and a delete. No removable volumes or remote locations. Dragging files out of Marcel is
-not implemented on X11. The full list is in the README.
+into a copy and a delete. No removable volumes or remote locations. The file
+clipboard is Marcel's own, so Ctrl+C here followed by Ctrl+V in another
+application does nothing; drag and drop is the way across. Undo history lasts
+for the session. Dragging files out of Marcel is not implemented on X11. The
+full list is in the README.

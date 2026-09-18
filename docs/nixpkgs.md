@@ -141,15 +141,15 @@ nixpkgs expression must be self-contained and follow nixpkgs conventions:
 - set `meta.homepage`, `meta.changelog`, `meta.mainProgram`, and Linux
   platforms;
 - install Marcel's `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the bundled-asset
-  license texts;
+  license texts under `share/licenses/marcel`, as `nix/package.nix` does;
 - add an install check or `passthru.tests` package test;
 - check whether the broad `LD_LIBRARY_PATH` wrapper can be replaced by focused
   RPATHs, while preserving GPU-driver discovery;
 - add `passthru.updateScript = nix-update-script { };` for routine updates.
 
-The current `meta.license = lib.licenses.mit` is incomplete because different
-parts of the installed package have different licenses. It should be expressed
-approximately as:
+`meta.license` is a list, not `lib.licenses.mit` alone, because different
+parts of the installed package have different licenses. `nix/package.nix`
+already has it right and the nixpkgs expression keeps it:
 
 ```nix
 license = with lib.licenses; [

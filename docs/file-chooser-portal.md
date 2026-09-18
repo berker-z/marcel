@@ -27,6 +27,17 @@ naming `marcel` is enough once the portal file is installed, and a second entry
 after it would only ever be consulted if Marcel's portal file were missing,
 not if Marcel failed to answer.
 
+`nix/marcel.portal` is three lines: the bus name and the one interface. It
+used to carry `UseIn=Hyprland;` as well, the pre-1.17 way of saying which
+desktops a backend was for. xdg-desktop-portal 1.17 replaced that with
+`portals.conf` and deprecated the key, and a backend that still sets it is
+only ever reached through the deprecated path, and then only under the
+desktops it names. Dropping it means Marcel is chosen by exactly one thing,
+the `portals.conf` entry the module writes, on any desktop. Without any
+configuration the frontend falls back to whatever loaded backend implements
+the interface and warns about it; if that fallback is what you are relying
+on, write the config line instead.
+
 ## The protocol
 
 The interface is `org.freedesktop.impl.portal.FileChooser`, version 4, on the
@@ -64,16 +75,16 @@ what termfilechooser does and nothing complains.
 
 ## Where the code lives
 
-`src/file_chooser.rs` is the D-Bus side. It decodes the options dictionary
-into a `PickerRequest`, hands it to the application over a bounded channel,
+`src/desktop/file_chooser.rs` is the D-Bus side. It decodes the options
+dictionary into a `PickerRequest`, hands it to the application over a bounded channel,
 and awaits the answer; the method call blocks until a window replies. Every
 caller-supplied value is bounded and type-checked, and a wrong type is an
 `InvalidArgs` error rather than a silently ignored option. The `files` of a
 `SaveFiles` request go through the same name validation as Rename, so a name
 carrying a directory cannot write outside the folder the user chose.
 
-`src/picker.rs` is the request model with no D-Bus in it: modes, filters,
-the response. Filters use `globset`, matched case-insensitively on purpose.
+`src/desktop/picker.rs` is the request model with no D-Bus in it: modes,
+filters, the response. Filters use `globset`, matched case-insensitively on purpose.
 Applications write `*.[jJ][pP][gG]` because GTK matches case-sensitively, and a
 picker that hides `Photo.JPG` behind `*.jpg` is wrong on a filesystem where the
 user never chose the case. MIME patterns go through `mime_guess` on the file
@@ -209,7 +220,7 @@ busctl --user --timeout=300 call \
   multiple b true
 ```
 
-`desktop_integration::tests::private_session_bus_child` covers the same
+`desktop::bus::tests::private_session_bus_child` covers the same
 ground on a private bus: name ownership, the `version` property, a call
 answered through the channel, `Close` withdrawing a pending call, a request
 dropped without an answer, and the reply tracker draining afterwards.

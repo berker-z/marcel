@@ -31,17 +31,25 @@ behavior exists.
 | `Shift+Home` / `Shift+End` | Extend selection to the first / last item |
 | `Shift+Page Up` / `Shift+Page Down` | Extend selection by approximately one viewport |
 | `Enter` | Enter a folder or open a file |
-| `Escape` | Clear selection or dismiss the active transient UI |
+| `Escape` | Dismiss the frontmost thing: context menu, running operation, filter, rename or location edit, picker dialog, then the selection |
 | `Ctrl+Up` | Go to the parent folder |
 | `Ctrl+Left` | Go backward in navigation history |
 | `Ctrl+Right` | Go forward in navigation history |
 | `Ctrl+L` | Edit the current location |
+| `Ctrl+F` | Focus the filter field without changing it |
 | `Ctrl+A` | Select all items in the current directory |
 | `Ctrl+Shift+N` | Create a folder in the current directory |
 | `F2` | Rename the single selected item |
+| `Ctrl+I` / `Alt+Enter` | Properties for the selection, or the folder when nothing is selected |
 
 Plain left/right behavior may differ between list and icon views, but the
 Control-modified navigation commands above take precedence in both.
+
+Every binding is declared once, in the `browser_commands!` table in
+`src/app/actions.rs`; the tables here and in the README are copies of it and
+change in the same commit. `Ctrl+L`, `Ctrl+F`, Escape, and type-to-filter are
+routed by `on_window_key_down` in the same file because they must work while
+a text field holds focus.
 
 ## Current-directory filtering
 
@@ -75,6 +83,7 @@ recursive filename/content search is a separate future feature.
 | `Ctrl+C` | Copy the selected files |
 | `Ctrl+X` | Cut the selected files for a later move |
 | `Ctrl+V` | Paste into the current directory |
+| `Ctrl+D` | Duplicate the selection beside itself |
 | `Ctrl+Z` | Undo the most recently completed reversible operation |
 | `Ctrl+Y` | Redo the most recently undone operation |
 | `Delete` | Move the selection to Trash |
@@ -108,11 +117,15 @@ skip, rename, replace, and cancel, each able to answer the rest of the
 operation, and it never overwrites without an explicit decision. Replacing and
 merging are answered separately, so agreeing to replace a set of files does not
 agree to merge a directory tree. A replaced item is held aside so undo can
-restore it, or the operation reports itself as not undoable. Merging two
-directories is still refused, and a transfer whose destination resolves to its
-own source is refused outright rather than offered as a choice. Where no
-interface can answer — a closed window, a request from outside the
-application — the original no-overwrite failure remains the behavior.
+restore it, or the operation reports itself as not undoable. A copy merges two
+directories when asked: the destination keeps everything it has and gains
+what it lacks, and undo removes only what the merge added. A move cannot
+express that yet and still refuses, so a cut-and-paste or Move To onto an
+existing folder fails rather than discarding a tree the user expected to be
+joined. A transfer whose destination resolves to its own source is refused
+outright rather than offered as a choice. Where no interface can answer (a
+closed window, a request from outside the application) the original
+no-overwrite failure remains the behavior.
 
 Successful local-copy fidelity is defined in
 [`copy-semantics.md`](copy-semantics.md). Supported metadata loss fails before
@@ -121,11 +134,14 @@ larger copy still succeeds but is explicitly reported as unavailable to undo.
 Undo and redo validate exact tree membership in addition to filesystem
 identities before mutating any recorded path.
 
-Operation lifecycle ownership lives in `OperationController`: clipboard,
-journal, busy/cancellation state, task handles, and progress transitions share
-one boundary. `Marcel` remains the GPUI coordinator that translates controller
-outcomes into navigation, selection, refresh, dialogs, and notifications.
-Filesystem effects remain implemented and tested in `file_ops.rs`.
+Operation lifecycle ownership lives in `OperationController`
+(`src/operations/`): clipboard, journal, busy/cancellation state, task
+handles, and progress transitions share one owner. `Marcel` remains the GPUI
+coordinator that translates controller outcomes into navigation, selection,
+refresh, dialogs, and notifications. Filesystem effects are implemented and
+tested in `src/fsops/`: `local` holds the primitives, `identity` and `journal`
+the checks and records, and `transfer`, `copy`, `delete`, `trash`, `archive`,
+and `mutations` the operations themselves.
 
 Current-directory ownership lives in `DirectorySession`: source entries,
 filtered visible indexes, hidden-file policy, selection reconciliation,
@@ -278,10 +294,12 @@ Show Hidden Files is active both in the Places footer and this menu. It toggles
 Unix dotfiles through the shared visible-index layer and safely removes newly
 hidden paths from selection.
 
-Open in New Tab, Open in New Window, and Add to Places are appropriate later
-additions once Marcel has tabs, reliable multi-window launching, and editable
-Places. Extension or desktop-service actions should eventually live in an
-Actions submenu rather than expanding the top-level menu without bound.
+Open in New Window is in the item menu for a folder outside the Trash, and
+only then: it is not shown disabled beside every file. It opens the folder in
+a second window of the same process. Open in New Tab is not coming (tabs are
+not planned), and Add to Places waits for editable Places. Extension or
+desktop-service actions should eventually live in an Actions submenu rather
+than expanding the top-level menu without bound.
 
 ## Undo and redo
 

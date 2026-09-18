@@ -10,44 +10,45 @@ adapted into Marcel itself.
 - License: MIT
 - Copyright: Copyright (c) 2023 - sxyazi
 - Current adaptations:
-  - `src/fs.rs` adapts the partial-update and monotonically increasing ticket
-    model from `yazi-fs/src/op.rs` and `yazi-fs/src/entries.rs`. Marcel's
-    implementation uses GPUI tasks and bounded GUI list batches rather than
-    Yazi's event layer.
-  - `src/history.rs` adapts the bounded cursor-and-stack behavior from
+  - `src/browse/entries.rs` adapts the partial-update and monotonically
+    increasing ticket model from `yazi-fs/src/op.rs` and
+    `yazi-fs/src/entries.rs`. Marcel's implementation uses GPUI tasks and
+    bounded GUI list batches rather than Yazi's event layer.
+  - `src/browse/history.rs` adapts the bounded cursor-and-stack behavior from
     `yazi-core/src/tab/backstack.rs`.
-  - `src/app.rs` adapts the task replacement and stale-preview rejection
+  - `src/app/preview.rs` adapts the task replacement and stale-preview rejection
     principles from `yazi-core/src/tab/preview.rs` and
     `yazi-core/src/tab/preview_lock.rs`.
-  - `src/app.rs` adapts the separation of finder matches as derived state over
-    the current folder from `yazi-core/src/tab/finder.rs` at upstream commit
-    `e58022b9aafc8dabf586e2cc29b79a230071716f`. Marcel uses a fuzzy-ranked
-    visible-index list shared by both GUI views rather than Yazi's finder
-    match-index map.
-  - `src/app.rs` and `src/fs.rs` adapt Yazi's separation of a hovered-folder
-    preview from the main browser, its bounded visible folder slice, and its
-    independently refreshed folder state from
+  - `src/browse/directory_session.rs` adapts the separation of finder matches
+    as derived state over the current folder from `yazi-core/src/tab/finder.rs`
+    at upstream commit `e58022b9aafc8dabf586e2cc29b79a230071716f`. Marcel uses
+    a fuzzy-ranked visible-index list shared by both GUI views rather than
+    Yazi's finder match-index map.
+  - `src/app/preview.rs` and `src/browse/entries.rs` adapt Yazi's separation
+    of a hovered-folder preview from the main browser, its bounded visible
+    folder slice, and its independently refreshed folder state from
     `yazi-actor/src/lives/preview.rs`, `yazi-actor/src/mgr/peek.rs`, and
     `yazi-core/src/tab/tab.rs` at upstream commit
     `e58022b9aafc8dabf586e2cc29b79a230071716f`. Marcel uses a cancellable
     batch stream and a GPUI virtualized list; it adds no selection or file
     operations to the preview surface.
-  - `src/app.rs` adapts the visible-page-first preloading, bounded worker-pool,
-    duplicate suppression, and queued-work supersession principles from
+  - `src/app/preview.rs` adapts the visible-page-first preloading, bounded
+    worker-pool, duplicate suppression, and queued-work supersession
+    principles from
     `yazi-core/src/tasks/prework.rs`, `yazi-scheduler/src/scheduler.rs`, and
     `yazi-scheduler/src/worker.rs`. The adaptation was made against upstream
     commit `e58022b9aafc8dabf586e2cc29b79a230071716f`; Marcel uses GPUI entity
     tasks and a Marcel-owned viewport queue rather than Yazi's task types.
-  - `src/thumbnails.rs` adapts the decoder-limit and resize-before-orientation
-    flow from `yazi-adapter/src/image.rs` at the same upstream commit. Marcel
-    produces 128-pixel freedesktop thumbnail PNGs rather than Yazi's
-    preview-sized private cache entries.
-  - `src/pdf_preview.rs` adapts the requested-page `pdftoppm` bridge and cached
+  - `src/preview/thumbnails.rs` adapts the decoder-limit and
+    resize-before-orientation flow from `yazi-adapter/src/image.rs` at the
+    same upstream commit. Marcel produces 128-pixel freedesktop thumbnail PNGs
+    rather than Yazi's preview-sized private cache entries.
+  - `src/preview/pdf.rs` adapts the requested-page `pdftoppm` bridge and cached
     image flow from `yazi-plugin/preset/plugins/pdf.lua` at the same upstream
     commit. Marcel adds a file-identity cache, fixed raster bounds, timeouts,
     subprocess cancellation, and a GPUI virtualized continuous-scroll page
     scheduler.
-  - `src/file_ops.rs` conceptually adapts per-item operation outcomes,
+  - `src/fsops/transfer.rs` conceptually adapts per-item operation outcomes,
     cooperative cancellation, partial-success accounting, and the rename-first
     move path from `yazi-scheduler/src/worker.rs` and
     `yazi-scheduler/src/file/file.rs` at upstream commit
@@ -55,7 +56,7 @@ adapted into Marcel itself.
     session-serialized and adds hidden staging, Linux `RENAME_NOREPLACE`,
     recursive identity validation, bounded atomic progress snapshots, and
     general filesystem undo/redo. No Yazi code was copied.
-  - `src/file_ops.rs` adapts the object-kind taxonomy of `ChaType` from
+  - `src/fsops/journal.rs` adapts the object-kind taxonomy of `ChaType` from
     `yazi-fs/src/cha/type.rs` at upstream commit
     `319f90e0eab185a231eef5562215ba322e320286` into `SnapshotKind`. Like Yazi,
     Marcel enumerates block devices, character devices, sockets, and FIFOs as
@@ -67,14 +68,14 @@ adapted into Marcel itself.
     recreate or delete them. Yazi has no filesystem undo, so the surrounding
     snapshot, validation, and removal policy is Marcel's own. No Yazi code was
     copied.
-  - Sprint 6's copy-fidelity audit additionally studied
-    `yazi-scheduler/src/file/traverse.rs`,
+  - Sprint 6's copy-fidelity audit, now `src/fsops/copy.rs`, additionally
+    studied `yazi-scheduler/src/file/traverse.rs`,
     `yazi-fs/src/engine/local/copier.rs`, and
     `yazi-fs/src/engine/attrs.rs` at the same commit. Marcel conceptually
     adapts Yazi's opaque-symlink traversal, file mode/time baseline, and
     buffered progressive copying while adding Marcel-owned sparse, xattr/ACL,
     hardlink, staging, and undo semantics. No Yazi code was copied.
-  - `src/directory_watcher.rs` conceptually adapts Yazi's non-recursive
+  - `src/browse/watcher.rs` conceptually adapts Yazi's non-recursive
     recommended watcher, polling fallback, 250 ms event coalescing,
     deduplication, and metadata-revalidated upsert/delete flow from
     `yazi-watcher/src/local/local.rs` at upstream commit
@@ -82,7 +83,7 @@ adapted into Marcel itself.
     through its own `DirectoryEvent` reducer and uses GPUI/background-executor
     lifetimes rather than Yazi's Tokio, VFS, and global event infrastructure.
     No Yazi code was copied.
-  - `src/trash_ops.rs` conceptually adapts Yazi's separation of background
+  - `src/fsops/trash.rs` conceptually adapts Yazi's separation of background
     Trash scheduling from its freedesktop Trash VFS at upstream commit
     `319f90e0eab185a231eef5562215ba322e320286`. The audited sources are
     `yazi-scheduler/src/file/file.rs`,
@@ -91,7 +92,7 @@ adapted into Marcel itself.
     platform placement to the MIT-licensed `trash` crate. Marcel adds its own
     exact-entry discovery, identity-validating no-replace restore, operation
     journal, and stricter missing-parent policy. No Yazi code was copied.
-  - `src/delete_ops.rs` conceptually adapts Yazi's leaf-before-directory,
+  - `src/fsops/delete.rs` conceptually adapts Yazi's leaf-before-directory,
     no-symlink-follow delete traversal and per-entry scheduler outcomes from
     `yazi-scheduler/src/file/file.rs`,
     `yazi-scheduler/src/file/traverse.rs`, and
@@ -99,8 +100,8 @@ adapted into Marcel itself.
     `319f90e0eab185a231eef5562215ba322e320286`. Marcel adds whole-selection
     atomic quarantine, filesystem-identity revalidation, paired Trash metadata
     cleanup, and its own progress interface. No Yazi code was copied.
-  - Sprint 9's Rename interaction in `src/app.rs` and safe operation in
-    `src/file_ops.rs` conceptually adapt Yazi's focused rename input,
+  - Sprint 9's Rename interaction in `src/app/edits.rs` and safe operation in
+    `src/fsops/mutations.rs` conceptually adapt Yazi's focused rename input,
     extension-aware cursor placement, watcher/model coordination, and reveal
     behavior from `yazi-actor/src/mgr/rename.rs`, `yazi-fs/src/op.rs`,
     `yazi-vfs/src/engine/engine.rs`, and
@@ -108,7 +109,7 @@ adapted into Marcel itself.
     `319f90e0eab185a231eef5562215ba322e320286`. Marcel uses an inline GPUI
     editor, Linux `RENAME_NOREPLACE`, conservative identity-validating
     Undo/Redo, and never overwrites. No Yazi code was copied.
-  - Sprint 10's archive flow in `src/archive_ops.rs` conceptually adapts the
+  - Sprint 10's archive flow in `src/fsops/archive.rs` conceptually adapts the
     staging, one-versus-many top-level tidy behavior, compound-tar handling,
     and `7zz`/`7z` fallback from
     `yazi-plugin/preset/plugins/extract.lua` and
@@ -169,7 +170,20 @@ The Yazi MIT license notice applies to the adaptations identified above:
 - License: MIT
 - Use in Marcel: version 5.x implements native freedesktop Trash placement and
   enumerates valid home and mounted-volume Trash roots. Marcel wraps it behind
-  `src/trash_ops.rs` rather than coupling UI code to the crate.
+  `src/fsops/trash.rs` rather than coupling UI code to the crate.
+
+## Symphonia
+
+- Project: <https://github.com/pdeljanov/Symphonia>
+- License: MPL-2.0
+- Use in Marcel: version 0.6 decodes MP3, FLAC, Ogg Vorbis, WAV, AAC, and ALAC
+  for the audio preview in `src/preview/audio.rs`, and reads the tags and
+  cover art the pane shows. It is linked into the binary as an unmodified
+  crate. MPL-2.0 is file-scoped: it covers Symphonia's own source files and
+  asks that modifications to them be published under the same terms, which
+  Marcel makes none of, and places no condition on the MIT code that calls
+  it. Marcel's other headline audio dependency, `cpal` (Apache-2.0), plays the
+  decoded samples.
 
 ## Poppler
 
@@ -187,7 +201,7 @@ The Yazi MIT license notice applies to the adaptations identified above:
   BSD-2-Clause portions as detailed in 7-Zip's `License.txt`. Marcel's default
   packages exclude the restricted UnRAR decoder.
 - Use in Marcel: official `7zz` provides ZIP creation and broad-format
-  extraction behind `src/archive_ops.rs`. It is a supervised external process,
+  extraction behind `src/fsops/archive.rs`. It is a supervised external process,
   not linked into Marcel.
 - Distribution: package-managed builds use their distribution's maintained
   package. Portable artifacts bundle the official static executable as
@@ -219,6 +233,11 @@ The Yazi MIT license notice applies to the adaptations identified above:
 - Use in Marcel: `assets/icons/nordzy` contains twenty unmodified scalable
   Places and MIME icons selected by semantic name. The files are a private
   in-application fallback, not a registered or system-installed icon theme.
+  They are not compiled into the binary: the package installs them under
+  `share/marcel/icons/nordzy` and Marcel reads the SVGs from there at runtime
+  (or from `MARCEL_ASSET_DIR`, or from the source tree during development), so
+  the executable and the icons are separate works shipped side by side, an
+  aggregation rather than a derivative of the GPL-3.0 icons.
 - Reproduction and notices: `scripts/build_identity_assets.py` pins the source
   archive and hash and records each source-to-destination mapping.
   `assets/icons/nordzy/COPYING` contains the complete upstream license.
