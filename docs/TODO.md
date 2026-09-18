@@ -70,6 +70,23 @@ maintainer entry and `passthru.updateScript`). AppImage and Flatpak wait
 for real users; Flatpak also costs the portal backend and D-Bus activation,
 and Flathub's policy currently blocks the submission regardless.
 
+First, before any of those: get the packaging out of Nix. The program is
+portable already (no build script, no store paths, assets in the binary,
+`7zz` found beside the exe or on `PATH`, Poppler on `PATH`), but the two
+desktop entries exist only as `makeDesktopItem` calls in `nix/package.nix`,
+the D-Bus and portal files live under `nix/` with `@marcel@` substitution,
+and the install layout (`libexec/marcel/7zz`, `share/marcel/icons`, hicolor,
+metainfo) is written down nowhere but `postInstall`. Move them to a
+`packaging/` directory as plain files with a `Makefile` (`install PREFIX=
+DESTDIR=`), have `nix/package.nix` call that same target so the two cannot
+drift, add a `packaging/arch/PKGBUILD` (`cargo build --release`, `make
+install`, `depends` on fontconfig, freetype2, wayland, libxkbcommon, libxcb,
+poppler, 7zip), and a "Building without Nix" paragraph in the README with
+the `pacman` line. About a day. The Home Manager switches have no Arch
+equivalent as options: there, the package installs the service and portal
+files unconditionally and the user's `portals.conf` and `xdg-mime` decide,
+as with every other file manager.
+
 Still to do for the package itself: a clean-environment smoke test that
 launches Marcel, lists a fixture folder, renders one PDF, extracts one
 archive, and checks the installed metadata; and a written audit of the
