@@ -33,7 +33,7 @@ use std::{
     os::fd::{AsFd as _, BorrowedFd},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use super::local::PathContext as _;
@@ -52,9 +52,8 @@ use super::{
         open_regular_file_at, read_link_target, rename_no_replace, sorted_child_names,
         sorted_children,
     },
+    quarantine::{WorkingKind, staging_prefix},
 };
-
-static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) struct CopiedItem {
     pub(super) sources: Vec<PathSnapshot>,
@@ -190,9 +189,8 @@ pub(super) fn ensure_not_self_containing(
 /// created in the gap.
 fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
     let parent = destination.parent().context("Copy destination has no parent directory")?;
-    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     tempfile::Builder::new()
-        .prefix(&format!(".marcel-copy-{}-{sequence}-", std::process::id()))
+        .prefix(&staging_prefix(WorkingKind::Copy))
         .tempdir_in(parent)
         .at("Could not reserve a temporary copy directory in", parent)
 }
