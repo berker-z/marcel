@@ -48,6 +48,19 @@ errors that look like permission or sandbox problems and are neither. Point
 suite as green, run it once outside the sandbox; do not write that failure off
 as pre-existing.
 
+## One target directory per worktree
+
+Parallel agents each get a git worktree, and the temptation is to point them
+all at one `CARGO_TARGET_DIR` so GPUI is built once. Do not. Cargo derives the
+root crate's artifact hash from its name and version, not its path, so every
+worktree writes the same `marcel-<hash>` test binary and a run in one worktree
+can execute another's build. Four agents hit this in Sprint 28, each seeing a
+test count that was not theirs. Either give each worktree its own target
+directory (copy `target/debug` in; only the `marcel` crate recompiles) or make
+the hash unique per worktree with
+`cargo --config 'profile.dev.package.marcel.codegen-units=<any distinct number>'`.
+Before trusting a run, `cargo test -- --list | grep <one of your new tests>`.
+
 ## Do not reach for `nix build`
 
 `nix build` and `nix flake check` are release-time checks. During ordinary work

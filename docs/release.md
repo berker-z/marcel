@@ -223,11 +223,13 @@ Marcel outside them or for debugging.
 | `MARCEL_ENABLE_RAR` | `1`, `true`, `yes`, or `on` enables RAR and CBR extraction. Off by default because the free `7zz` cannot read them; set it only with a 7-Zip that can. |
 | `MARCEL_ASSET_DIR` | A directory holding `icons/nordzy`, looked at before `share/marcel/icons/nordzy` beside the executable and before the source tree. For running an uninstalled build against installed assets. |
 
-Two more are read only by the test suite: `MARCEL_TEST_DBUS_SESSION_CONFIG`
+Three more are read only by the test suite: `MARCEL_TEST_DBUS_SESSION_CONFIG`
 names the `dbus-daemon` configuration the private-bus test starts a session
-with (`nix/test-session.conf`; the dev shell and the package set it), and
+with (`nix/test-session.conf`; the dev shell and the package set it),
 `MARCEL_PRIVATE_BUS_TEST_CHILD` marks the re-executed test binary as the
-child half of that test. Neither means anything to a running Marcel.
+child half of that test, and `MARCEL_TEST_REQUIRE_7ZZ=1` makes the archive
+tests that need a real `7zz` fail instead of skipping when there is none
+(CI and the package check set it). None means anything to a running Marcel.
 
 ### Marcel application icon
 

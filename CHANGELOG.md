@@ -19,13 +19,23 @@ List and grid views, sorted by name, modified time, size, or kind, with
 breadcrumbs, bookmarks, and the usual XDG places in a sidebar. `Ctrl+L` to
 type a path, or start typing to filter the current folder with fuzzy matching.
 Marquee and keyboard selection. Folders update as they change on disk instead
-of reloading. Comfortable at 50,000 entries.
+of reloading; when a full reload is needed, the listing and the selection stay
+put until the new one has arrived, and a folder that churns is reread at most
+every 1.5 seconds. Leaving a large folder stops its enumeration. Comfortable
+at 50,000 entries.
 
 ### Preview
 
 A preview pane that stays open while you browse: text and code, images,
 continuously scrolling PDFs, folder listings, audio with a waveform, cover
 art, and spectrum bars, and a poster frame with a play button for video.
+An audio file shows its tags, cover, and player at once and the waveform
+fills in behind them; the waveform is cached under `~/.cache/marcel`, so a
+track is measured once. A folder preview lists its first thousand entries.
+Decoded images are held to a budget (64 MiB for thumbnails and icons, 128 MiB
+for PDF pages) and released with their GPU tiles, so paging through a long
+document does not grow the process without limit; an animation past 240
+frames or 64 MiB plays what fitted rather than failing.
 Thumbnails come from the freedesktop cache, so they are shared with other
 applications rather than duplicated; video thumbnails and anything Marcel
 cannot decode itself (Opus) need ffmpeg on `PATH`.
@@ -54,6 +64,17 @@ folder's.
 
 Marcel checks that files are still what and where it thinks they are before
 touching them, and refuses rather than guessing.
+Copies, deletions, and permission changes work through open descriptors, so
+an entry swapped for a link or a pipe while an operation runs is refused, not
+followed. A copy is fsynced through to the folder it lands in. Archive names
+are taken literally (a file called `*.txt` is one file), and a zip or 7z that
+contains links, pipes, or devices is refused before anything is written.
+Working directories Marcel makes while copying or extracting carry the boot
+and process that own them, and one left by a crash is removed the next time
+the folder is opened.
+
+If `~/.config/marcel/state.conf` cannot be read, Marcel says so when a window
+opens, runs on defaults, and never writes the unreadable file back.
 
 ### Desktop integration
 
@@ -61,6 +82,12 @@ Bilateral file drag and drop with other applications on Wayland. Registration
 as a file manager over D-Bus, so "show in folder" works from elsewhere. One
 process per graphical session, with each `marcel-rs` invocation opening its own
 window rather than taking over one you were already using.
+
+`marcel-rs --help` lists the command line; an unknown option is an error rather
+than a folder. A bus-activated start that hears no request within three
+seconds opens a window anyway, and a second `marcel-rs` that cannot reach the
+running one within ten seconds opens its own window. Requests over
+`FileManager1` and the application interface are rate-limited per sender.
 
 Marcel is also an xdg-desktop-portal `FileChooser` backend. With the portal
 variant installed and named in `portals.conf`, the open and save dialogs of
@@ -75,7 +102,8 @@ generic `org.freedesktop.FileManager1` name, and does not become the portal
 backend. All three are opt-in.
 
 Open With… asks the desktop's application chooser, Open in Terminal starts a
-terminal in the folder, and the Trash is a place in the sidebar where items
+terminal in the folder (through `xdg-terminal-exec` when it is installed,
+handing it the folder only on a release that understands `--dir`), and the Trash is a place in the sidebar where items
 show Restore instead of Move to Trash and the empty-space menu offers Empty
 Trash.
 
@@ -114,7 +142,8 @@ wider than the window and the preview pane runs off the edge, so the window
 refuses to shrink below it on desktops that honour a minimum size.
 
 No search. Moves between filesystems are refused rather than silently turned
-into a copy and a delete. No removable volumes or remote locations. The file
+into a copy and a delete, and so is moving an item to a Trash on another
+filesystem, since the copy would lose its extended attributes and its undo. No removable volumes or remote locations. The file
 clipboard is Marcel's own, so Ctrl+C here followed by Ctrl+V in another
 application does nothing; drag and drop is the way across. Undo history lasts
 for the session. Dragging files out of Marcel is not implemented on X11. The

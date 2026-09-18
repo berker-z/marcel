@@ -2,7 +2,7 @@
 
 What is left, in the order it is likely to happen. Sprint documents under
 [`sprints/`](sprints/) turn items from here into bounded work with acceptance
-checks; the latest is [Sprint 27](sprints/027-sound-and-a-frame.md). Finished
+checks; the latest is [Sprint 28](sprints/028-closing-the-review.md). Finished
 work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
 
 ## Before `v0.1.0`
@@ -14,7 +14,8 @@ work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
   `.marcel-` rename refusal, copying `~/.ssh`, Copy Path on two items.
 - One clean restart cycle of the release build to confirm `state.conf` keeps
   view, sort, hidden files, and theme. Sprint 26 saw one unexplained reset
-  during a hand run that did not reproduce.
+  during a hand run that did not reproduce; Sprint 28 made an unreadable file
+  a reported, read-only condition, which is the likeliest cause.
 - `nix build .#marcel-rs` and `nix flake check` on the release commit, and a
   `ci.yml` dispatch on it so both architectures have built the tree before
   the immutable tag exists.
@@ -28,14 +29,10 @@ work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
 
 Small, and none of them blocks the tag.
 
-- Route bookmark and state save failures through `surface::Report` instead
-  of `eprintln!`, so a full disk or a bad permission is seen.
 - The "no preview available" placeholder neither wraps nor elides in a narrow
   preview pane.
 - Per-extent progress in `try_copy_sparse`; a sparse copy shows nothing until
   it is done.
-- Stop reconciling selection per 512-entry batch during a load; the 50,000
-  entry claim is true for browsing, not loading.
 - `check_staged_limits` rescans the whole extraction tree every 200 ms; back
   off, or use `statvfs`.
 - An unfree package variant with RAR decoding, instead of asking users to
@@ -45,7 +42,6 @@ Small, and none of them blocks the tag.
   Zed revision, and the toolchain.
 - Cache the source device for the life of a drag so a cross-filesystem drop
   reads as refused rather than accepted-then-failed.
-- One `IconProvider` per watcher instead of one per batch.
 - Make the media pane its own GPUI entity. While audio plays it repaints at
   20 fps through `cx.notify()` on the window view, which re-renders the
   sidebar and the listing too; a view of its own would repaint only the

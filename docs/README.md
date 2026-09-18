@@ -5,7 +5,9 @@ decided and why, and what is left.
 
 ## Where things stand
 
-`v0.1.0` is untagged and close. [Sprint 27](sprints/027-sound-and-a-frame.md)
+`v0.1.0` is untagged and close. [Sprint 28](sprints/028-closing-the-review.md)
+closed every finding of the pre-tag review in [`review-2026-09-18.md`](review-2026-09-18.md)
+except the two it placed in 0.2. [Sprint 27](sprints/027-sound-and-a-frame.md)
 added audio playback and video posters to the preview pane, with ffmpeg
 found on `PATH` rather than bundled. [Sprint 26](sprints/026-tag-readiness.md)
 closed the last review's blockers and added editable permissions, sorting,
