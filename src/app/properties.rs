@@ -24,6 +24,7 @@ use gpui_component::{
 
 use crate::{
     browse::entries::format_size,
+    names::display_path_name,
     operations::OperationEvent,
     preview::details::{
         self, AccessClass, Details, ItemProperties, ObjectKind, TreeTotals, describe_access,
@@ -550,13 +551,10 @@ impl Render for PropertiesView {
         let (heading, sections): (String, Vec<Vec<Row>>) = match (self.paths.as_slice(), &self.item)
         {
             ([_], None) => ("Reading…".to_string(), Vec::new()),
-            ([path], Some(Err(error))) => {
-                let name = path.file_name().map(|name| name.to_string_lossy().into_owned());
-                (
-                    name.unwrap_or_else(|| path.display().to_string()),
-                    vec![vec![row("Error", error.clone()).color(colors.danger)]],
-                )
-            }
+            ([path], Some(Err(error))) => (
+                display_path_name(path),
+                vec![vec![row("Error", error.clone()).color(colors.danger)]],
+            ),
             ([_], Some(Ok(item))) => (
                 item.name.clone(),
                 vec![self.identity_rows(item), Self::detail_rows(item), Self::access_rows(item)],

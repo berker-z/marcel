@@ -15,10 +15,11 @@ use gpui_component::{
 
 use crate::{
     fsops::validate_entry_name,
+    names::select_stem,
     theme::{self, Palette},
 };
 
-use super::{Marcel, edits::select_stem};
+use super::Marcel;
 
 /// A question with one destructive or affirmative answer and Cancel.
 pub(super) struct Confirm {

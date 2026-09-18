@@ -4,12 +4,13 @@
 
 use std::{
     cell::RefCell,
+    collections::HashSet,
     path::{Path, PathBuf},
     rc::Rc,
 };
 
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Window, div, px};
+use gpui::{App, Context, Entity, Task, Window, div, px};
 use gpui_component::{
     WindowExt as _,
     button::{Button, ButtonVariant},
@@ -19,63 +20,28 @@ use gpui_component::{
 };
 
 use crate::{
+    bookmarks::Bookmark,
     browse::entries::{FileEntry, display_filename},
     desktop::{
         launch::{LocationTarget, resolve_location},
         picker::{PickerMode, PickerResponse},
+        places::Place,
     },
     fsops::{TransferMode, archive::default_zip_name, validate_entry_name},
+    names::{display_path_name, select_stem},
     operations::{FileClipboard, OperationProgressKind},
     preview::PreviewState as PreviewContent,
+    surface::Report,
 };
 
 use super::{
     Marcel,
     dialogs::{Confirm, NameDialog, footer},
-    location::{breadcrumbs, compact},
+    location::{breadcrumbs, compact, crumb_bar},
     navigation::unblock,
     pointer::accepted_external_drop_paths,
     state::RenameEdit,
 };
-
-/// How much of a name is offered for replacement, as a byte offset: up to the
-/// extension, or all of it for a folder, whose dots are not extensions.
-pub(super) fn rename_stem_end(name: &str, is_directory: bool) -> usize {
-    if is_directory {
-        return name.len();
-    }
-    name.rfind('.').filter(|index| *index > 0).unwrap_or(name.len())
-}
-
-/// Focus `input` with its stem selected, so typing replaces the name and
-/// leaves the extension. Every field that offers a name uses this: inline
-/// rename, the save dialog, Compress, and the conflict dialog.
-///
-/// The selection is set directly rather than through the input's
-/// `SelectToStart` action: an action dispatches to whatever has focus, and
-/// focus given in the same frame has not landed yet, so the action went
-/// nowhere and the caret merely sat before the extension.
-pub(crate) fn select_stem(
-    input: Entity<InputState>,
-    is_directory: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let value = input.read(cx).value().to_string();
-    let stem_end = rename_stem_end(&value, is_directory);
-    window.defer(cx, move |window, cx| {
-        input.update(cx, |input, cx| {
-            input.focus(window, cx);
-            input.set_selected_range(0..stem_end, cx);
-        });
-    });
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
 
 impl Marcel {
     pub(super) fn stage_selection(
@@ -161,7 +127,7 @@ impl Marcel {
             return;
         }
         let description = match paths.as_slice() {
-            [only] => format!("Permanently delete “{}”?", file_name(only)),
+            [only] => format!("Permanently delete “{}”?", display_path_name(only)),
             _ => format!("Permanently delete {} selected items?", paths.len()),
         };
         self.confirm(
@@ -411,25 +377,10 @@ impl Marcel {
         self.ui.entry_menu = None;
         let current = self.directory.current_dir.clone();
         let home = self.home_dir.clone();
-        let show_hidden = self.directory.show_hidden;
-        let state = Rc::new(RefCell::new(MoveToState {
-            destination: current.clone(),
-            back: Vec::new(),
-            folders: folders_in(&current, show_hidden),
-            editing: false,
-        }));
+        let state = MoveTo::new(current.clone(), self.directory.show_hidden, window, cx);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
-
-        let mut shortcuts: Vec<(String, PathBuf)> = Vec::new();
-        for place in &self.sidebar.places {
-            shortcuts.push((place.label.clone(), place.path.clone()));
-        }
-        for bookmark in self.bookmarks.read(cx).bookmarks() {
-            shortcuts.push((bookmark.label(), bookmark.path.clone()));
-        }
-        let mut seen = std::collections::HashSet::new();
-        shortcuts.retain(|(_, path)| seen.insert(path.clone()));
-        let shortcuts = Rc::new(shortcuts);
+        let shortcuts =
+            Rc::new(move_to_shortcuts(&self.sidebar.places, self.bookmarks.read(cx).bookmarks()));
 
         // Typing a path: Enter resolves it into the crumbs, leaving the field
         // cancels. The subscription lives as long as the dialog's closure.
@@ -441,8 +392,7 @@ impl Marcel {
                     let value = input.read(cx).value().to_string();
                     match resolve_location(&value, &current, Some(&home)) {
                         Ok(LocationTarget { directory, reveal: None }) => {
-                            state.borrow_mut().go_to(directory, show_hidden);
-                            window.refresh();
+                            state.go_to(directory, window, cx);
                         }
                         Ok(_) => window.push_notification(
                             Notification::error("Enter a folder, not a file"),
@@ -451,10 +401,7 @@ impl Marcel {
                         Err(error) => window.push_notification(Notification::error(error), cx),
                     }
                 }
-                InputEvent::Blur => {
-                    state.borrow_mut().editing = false;
-                    window.refresh();
-                }
+                InputEvent::Blur => state.end_editing(window),
                 InputEvent::Change | InputEvent::Focus => {}
             }
         });
@@ -469,15 +416,7 @@ impl Marcel {
             let _keep = &subscription;
             let colors = cx.theme().colors;
             let radius = cx.theme().radius;
-            let (destination, folders, editing, can_go_back) = {
-                let state = state.borrow();
-                (
-                    state.destination.clone(),
-                    state.folders.clone(),
-                    state.editing,
-                    !state.back.is_empty(),
-                )
-            };
+            let (destination, folders, editing, can_go_back) = state.snapshot();
             let back = Button::new("move-to-back")
                 .xsmall()
                 .compact()
@@ -486,72 +425,21 @@ impl Marcel {
                 .disabled(!can_go_back)
                 .on_click({
                     let state = state.clone();
-                    move |_, window, _| {
-                        state.borrow_mut().go_back(show_hidden);
-                        window.refresh();
-                    }
+                    move |_, window, cx| state.go_back(window, cx)
                 });
 
             // The destination, as crumbs or as a field.
             let location: gpui::AnyElement = if editing {
                 Input::new(&input).into_any_element()
             } else {
-                let crumbs = compact(breadcrumbs(&destination), 6);
-                let last = crumbs.len().saturating_sub(1);
-                let mut items: Vec<gpui::AnyElement> = Vec::new();
-                for (index, crumb) in crumbs.into_iter().enumerate() {
-                    if index > 0 {
-                        items.push(
-                            div()
-                                .flex_none()
-                                .text_color(colors.muted_foreground)
-                                .child("/")
-                                .into_any_element(),
-                        );
-                    }
-                    let button = |label: String| {
-                        Button::new(("move-to-crumb", index))
-                            .xsmall()
-                            .compact()
-                            .ghost()
-                            .label(label)
-                    };
-                    items.push(match crumb.path {
-                        Some(path) if index != last => {
-                            let state = state.clone();
-                            button(crumb.label)
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    state.borrow_mut().go_to(path.clone(), show_hidden);
-                                    window.refresh();
-                                })
-                                .into_any_element()
-                        }
-                        _ => div()
-                            .flex_none()
-                            .text_color(colors.foreground)
-                            .child(crumb.label)
-                            .into_any_element(),
-                    });
-                }
-                let (state, input, destination) =
-                    (state.clone(), input.clone(), destination.clone());
-                div()
-                    .id("move-to-crumbs")
-                    .w_full()
-                    .h_7()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .overflow_hidden()
-                    .rounded(radius)
-                    .bg(colors.background)
-                    .border_1()
-                    .border_color(colors.border)
-                    .cursor_text()
-                    .on_click(move |_, window, cx| {
-                        state.borrow_mut().editing = true;
+                let (go_to, edit) = (state.clone(), state.clone());
+                let (input, destination) = (input.clone(), destination.clone());
+                crumb_bar(
+                    "move-to-crumbs",
+                    compact(breadcrumbs(&destination), 6),
+                    move |path, window, cx| go_to.go_to(path, window, cx),
+                    move |window, cx| {
+                        edit.begin_editing(window);
                         let value = destination.display().to_string();
                         input.update(cx, |input, cx| {
                             input.set_value(value, window, cx);
@@ -559,13 +447,18 @@ impl Marcel {
                             let end = input.value().len();
                             input.set_selected_range(0..end, cx);
                         });
-                        window.refresh();
-                    })
-                    .children(items)
-                    .into_any_element()
+                    },
+                    cx,
+                )
+                .w_full()
+                .into_any_element()
             };
 
-            let folder_rows = folders.iter().enumerate().map(|(index, (label, path))| {
+            // Marcel's own rows rather than gpui-component's List: that widget
+            // is a selection (a `ListState` entity, a delegate, a selected row
+            // to confirm), and these rows have no selected state to keep — a
+            // click descends into the folder, as a crumb does.
+            let folder_row = |index: usize, label: &String, path: &PathBuf| {
                 let state = state.clone();
                 let path = path.clone();
                 gpui_component::h_flex()
@@ -586,25 +479,25 @@ impl Marcel {
                             .text_ellipsis()
                             .child(label.clone()),
                     )
-                    .on_click(move |_, window, _| {
-                        state.borrow_mut().go_to(path.clone(), show_hidden);
-                        window.refresh();
-                    })
-            });
-            let folder_list = if folders.is_empty() {
-                div()
-                    .h(px(26.0))
-                    .px_2()
-                    .text_color(colors.muted_foreground)
-                    .child("No folders inside")
-                    .into_any_element()
-            } else {
-                div()
+                    .on_click(move |_, window, cx| state.go_to(path.clone(), window, cx))
+            };
+            let quiet_row = |text: &'static str| {
+                div().h(px(26.0)).px_2().text_color(colors.muted_foreground).child(text)
+            };
+            let folder_list = match folders.as_deref() {
+                None => quiet_row("Reading…").into_any_element(),
+                Some([]) => quiet_row("No folders inside").into_any_element(),
+                Some(folders) => div()
                     .id("move-to-folders")
                     .max_h(px(220.0))
                     .overflow_y_scroll()
-                    .children(folder_rows)
-                    .into_any_element()
+                    .children(
+                        folders
+                            .iter()
+                            .enumerate()
+                            .map(|(index, (label, path))| folder_row(index, label, path)),
+                    )
+                    .into_any_element(),
             };
 
             let chips = shortcuts.iter().enumerate().map(|(index, (label, path))| {
@@ -615,10 +508,7 @@ impl Marcel {
                     .compact()
                     .outline()
                     .label(label.clone())
-                    .on_click(move |_, window, _| {
-                        state.borrow_mut().go_to(path.clone(), show_hidden);
-                        window.refresh();
-                    })
+                    .on_click(move |_, window, cx| state.go_to(path.clone(), window, cx))
             });
 
             let (view, sources, state) = (view.clone(), sources.clone(), state.clone());
@@ -658,7 +548,7 @@ impl Marcel {
                 .overlay_closable(false)
                 .close_button(false)
                 .on_ok(move |_, window, cx| {
-                    let destination = state.borrow().destination.clone();
+                    let destination = state.destination();
                     view.update(cx, |this, cx| {
                         this.start_transfer(
                             sources.as_ref().clone(),
@@ -813,54 +703,173 @@ impl Marcel {
     /// the journal, clipboard, and bookmarks it reads are the application's
     /// already.
     pub(super) fn open_selection_in_new_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(directory) = self.selected_directory().map(Path::to_path_buf) {
-            let _ = crate::window::open(directory, cx);
+        let Some(directory) = self.selected_directory().map(Path::to_path_buf) else {
+            return;
+        };
+        // The only refusal is the window cap, and a menu item that silently
+        // does nothing looks broken; the reason belongs on this window.
+        if let Err(error) = crate::window::open(directory, cx) {
+            self.report(Report::Error(error.to_string()), cx);
         }
     }
 }
 
-/// What the Move To dialog is pointing at.
+/// The Places and Bookmarks a Move To dialog offers as one-click shortcuts:
+/// every place that is a folder, then every bookmark, without repeats.
+///
+/// The Trash is a place but not a folder. Its path is the `trash:///`
+/// sentinel, which a move would treat as a directory relative to the current
+/// one and fail on, item by item.
+fn move_to_shortcuts(places: &[Place], bookmarks: &[Bookmark]) -> Vec<(String, PathBuf)> {
+    let mut seen = HashSet::new();
+    places
+        .iter()
+        .filter(|place| !place.is_trash())
+        .map(|place| (place.label.clone(), place.path.clone()))
+        .chain(bookmarks.iter().map(|bookmark| (bookmark.label(), bookmark.path.clone())))
+        .filter(|(_, path)| seen.insert(path.clone()))
+        .collect()
+}
+
+/// The subfolders of a destination, by display name.
+type Folders = Vec<(String, PathBuf)>;
+
+/// What the Move To dialog is pointing at, shared by every closure the
+/// dialog is made of.
+#[derive(Clone)]
+struct MoveTo(Rc<RefCell<MoveToState>>);
+
 struct MoveToState {
     destination: PathBuf,
     /// Where the dialog pointed before each jump, newest last, so a crumb
     /// or chip that went somewhere unhelpful can be taken back.
     back: Vec<PathBuf>,
-    /// The folders inside `destination`, by display name.
-    folders: Vec<(String, PathBuf)>,
+    /// The folders inside `destination`, once read; `None` while the read
+    /// is still out.
+    folders: Option<Folders>,
     /// The crumbs have become a text field.
     editing: bool,
+    show_hidden: bool,
+    /// Which destination the read in flight is for. A read of a folder the
+    /// dialog has since left — on a stalled mount, say — must not list itself
+    /// under the folder that replaced it.
+    ticket: u64,
+    _read: Option<Task<()>>,
+}
+
+impl MoveTo {
+    fn new(destination: PathBuf, show_hidden: bool, window: &mut Window, cx: &mut App) -> Self {
+        let this = Self(Rc::new(RefCell::new(MoveToState {
+            destination,
+            back: Vec::new(),
+            folders: None,
+            editing: false,
+            show_hidden,
+            ticket: 0,
+            _read: None,
+        })));
+        this.read_folders(window, cx);
+        this
+    }
+
+    fn destination(&self) -> PathBuf {
+        self.0.borrow().destination.clone()
+    }
+
+    /// What the dialog draws: the destination, its folders if read, whether
+    /// the crumbs are a field, and whether there is anywhere to go back to.
+    fn snapshot(&self) -> (PathBuf, Option<Folders>, bool, bool) {
+        let state = self.0.borrow();
+        (state.destination.clone(), state.folders.clone(), state.editing, !state.back.is_empty())
+    }
+
+    fn go_to(&self, destination: PathBuf, window: &mut Window, cx: &mut App) {
+        {
+            let mut state = self.0.borrow_mut();
+            state.editing = false;
+            if destination == state.destination {
+                window.refresh();
+                return;
+            }
+            let previous = std::mem::replace(&mut state.destination, destination);
+            state.back.push(previous);
+        }
+        self.read_folders(window, cx);
+    }
+
+    fn go_back(&self, window: &mut Window, cx: &mut App) {
+        {
+            let mut state = self.0.borrow_mut();
+            let Some(previous) = state.back.pop() else {
+                return;
+            };
+            state.destination = previous;
+            state.editing = false;
+        }
+        self.read_folders(window, cx);
+    }
+
+    fn begin_editing(&self, window: &mut Window) {
+        self.0.borrow_mut().editing = true;
+        window.refresh();
+    }
+
+    fn end_editing(&self, window: &mut Window) {
+        self.0.borrow_mut().editing = false;
+        window.refresh();
+    }
+
+    /// List the destination's folders off the foreground. A directory read
+    /// can hang on a stalled network mount, and a dialog is no place to
+    /// freeze the window from.
+    fn read_folders(&self, window: &mut Window, cx: &mut App) {
+        let (destination, show_hidden, ticket) = {
+            let mut state = self.0.borrow_mut();
+            state.ticket += 1;
+            state.folders = None;
+            (state.destination.clone(), state.show_hidden, state.ticket)
+        };
+        window.refresh();
+        let read = cx
+            .background_executor()
+            .spawn(smol::unblock(move || folders_in(&destination, show_hidden)));
+        // Weak, so that closing the dialog drops the state, and with it the
+        // wait on a read that may never return.
+        let state = Rc::downgrade(&self.0);
+        let task = window.spawn(cx, async move |cx| {
+            let folders = read.await;
+            let accepted =
+                state.upgrade().is_some_and(|state| state.borrow_mut().accept(ticket, folders));
+            if accepted {
+                let _ = cx.update(|window, _| window.refresh());
+            }
+        });
+        // Replacing the handle drops a superseded read, so at most one is
+        // ever waited on; the ticket covers the one that already finished.
+        self.0.borrow_mut()._read = Some(task);
+    }
 }
 
 impl MoveToState {
-    fn go_to(&mut self, destination: PathBuf, show_hidden: bool) {
-        if destination == self.destination {
-            self.editing = false;
-            return;
+    /// Take the folders a read produced, unless the dialog has moved on since
+    /// it was asked for.
+    fn accept(&mut self, ticket: u64, folders: Folders) -> bool {
+        if ticket != self.ticket {
+            return false;
         }
-        let previous = std::mem::replace(&mut self.destination, destination);
-        self.back.push(previous);
-        self.folders = folders_in(&self.destination, show_hidden);
-        self.editing = false;
-    }
-
-    fn go_back(&mut self, show_hidden: bool) {
-        if let Some(previous) = self.back.pop() {
-            self.destination = previous;
-            self.folders = folders_in(&self.destination, show_hidden);
-            self.editing = false;
-        }
+        self.folders = Some(folders);
+        true
     }
 }
 
 /// How many entries the Move To dialog reads before it stops listing
-/// subfolders. The dialog is for choosing a folder, not browsing one, and
-/// the read happens on the foreground while it opens.
+/// subfolders. The dialog is for choosing a folder, not browsing one.
 const MOVE_TO_SCAN_LIMIT: usize = 5_000;
 
 /// The subfolders of `directory`, sorted by name, from at most
 /// [`MOVE_TO_SCAN_LIMIT`] entries. `file_type` comes free with the entry on
 /// Linux; only a symbolic link costs a `stat` to see what it points at.
-fn folders_in(directory: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
+fn folders_in(directory: &Path, show_hidden: bool) -> Folders {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -878,15 +887,85 @@ fn folders_in(directory: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
     folders.sort_by_key(|(name, _)| name.to_lowercase());
     folders
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Sandbox;
 
+    fn labels(shortcuts: &[(String, PathBuf)]) -> Vec<&str> {
+        shortcuts.iter().map(|(label, _)| label.as_str()).collect()
+    }
+
+    /// The Trash is somewhere things go, not somewhere they can be moved to:
+    /// its sentinel path is not a directory. A bookmark that repeats a place
+    /// is one chip, not two.
     #[test]
-    fn rename_selection_preserves_a_file_extension_but_selects_directory_dots() {
-        assert_eq!(rename_stem_end("report.final.txt", false), 12);
-        assert_eq!(rename_stem_end(".bashrc", false), 7);
-        assert_eq!(rename_stem_end("folder.with.dots", true), 16);
-        assert_eq!(rename_stem_end("猫.txt", false), 3);
+    fn move_to_shortcuts_skip_the_trash_and_repeats() {
+        let home = PathBuf::from("/home/me");
+        let places = [
+            Place::home(home.clone()),
+            Place::trash(),
+            Place {
+                label: "Downloads".to_string(),
+                path: home.join("Downloads"),
+                kind: crate::desktop::places::PlaceKind::Filesystem,
+            },
+        ];
+        let bookmarks =
+            [Bookmark { path: home.join("Downloads") }, Bookmark { path: home.join("Projects") }];
+
+        let shortcuts = move_to_shortcuts(&places, &bookmarks);
+
+        assert_eq!(labels(&shortcuts), ["Home", "Downloads", "Projects"]);
+        assert!(shortcuts.iter().all(|(_, path)| path.is_absolute()));
+    }
+
+    /// The list is what the destination contains that a move could land in:
+    /// folders, and links to folders, but no files and no dot-folders unless
+    /// the window is showing hidden entries too.
+    #[test]
+    fn folders_in_lists_directories_and_links_to_them_in_name_order() {
+        let sandbox = Sandbox::new();
+        sandbox.dir("root/zeta");
+        sandbox.dir("root/Alpha");
+        sandbox.dir("root/.hidden");
+        sandbox.file("root/notes.txt", "");
+        sandbox.dir("elsewhere");
+        std::os::unix::fs::symlink(sandbox.path("elsewhere"), sandbox.path("root/link")).unwrap();
+        std::os::unix::fs::symlink(sandbox.path("root/notes.txt"), sandbox.path("root/filelink"))
+            .unwrap();
+
+        let names = |show_hidden| {
+            folders_in(&sandbox.path("root"), show_hidden)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(false), ["Alpha", "link", "zeta"]);
+        assert_eq!(names(true), [".hidden", "Alpha", "link", "zeta"]);
+        assert!(folders_in(&sandbox.path("missing"), true).is_empty());
+    }
+
+    /// A read that comes back for a destination the dialog has already left
+    /// is dropped, so a slow folder cannot list itself under a fast one.
+    #[test]
+    fn a_read_for_a_left_destination_is_ignored() {
+        let mut state = MoveToState {
+            destination: PathBuf::from("/b"),
+            back: vec![PathBuf::from("/a")],
+            folders: None,
+            editing: false,
+            show_hidden: true,
+            ticket: 2,
+            _read: None,
+        };
+        let stale = vec![("from-a".to_string(), PathBuf::from("/a/from-a"))];
+        let current = vec![("from-b".to_string(), PathBuf::from("/b/from-b"))];
+
+        assert!(!state.accept(1, stale));
+        assert_eq!(state.folders, None);
+        assert!(state.accept(2, current.clone()));
+        assert_eq!(state.folders, Some(current));
     }
 }

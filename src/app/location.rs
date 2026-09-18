@@ -1,14 +1,16 @@
 //! The location bar: breadcrumbs that become a text field on click or
 //! Ctrl+L, and resolve what is typed into a folder to show.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, IntoElement, Window, div};
+use gpui::{AnyElement, App, Context, Div, Entity, IntoElement, Stateful, Window, div};
 use gpui_component::{
     ActiveTheme as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    h_flex,
     input::{Input, InputEvent, InputState, SelectAll as InputSelectAll},
     notification::Notification,
 };
@@ -51,9 +53,80 @@ pub(super) fn compact(crumbs: Vec<Breadcrumb>, max_items: usize) -> Vec<Breadcru
     let tail_start = crumbs.len() - (max_items - 2);
     let mut compacted = Vec::with_capacity(max_items);
     compacted.push(crumbs[0].clone());
-    compacted.push(Breadcrumb { label: "…".to_string(), path: None });
+    compacted.push(Breadcrumb { label: ELLIPSIS.to_string(), path: None });
     compacted.extend_from_slice(&crumbs[tail_start..]);
     compacted
+}
+
+const ELLIPSIS: &str = "…";
+
+/// A row of crumbs, as the location bar and the Move To dialog both show
+/// one: every crumb but the last goes to its folder, the last is where the
+/// bar points, and the ellipsis — like the empty end of the row — turns the
+/// bar into a path field. Callers add their own width and padding.
+pub(super) fn crumb_bar(
+    id: &'static str,
+    crumbs: Vec<Breadcrumb>,
+    on_crumb: impl Fn(PathBuf, &mut Window, &mut App) + 'static,
+    on_edit: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Stateful<Div> {
+    let colors = cx.theme().colors;
+    let on_crumb = Rc::new(on_crumb);
+    let on_edit = Rc::new(on_edit);
+    let last = crumbs.len().saturating_sub(1);
+    let mut items = Vec::with_capacity(crumbs.len() * 2);
+    for (index, crumb) in crumbs.into_iter().enumerate() {
+        if index > 0 {
+            items.push(
+                div().flex_none().text_color(colors.muted_foreground).child("/").into_any_element(),
+            );
+        }
+        let button =
+            |label: String| Button::new((id, index)).xsmall().compact().ghost().label(label);
+        items.push(match crumb.path {
+            Some(path) if index != last => {
+                let on_crumb = on_crumb.clone();
+                button(crumb.label)
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_crumb(path.clone(), window, cx);
+                    })
+                    .into_any_element()
+            }
+            None if crumb.label == ELLIPSIS => {
+                let on_edit = on_edit.clone();
+                button(crumb.label)
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_edit(window, cx);
+                    })
+                    .into_any_element()
+            }
+            _ => div()
+                .flex_none()
+                .text_color(colors.foreground)
+                .child(crumb.label)
+                .into_any_element(),
+        });
+    }
+    div()
+        .id(id)
+        .min_w_0()
+        .h_7()
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .overflow_hidden()
+        .text_sm()
+        .rounded(cx.theme().radius)
+        .bg(colors.background)
+        .border_1()
+        .border_color(colors.border)
+        .cursor_text()
+        .on_click(move |_, window, cx| on_edit(window, cx))
+        .children(items)
 }
 
 impl Marcel {
@@ -87,61 +160,21 @@ impl Marcel {
         } else {
             compact(breadcrumbs(&self.directory.current_dir), max_breadcrumbs)
         };
-        let last = crumbs.len().saturating_sub(1);
-        let mut items = Vec::with_capacity(crumbs.len() * 2);
-        for (index, crumb) in crumbs.into_iter().enumerate() {
-            if index > 0 {
-                items.push(
-                    div()
-                        .flex_none()
-                        .text_sm()
-                        .text_color(colors.muted_foreground)
-                        .child("/")
-                        .into_any_element(),
-                );
-            }
-            let button = |label: String| {
-                Button::new(("location-breadcrumb", index)).xsmall().compact().ghost().label(label)
-            };
-            items.push(match crumb.path {
-                Some(path) if index != last => button(crumb.label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.navigate_to(path.clone(), true, cx);
-                    }))
-                    .into_any_element(),
-                None if crumb.label == "…" => button(crumb.label)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.begin_location_edit(window, cx);
-                    }))
-                    .into_any_element(),
-                _ => div()
-                    .flex_none()
-                    .text_sm()
-                    .text_color(colors.foreground)
-                    .child(crumb.label)
-                    .into_any_element(),
-            });
-        }
-
-        div()
-            .id("location-breadcrumbs")
-            .flex_1()
-            .min_w_0()
-            .h_7()
-            .px_3()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .rounded(cx.theme().radius)
-            .bg(colors.background)
-            .border_1()
-            .border_color(colors.border)
-            .cursor_text()
-            .on_click(cx.listener(|this, _, window, cx| this.begin_location_edit(window, cx)))
-            .child(h_flex().min_w_0().gap_1().overflow_hidden().children(items))
-            .into_any_element()
+        let (go_to, edit) = (cx.weak_entity(), cx.weak_entity());
+        crumb_bar(
+            "location-breadcrumbs",
+            crumbs,
+            move |path, _, cx| {
+                let _ = go_to.update(cx, |this, cx| this.navigate_to(path, true, cx));
+            },
+            move |window, cx| {
+                let _ = edit.update(cx, |this, cx| this.begin_location_edit(window, cx));
+            },
+            cx,
+        )
+        .flex_1()
+        .px_3()
+        .into_any_element()
     }
 
     pub(super) fn on_location_input_event(
@@ -270,7 +303,7 @@ mod tests {
             compacted,
             vec![
                 crumb("root", "/"),
-                Breadcrumb { label: "…".to_string(), path: None },
+                Breadcrumb { label: ELLIPSIS.to_string(), path: None },
                 crumb("marcel", "/home/test/Projects/marcel"),
                 crumb("src", "/home/test/Projects/marcel/src"),
             ]

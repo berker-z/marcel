@@ -62,7 +62,14 @@ pub const MAX_LIVE_WINDOWS: usize = 32;
 /// dialog per application is the ordinary case and this is far past it. A
 /// request over the cap is answered with an error rather than queued behind
 /// dialogs the user has not noticed yet.
-pub const MAX_LIVE_PICKERS: usize = 8;
+const MAX_LIVE_PICKERS: usize = 8;
+
+/// Where the next browsing window opens, given how many are live and how
+/// many have ever been opened: its cascade offset, or `None` at the cap.
+fn next_window_slot(live: usize, opened: usize) -> Option<f32> {
+    (live < MAX_LIVE_WINDOWS)
+        .then_some(WINDOW_CASCADE_STEP * (opened % WINDOW_CASCADE_LENGTH) as f32)
+}
 
 /// The size a picker opens at: enough for the three panes without taking the
 /// whole screen the way a browsing window may.
@@ -141,12 +148,11 @@ pub fn open(path: PathBuf, cx: &mut App) -> anyhow::Result<MarcelWindow> {
     let registry = global(cx);
     let cascade = registry.update(cx, |registry, cx| {
         registry.prune(cx);
-        if registry.windows.len() >= MAX_LIVE_WINDOWS {
-            return None;
+        let slot = next_window_slot(registry.windows.len(), registry.opened);
+        if slot.is_some() {
+            registry.opened += 1;
         }
-        let step = registry.opened % WINDOW_CASCADE_LENGTH;
-        registry.opened += 1;
-        Some(WINDOW_CASCADE_STEP * step as f32)
+        slot
     });
     let Some(cascade) = cascade else {
         anyhow::bail!("Marcel already has {MAX_LIVE_WINDOWS} windows open; not opening more");
@@ -252,10 +258,6 @@ impl WindowRegistry {
             .or(last)
             .cloned()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.windows.is_empty()
-    }
 }
 
 pub fn window_icon() -> Option<Arc<image::RgbaImage>> {
@@ -308,16 +310,22 @@ mod tests {
     }
 
     /// Every window at the same offset looks like one window. The cascade
-    /// repeats rather than walking off the screen.
+    /// repeats rather than walking off the screen, and it is the count of
+    /// windows ever opened that drives it, not the count still open.
     #[test]
     fn the_cascade_steps_then_returns_to_the_start() {
-        let offsets = (0..WINDOW_CASCADE_LENGTH + 2)
-            .map(|opened| WINDOW_CASCADE_STEP * (opened % WINDOW_CASCADE_LENGTH) as f32)
-            .collect::<Vec<_>>();
+        assert_eq!(next_window_slot(0, 0), Some(0.0));
+        assert_eq!(next_window_slot(0, 1), Some(WINDOW_CASCADE_STEP));
+        assert_eq!(next_window_slot(3, WINDOW_CASCADE_LENGTH), Some(0.0));
+        assert_eq!(next_window_slot(3, WINDOW_CASCADE_LENGTH + 1), Some(WINDOW_CASCADE_STEP));
+    }
 
-        assert_eq!(offsets[0], 0.0);
-        assert_eq!(offsets[1], WINDOW_CASCADE_STEP);
-        assert_eq!(offsets[WINDOW_CASCADE_LENGTH], 0.0);
-        assert_eq!(offsets[WINDOW_CASCADE_LENGTH + 1], WINDOW_CASCADE_STEP);
+    /// A flood of `Open` requests stops at the cap. Closed windows are pruned
+    /// before this is asked, so only live ones count against it.
+    #[test]
+    fn no_window_opens_past_the_cap() {
+        assert!(next_window_slot(MAX_LIVE_WINDOWS - 1, 40).is_some());
+        assert_eq!(next_window_slot(MAX_LIVE_WINDOWS, 40), None);
+        assert_eq!(next_window_slot(MAX_LIVE_WINDOWS + 5, 40), None);
     }
 }

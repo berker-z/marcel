@@ -9,7 +9,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     io::Write as _,
     path::{Path, PathBuf},
 };
@@ -20,6 +19,7 @@ use url::Url;
 
 use crate::{
     config,
+    names::display_path_name,
     surface::{self, Report},
 };
 
@@ -30,11 +30,7 @@ pub struct Bookmark {
 
 impl Bookmark {
     pub fn label(&self) -> String {
-        self.path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.path.display().to_string())
+        display_path_name(&self.path)
     }
 }
 
@@ -50,15 +46,8 @@ pub struct LoadedBookmarks {
 }
 
 pub fn load(path: &Path) -> Result<LoadedBookmarks> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LoadedBookmarks { bookmarks: Vec::new(), rejected: 0 });
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Could not read bookmarks from “{}”", path.display()));
-        }
+    let Some(contents) = config::read_own_file(path).context("Could not read bookmarks")? else {
+        return Ok(LoadedBookmarks { bookmarks: Vec::new(), rejected: 0 });
     };
 
     let mut seen = HashSet::new();
@@ -179,9 +168,8 @@ impl BookmarkStore {
                         }
                     }
                     Err(error) => {
-                        eprintln!("Could not load Marcel bookmarks: {error:#}");
                         this.read_only = Some(format!(
-                            "Bookmarks could not be loaded, so they cannot be changed: {error}"
+                            "Bookmarks could not be loaded, so they cannot be changed: {error:#}"
                         ));
                     }
                 }
@@ -358,15 +346,18 @@ impl BookmarkStore {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::testing::Sandbox;
 
     #[test]
     fn round_trips_paths_that_need_uri_escaping() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("config/bookmarks");
+        let sandbox = Sandbox::new();
+        let file = sandbox.path("config/bookmarks");
         let bookmarks = vec![
-            Bookmark { path: root.path().join("Work Notes") },
-            Bookmark { path: root.path().join("line\nbreak") },
+            Bookmark { path: sandbox.path("Work Notes") },
+            Bookmark { path: sandbox.path("line\nbreak") },
         ];
 
         save(&file, &bookmarks).unwrap();
@@ -381,13 +372,11 @@ mod tests {
     /// counted.
     #[test]
     fn unrepresentable_lines_are_counted_and_duplicates_are_collapsed() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("bookmarks");
-        fs::write(
-            &file,
+        let sandbox = Sandbox::new();
+        let file = sandbox.file(
+            "bookmarks",
             "https://example.com/\nnot a url\nfile:///tmp/photos\nfile:///tmp/photos\n",
-        )
-        .unwrap();
+        );
 
         let loaded = load(&file).unwrap();
         assert_eq!(loaded.bookmarks, vec![Bookmark { path: PathBuf::from("/tmp/photos") }]);
@@ -399,11 +388,9 @@ mod tests {
     /// repository must get their target updated, not their link destroyed.
     #[test]
     fn saving_through_a_symlinked_bookmark_file_updates_the_target() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("dotfiles/bookmarks");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "").unwrap();
-        let link = root.path().join("bookmarks");
+        let sandbox = Sandbox::new();
+        let target = sandbox.file("dotfiles/bookmarks", "");
+        let link = sandbox.path("bookmarks");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let bookmarks = vec![Bookmark { path: PathBuf::from("/tmp/photos") }];
 
@@ -414,6 +401,19 @@ mod tests {
             "the link must survive the save"
         );
         assert_eq!(load(&target).unwrap().bookmarks, bookmarks);
+    }
+
+    /// The bookmark file is a few URLs. One that has grown past what Marcel
+    /// would ever write is refused unread, so the store it would have fed
+    /// goes read-only instead of replacing it with an empty list.
+    #[test]
+    fn an_oversized_bookmark_file_is_refused_unread() {
+        let sandbox = Sandbox::new();
+        let file = sandbox.path("bookmarks");
+        fs::File::create(&file).unwrap().set_len(config::MAX_FILE_SIZE + 1).unwrap();
+
+        let error = load(&file).map(|loaded| loaded.rejected).unwrap_err();
+        assert!(format!("{error:#}").contains("larger than"), "{error:#}");
     }
 
     #[test]
