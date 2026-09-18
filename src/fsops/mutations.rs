@@ -7,7 +7,7 @@
 use std::{
     ffi::OsStr,
     fs,
-    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -167,6 +167,12 @@ pub(super) fn reverse_set_mode(operation: &OperationRecord) -> Result<CommittedO
 }
 
 /// Commit a mode change and describe it, whichever direction it runs in.
+///
+/// `chmod(2)` resolves its path again and follows a symbolic link at the end
+/// of it, so a check by `lstat` followed by `chmod` leaves a window in which
+/// the object can be swapped for a link and the bits land on its target. The
+/// object is pinned with a descriptor instead: the identity check and the
+/// commit then concern one inode, whatever the path names in between.
 fn change_mode(
     path: &Path,
     expected: &FileIdentity,
@@ -174,14 +180,22 @@ fn change_mode(
     to: u32,
 ) -> Result<CommittedOperation> {
     // Prepare: the object must still be the one whose bits were read.
-    expected.validate(path, "change permissions")?;
+    let pinned = pin_object(path).with_context(|| {
+        format!("Cannot change permissions: “{}” no longer exists", path.display())
+    })?;
+    let metadata = pinned.metadata().at("Could not inspect", path)?;
+    if metadata.file_type().is_symlink() {
+        bail!("The permissions of a symbolic link cannot be changed");
+    }
+    if FileIdentity::of(&metadata) != *expected {
+        bail!("Cannot change permissions: “{}” changed or was replaced", path.display());
+    }
     // Commit.
-    fs::set_permissions(path, fs::Permissions::from_mode(to))
-        .at("Could not change permissions on", path)?;
+    chmod_pinned(&pinned, to).at("Could not change permissions on", path)?;
     // Finalize: the bits are on disk. The change moved the ctime, so the
     // record carries a fresh identity; a failed read costs undo, not the
     // change.
-    let record = fs::symlink_metadata(path).ok().map(|metadata| OperationRecord::SetMode {
+    let record = pinned.metadata().ok().map(|metadata| OperationRecord::SetMode {
         path: path.to_path_buf(),
         identity: FileIdentity::of(&metadata),
         previous: from,
@@ -192,6 +206,42 @@ fn change_mode(
         DirectoryChanges::upserted(vec![path.to_path_buf()]),
         record,
     ))
+}
+
+/// A descriptor for whatever `path` names, without following a final link
+/// and without opening the object.
+///
+/// `O_PATH` is what makes this safe for anything: a FIFO is not opened, so
+/// nothing blocks; a device is not opened, so nothing is triggered; and no
+/// read permission is needed, which matters because a file with mode `000` is
+/// exactly the one a user reaches for the permissions dialog to fix.
+///
+/// This belongs beside `open_regular_file` in `local.rs`; it lives here until
+/// that file is next touched.
+fn pin_object(path: &Path) -> std::io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags};
+
+    rustix::fs::open(path, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
+        .map(fs::File::from)
+        .map_err(Into::into)
+}
+
+/// `chmod` the object a pinned descriptor refers to.
+///
+/// `fchmod` refuses an `O_PATH` descriptor, and `fchmodat(AT_SYMLINK_NOFOLLOW)`
+/// is not implemented by the kernel (`fchmodat2` is, from 6.6, but rustix 1.1
+/// does not expose it). Going through the `/proc/self/fd` link is how glibc
+/// itself implements the flag. The kernel follows that link to the pinned
+/// object and would keep following if that object were a symbolic link, which
+/// is why the caller has already ruled one out.
+fn chmod_pinned(pinned: &fs::File, mode: u32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    rustix::fs::chmod(
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()),
+        rustix::fs::Mode::from_raw_mode(mode),
+    )
+    .map_err(Into::into)
 }
 
 /// Undo or redo a rename by renaming back, which is one more atomic commit.
@@ -318,4 +368,70 @@ fn snapshot_paths_cancellable(
         }
     }
     Ok(snapshots)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+    use crate::testing::{Sandbox, skip_as_root};
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().mode() & 0o7777
+    }
+
+    /// The dialog read the bits of one object; by the time the change commits
+    /// a link stands at that path. `chmod` would follow it, so the bits must
+    /// not land on the target — and the record must not claim they did.
+    #[test]
+    fn a_link_that_replaced_the_object_after_it_was_read_is_not_followed() {
+        let sandbox = Sandbox::new();
+        let target = sandbox.file("target", b"");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let victim = sandbox.file("victim", b"");
+        let expected = FileIdentity::read(&victim).unwrap();
+
+        fs::remove_file(&victim).unwrap();
+        std::os::unix::fs::symlink(&target, &victim).unwrap();
+
+        let error = change_mode(&victim, &expected, 0o644, 0o777).unwrap_err().to_string();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(mode_of(&target), 0o600);
+        assert!(fs::symlink_metadata(&victim).unwrap().file_type().is_symlink());
+    }
+
+    /// The same window, filled by another regular file rather than a link:
+    /// the identity read from the descriptor is what decides, not the path.
+    #[test]
+    fn an_object_replaced_after_it_was_read_keeps_its_bits() {
+        let sandbox = Sandbox::new();
+        let original = sandbox.file("note", b"");
+        let expected = FileIdentity::read(&original).unwrap();
+        let replacement = sandbox.file("elsewhere", b"");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&replacement, &original).unwrap();
+
+        let error = change_mode(&original, &expected, 0o644, 0o777).unwrap_err().to_string();
+        assert!(error.contains("changed or was replaced"), "{error}");
+        assert_eq!(mode_of(&original), 0o600);
+    }
+
+    /// A file nobody may read is the one a user most wants to fix, and pinning
+    /// it must not need the permission it lacks.
+    #[test]
+    fn an_unreadable_file_can_still_have_its_bits_changed() {
+        if skip_as_root() {
+            return;
+        }
+        let sandbox = Sandbox::new();
+        let locked = sandbox.file("locked", b"");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(fs::read(&locked).is_err(), "the fixture is unreadable");
+
+        let committed = set_mode(&locked, 0o644).unwrap();
+
+        assert_eq!(mode_of(&locked), 0o644);
+        assert!(committed.into_record().is_some(), "the change is recorded for undo");
+    }
 }
