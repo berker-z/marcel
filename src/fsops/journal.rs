@@ -364,6 +364,7 @@ impl MutationOutcome {
     /// `Unchanged` is the only failure a caller may retry: every other failure
     /// crossed a commit point and left the record describing a disk state that
     /// no longer exists.
+    #[cfg(test)]
     pub fn keeps_history(&self) -> bool {
         matches!(self, Self::Unchanged(_))
     }

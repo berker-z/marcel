@@ -89,6 +89,7 @@ pub struct TransferOutcome {
 
 impl TransferOutcome {
     /// Every requested source, in the state it ended in.
+    #[cfg(test)]
     pub fn accounted(&self) -> usize {
         self.completed.len()
             + self.failures.len()
@@ -133,6 +134,7 @@ pub fn transfer_paths(
     Transfer::new(sources, destination, mode, cancelled).run(&mut ConflictPolicy::refusing())
 }
 
+#[cfg(test)]
 pub fn transfer_paths_with_progress(
     sources: &[PathBuf],
     destination: &Path,

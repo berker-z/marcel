@@ -76,10 +76,6 @@ impl Shared {
         self.playing.load(Ordering::Relaxed)
     }
 
-    pub fn finished(&self) -> bool {
-        self.finished.load(Ordering::Relaxed)
-    }
-
     pub fn position(&self) -> Duration {
         Duration::from_millis(self.position_ms.load(Ordering::Relaxed))
     }

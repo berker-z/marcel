@@ -121,10 +121,12 @@ const BOOT_ID_LENGTH: usize = 32;
 /// the browser refuses to show cannot be followed.
 pub const RECOVERY_REMNANT_PREFIX: &str = ".marcel-recovered-";
 
+#[cfg(test)]
 pub fn is_replacement_quarantine_name(name: &OsStr) -> bool {
     os_bytes(name).starts_with(WorkingKind::Replaced.prefix().as_bytes())
 }
 
+#[cfg(test)]
 pub fn is_recovery_remnant_name(name: &OsStr) -> bool {
     os_bytes(name).starts_with(RECOVERY_REMNANT_PREFIX.as_bytes())
 }
@@ -259,6 +261,7 @@ pub struct ReplacedItem {
 
 impl ReplacedItem {
     /// The hidden path holding this item, so an evicted record can release it.
+    #[cfg(test)]
     pub fn quarantine(&self) -> &Path {
         &self.quarantine
     }

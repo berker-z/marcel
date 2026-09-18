@@ -81,6 +81,7 @@ impl ConflictDecision {
         Self { response, apply_to_all: false }
     }
 
+    #[cfg(test)]
     pub fn for_all(response: ConflictResponse) -> Self {
         Self { response, apply_to_all: true }
     }

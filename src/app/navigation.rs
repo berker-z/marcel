@@ -663,15 +663,11 @@ fn directory_event_paths(events: &[DirectoryEvent]) -> Vec<PathBuf> {
     let mut paths = std::collections::HashSet::with_capacity(events.len());
     for event in events {
         match event {
-            DirectoryEvent::Added(entry) | DirectoryEvent::Changed(entry) => {
+            DirectoryEvent::Changed(entry) => {
                 paths.insert(entry.path.clone());
             }
             DirectoryEvent::Removed(path) => {
                 paths.insert(path.clone());
-            }
-            DirectoryEvent::Renamed { from, entry } => {
-                paths.insert(from.clone());
-                paths.insert(entry.path.clone());
             }
             DirectoryEvent::RescanRequired => {}
         }
@@ -842,7 +838,7 @@ mod tests {
         let current = test_file_entry(
             &format!(
                 "/folder/.marcel-replaced-{}-{DEAD_PROCESS}-0-thesis",
-                crate::fsops::boot_id()
+                crate::fsops::quarantine::boot_id()
             ),
             false,
         );

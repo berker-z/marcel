@@ -26,14 +26,14 @@ compile_error!("Marcel is a Linux desktop application; it has no other target");
 
 mod app;
 pub(crate) mod bookmarks;
-pub mod browse;
+pub(crate) mod browse;
 pub mod config;
 pub mod desktop;
 pub mod fonts;
-pub mod fsops;
+pub(crate) mod fsops;
 pub(crate) mod names;
 pub mod operations;
-pub mod preview;
+pub(crate) mod preview;
 pub mod surface;
 pub mod theme;
 pub mod window;

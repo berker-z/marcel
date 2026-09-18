@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::browse::entries::{FileEntry, SortKey, SortOrder, merge_sorted_entries, sort_entries};
+use crate::browse::entries::{FileEntry, SortOrder, merge_sorted_entries, sort_entries};
 use crate::browse::selection::SelectionModel;
 
 /// Background work that stops when dropped.
@@ -239,18 +239,13 @@ impl DirectorySession {
         let mut upserts = HashMap::with_capacity(events.len());
         for event in events {
             match event {
-                DirectoryEvent::Added(entry) | DirectoryEvent::Changed(entry) => {
+                DirectoryEvent::Changed(entry) => {
                     removed.remove(&entry.path);
                     upserts.insert(entry.path.clone(), entry);
                 }
                 DirectoryEvent::Removed(path) => {
                     upserts.remove(&path);
                     removed.insert(path);
-                }
-                DirectoryEvent::Renamed { from, entry } => {
-                    removed.insert(from);
-                    removed.remove(&entry.path);
-                    upserts.insert(entry.path.clone(), entry);
                 }
                 DirectoryEvent::RescanRequired => {
                     return ApplyDirectoryEvents::RescanRequired;
@@ -462,12 +457,6 @@ impl DirectorySession {
         Some(self.reconcile_selection())
     }
 
-    /// Reorder the listing by `key`: its natural direction, or the reverse
-    /// when it already was the key. Returns the order now in force.
-    pub fn sort_by(&mut self, key: SortKey) -> (SortOrder, ReconcileSelection) {
-        self.set_sort(self.sort.choose(key))
-    }
-
     pub fn set_sort(&mut self, order: SortOrder) -> (SortOrder, ReconcileSelection) {
         if order != self.sort {
             self.sort = order;
@@ -646,11 +635,13 @@ pub enum ApplyDirectoryEvents {
     RescanRequired,
 }
 
-pub fn is_hidden_name(name: &str) -> bool {
+#[cfg(test)]
+fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.') && name != "." && name != ".."
 }
 
-pub fn fuzzy_score(candidate: &str, query: &str) -> Option<i64> {
+#[cfg(test)]
+fn fuzzy_score(candidate: &str, query: &str) -> Option<i64> {
     let candidate = candidate.to_lowercase().chars().collect::<Vec<_>>();
     let query = query.to_lowercase().chars().collect::<Vec<_>>();
     fuzzy_score_folded(&candidate, &query)
@@ -696,10 +687,9 @@ fn fuzzy_score_folded(candidate: &[char], query: &[char]) -> Option<i64> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryEvent {
-    Added(FileEntry),
     Removed(PathBuf),
+    /// Present with this state: an entry that was not listed before is added.
     Changed(FileEntry),
-    Renamed { from: PathBuf, entry: FileEntry },
     RescanRequired,
 }
 
@@ -764,9 +754,12 @@ mod tests {
         session.show_hidden = true;
         session.merge_batch(vec![
             file("report.txt"),
-            file(&format!(".marcel-replaced-{}-1-0-report.txt", crate::fsops::boot_id())),
-            dir(&format!(".marcel-copy-{}-1-0-a1b2c3", crate::fsops::boot_id())),
-            dir(&format!(".marcel-archive-{}-1-0-a1b2c3", crate::fsops::boot_id())),
+            file(&format!(
+                ".marcel-replaced-{}-1-0-report.txt",
+                crate::fsops::quarantine::boot_id()
+            )),
+            dir(&format!(".marcel-copy-{}-1-0-a1b2c3", crate::fsops::quarantine::boot_id())),
+            dir(&format!(".marcel-archive-{}-1-0-a1b2c3", crate::fsops::quarantine::boot_id())),
             dir(".marcel-delete-1-0-old"),
             dir(".config"),
         ]);
@@ -779,9 +772,10 @@ mod tests {
         let mut session = session(vec![file("b"), file("old")]);
 
         session.apply_events(vec![
-            DirectoryEvent::Added(dir("z")),
+            DirectoryEvent::Changed(dir("z")),
             DirectoryEvent::Changed(entry("b", false, Some(9))),
-            DirectoryEvent::Renamed { from: path("old"), entry: entry("new", false, Some(3)) },
+            DirectoryEvent::Removed(path("old")),
+            DirectoryEvent::Changed(entry("new", false, Some(3))),
         ]);
         assert_eq!(names(&session), [("z", None), ("b", Some(9)), ("new", Some(3))]);
 
@@ -923,7 +917,7 @@ mod tests {
         let result = session.apply_events(vec![
             DirectoryEvent::Removed(path("removed.txt")),
             DirectoryEvent::Changed(entry("selected.txt", false, Some(9))),
-            DirectoryEvent::Added(dir("folder")),
+            DirectoryEvent::Changed(dir("folder")),
         ]);
 
         assert!(matches!(
@@ -950,7 +944,7 @@ mod tests {
         assert_eq!(session.entry(&a).map(|e| e.size), Some(Some(1)));
 
         // An inserted directory sorts ahead of the file and shifts its index.
-        session.apply_events(vec![DirectoryEvent::Added(dir("folder"))]);
+        session.apply_events(vec![DirectoryEvent::Changed(dir("folder"))]);
         assert!(session.entry(&path("folder")).is_some());
         assert_eq!(session.entry(&a).map(|e| e.name.as_str()), Some("a.txt"));
 
@@ -961,7 +955,7 @@ mod tests {
         session.apply_events(vec![DirectoryEvent::Removed(a.clone())]);
         assert!(session.entry(&a).is_none());
 
-        session.apply_events(vec![DirectoryEvent::Added(file("b.txt"))]);
+        session.apply_events(vec![DirectoryEvent::Changed(file("b.txt"))]);
         assert!(session.entry(&path("b.txt")).is_some());
 
         session.begin_virtual_load(LoadKind::Navigate);

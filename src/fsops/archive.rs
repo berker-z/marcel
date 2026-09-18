@@ -118,6 +118,7 @@ impl SevenZipBackend {
             .map(|program| Self { program })
     }
 
+    #[cfg(test)]
     pub fn from_program(program: PathBuf) -> Self {
         Self { program }
     }
