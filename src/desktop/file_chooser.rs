@@ -26,12 +26,16 @@ use std::{
 use async_channel::{Receiver, Sender, TrySendError};
 use url::Url;
 use zbus::{
+    message::Header,
     object_server::ResponseDispatchNotifier,
     zvariant::{OwnedObjectPath, OwnedValue, Value},
 };
 
-use crate::desktop::picker::{
-    FileFilter, FilterPattern, PickerMode, PickerRequest, PickerResponse, strip_mnemonic,
+use crate::desktop::{
+    bus::{self, RateLimiter, SharedRateLimiter},
+    picker::{
+        FileFilter, FilterPattern, PickerMode, PickerRequest, PickerResponse, strip_mnemonic,
+    },
 };
 
 pub const FILE_CHOOSER_BUS_NAME: &str = "org.freedesktop.impl.portal.desktop.marcel";
@@ -56,6 +60,19 @@ const MAX_FILTERS: usize = 64;
 const MAX_PATTERNS_PER_FILTER: usize = 64;
 const MAX_SAVE_FILES: usize = 1024;
 const MAX_STRING_BYTES: usize = 4096;
+
+/// The title becomes the Wayland window title, and libwayland aborts the
+/// whole process on a request over 4 KiB — header, length word and padding
+/// included — so this has to sit well under that, not at it. A title is one
+/// line of a titlebar; a kilobyte is already more than any of it shows.
+const MAX_TITLE_BYTES: usize = 1024;
+
+/// Dialog requests one bus peer may make per minute.
+///
+/// The frontend is normally the only caller and serialises per application,
+/// but the backend name is reachable by any session peer, and a dialog that
+/// keeps reappearing is a way to wear the user down into clicking Save.
+pub(crate) const PICKERS_PER_MINUTE: usize = 30;
 
 pub const RESPONSE_SUCCESS: u32 = 0;
 pub const RESPONSE_CANCELLED: u32 = 1;
@@ -105,21 +122,28 @@ impl Drop for PendingReply {
 pub(crate) struct FileChooserService {
     requests: Sender<PickerRequest>,
     tracker: ReplyTracker,
+    limiter: SharedRateLimiter,
 }
 
 impl FileChooserService {
     pub(crate) fn new(requests: Sender<PickerRequest>, tracker: ReplyTracker) -> Self {
-        Self { requests, tracker }
+        Self {
+            requests,
+            tracker,
+            limiter: RateLimiter::shared(PICKERS_PER_MINUTE, bus::RATE_LIMIT_WINDOW),
+        }
     }
 
     async fn run(
         &self,
         connection: &zbus::Connection,
+        header: &Header<'_>,
         handle: OwnedObjectPath,
         method: Method,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
+        bus::admit(&self.limiter, header)?;
         let pending = self.tracker.begin();
         let server = connection.object_server();
         let (reply, responses) = async_channel::bounded(1);
@@ -130,11 +154,18 @@ impl FileChooserService {
 
         // The frontend cancels a dialog whose caller went away by calling
         // `Close` on the handle it gave us, so the object has to exist before
-        // the window does.
-        server
+        // the window does. `at` says whether it created the object; a handle
+        // that is already pending belongs to another request, and removing
+        // it on the way out would take the `Close` path from under that one.
+        let created = server
             .at(handle.clone(), RequestObject { close })
             .await
             .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+        if !created {
+            return Err(zbus::fdo::Error::InvalidArgs(format!(
+                "a request is already pending at {handle}"
+            )));
+        }
         let outcome = match enqueue(&self.requests, request) {
             Ok(()) => responses.recv().await.unwrap_or(PickerResponse::Closed),
             Err(error) => {
@@ -161,6 +192,9 @@ impl FileChooserService {
     }
 }
 
+// The arity is the portal's: five wire arguments, plus the connection and
+// the header zbus hands in.
+#[allow(clippy::too_many_arguments)]
 #[zbus::interface(name = "org.freedesktop.impl.portal.FileChooser")]
 impl FileChooserService {
     // The portal interfaces spell this one in lowercase, unlike every other
@@ -173,37 +207,40 @@ impl FileChooserService {
     async fn open_file(
         &self,
         #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
         handle: OwnedObjectPath,
         _app_id: String,
         _parent_window: String,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
-        self.run(connection, handle, Method::OpenFile, title, options).await
+        self.run(connection, &header, handle, Method::OpenFile, title, options).await
     }
 
     async fn save_file(
         &self,
         #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
         handle: OwnedObjectPath,
         _app_id: String,
         _parent_window: String,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
-        self.run(connection, handle, Method::SaveFile, title, options).await
+        self.run(connection, &header, handle, Method::SaveFile, title, options).await
     }
 
     async fn save_files(
         &self,
         #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
         handle: OwnedObjectPath,
         _app_id: String,
         _parent_window: String,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<Reply>> {
-        self.run(connection, handle, Method::SaveFiles, title, options).await
+        self.run(connection, &header, handle, Method::SaveFiles, title, options).await
     }
 }
 
@@ -270,6 +307,9 @@ fn decode_request(
     reply: Sender<PickerResponse>,
     closed: Receiver<()>,
 ) -> Result<PickerRequest, String> {
+    if title.len() > MAX_TITLE_BYTES {
+        return Err(format!("the title is longer than {MAX_TITLE_BYTES} bytes"));
+    }
     let directory = bool_option(options, "directory")?.unwrap_or(false);
     let multiple = bool_option(options, "multiple")?.unwrap_or(false);
     let mode = match method {
@@ -445,11 +485,16 @@ fn encode_response(
     let mut results = HashMap::new();
     match response {
         PickerResponse::Chosen { paths, filter } => {
+            // All or nothing. For `SaveFiles` the caller pairs the URIs with
+            // the names it sent by position, so dropping one bad path would
+            // quietly write every following file under the wrong name.
             let uris = paths
                 .iter()
-                .filter_map(|path| Url::from_file_path(path).ok())
-                .map(String::from)
-                .collect::<Vec<_>>();
+                .map(|path| Url::from_file_path(path).map(String::from))
+                .collect::<Result<Vec<_>, _>>();
+            let Ok(uris) = uris else {
+                return (RESPONSE_OTHER, results);
+            };
             if let Ok(uris) = OwnedValue::try_from(Value::from(uris)) {
                 results.insert("uris".to_string(), uris);
             }
@@ -586,6 +631,22 @@ mod tests {
     }
 
     #[test]
+    fn an_overlong_title_is_refused_before_it_can_reach_a_window() {
+        let (reply, _responses) = async_channel::bounded(1);
+        let (_close, closed) = async_channel::bounded(1);
+        let title = "x".repeat(MAX_TITLE_BYTES + 1);
+        let error = decode_request(Method::OpenFile, title, &HashMap::new(), reply, closed)
+            .err()
+            .expect("a title past the bound must be an invalid argument");
+        assert!(error.contains("title"), "{error}");
+
+        let (reply, _responses) = async_channel::bounded(1);
+        let (_close, closed) = async_channel::bounded(1);
+        let title = "x".repeat(MAX_TITLE_BYTES);
+        assert!(decode_request(Method::OpenFile, title, &HashMap::new(), reply, closed).is_ok());
+    }
+
+    #[test]
     fn wrongly_typed_options_are_rejected_rather_than_ignored() {
         let options = self::options(vec![("multiple", Value::from("yes"))]);
         assert!(decode(Method::OpenFile, &options).is_err());
@@ -625,5 +686,22 @@ mod tests {
         assert_eq!((code, results.len()), (RESPONSE_CANCELLED, 0));
         let (code, _) = encode_response(PickerResponse::Closed, &filters);
         assert_eq!(code, RESPONSE_OTHER);
+    }
+
+    #[test]
+    fn a_path_that_makes_no_uri_fails_the_whole_answer_instead_of_shifting_the_rest() {
+        let (code, results) = encode_response(
+            PickerResponse::Chosen {
+                paths: vec![
+                    PathBuf::from("/tmp/first.txt"),
+                    PathBuf::from("relative.txt"),
+                    PathBuf::from("/tmp/third.txt"),
+                ],
+                filter: None,
+            },
+            &[],
+        );
+        assert_eq!(code, RESPONSE_OTHER);
+        assert!(!results.contains_key("uris"));
     }
 }
