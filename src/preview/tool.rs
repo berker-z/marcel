@@ -6,22 +6,45 @@
 //! its output is read back bounded, its failure is worded with whatever it
 //! said on stderr, and what it produced lands in a private cache directory
 //! keyed by the source's identity and pruned by age.
+//!
+//! [`command`] is the one place a child process is set up, for previews and
+//! for everything else Marcel spawns.
 
 use std::{
+    ffi::OsStr,
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use md5::{Digest, Md5};
+use rustix::process::{Pid, Signal, kill_process_group};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(15);
 const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 const MAX_CACHE_FILES: usize = 512;
+
+/// A `Command` for a program Marcel runs on its own behalf: a preview tool,
+/// an archiver, a desktop handler.
+///
+/// The Nix development shell and the installed wrapper hand Marcel its
+/// native libraries through `LD_LIBRARY_PATH`. An independently packaged
+/// program that inherits that private search path can pick up the wrong
+/// glibc or graphics stack and die before it starts, so the variable is
+/// dropped here once rather than remembered at every spawn. stdin is closed
+/// so a tool that wants a terminal reads EOF instead of hanging on Marcel's,
+/// and the child gets its own process group so [`terminate`] takes anything
+/// it forked along with it.
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.env_remove("LD_LIBRARY_PATH").stdin(Stdio::null()).process_group(0);
+    command
+}
 
 /// Run `command` to completion, killing it when the preview is cancelled or
 /// `timeout` passes. `what` names the preview in the errors ("PDF preview");
@@ -64,7 +87,11 @@ pub(super) fn run_child(
     }
 }
 
-fn terminate(child: &mut Child) {
+/// Kill a child started through [`command`] and reap it. The signal goes to
+/// its process group, not the one pid, so a helper the tool forked does not
+/// outlive it; `kill` afterwards covers a child that never got a group.
+pub(super) fn terminate(child: &mut Child) {
+    let _ = kill_process_group(Pid::from_child(child), Signal::KILL);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -164,5 +191,61 @@ pub(super) fn prune_cache(cache_dir: &Path) {
     let remove_count = files.len() - MAX_CACHE_FILES;
     for (_, path) in files.into_iter().take(remove_count) {
         let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Everything the builder promises, seen from inside the child: no
+    /// `LD_LIBRARY_PATH`, EOF on stdin, and a process group of its own.
+    #[test]
+    fn a_command_is_stripped_of_the_library_path_and_detached() {
+        let mut command = command("sh");
+        // The removal is recorded on the command whether or not this
+        // process has the variable, so it holds under a plain `cargo test`.
+        assert!(
+            command.get_envs().any(|(key, value)| key == "LD_LIBRARY_PATH" && value.is_none()),
+            "the library path is explicitly removed"
+        );
+        command
+            .args(["-c", "printf '%s|%s' \"${LD_LIBRARY_PATH-unset}\" \"$(cat)\""])
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let pid = Pid::from_child(&child);
+        assert_eq!(rustix::process::getpgid(Some(pid)).unwrap(), pid, "leads its own group");
+        let mut out = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(out, "unset|", "no library path, and stdin already at EOF");
+    }
+
+    /// Killing the group takes a grandchild the tool forked along, which a
+    /// plain `kill` on the child's pid would leave running.
+    #[test]
+    fn terminate_kills_the_whole_group() {
+        let mut command = command("sh");
+        command.args(["-c", "sleep 30 & echo $!; wait"]).stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let mut line = String::new();
+        let mut stdout = io::BufReader::new(child.stdout.take().unwrap());
+        io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+        let grandchild: i32 = line.trim().parse().unwrap();
+
+        terminate(&mut child);
+
+        // The sleep is reparented when the shell dies and reaped by whoever
+        // inherits it, so allow a moment for that; gone or a zombie both do.
+        let gone = || {
+            fs::read_to_string(format!("/proc/{grandchild}/stat"))
+                .map(|stat| stat.contains(") Z "))
+                .unwrap_or(true)
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !gone() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(gone(), "the grandchild outlived the tool");
     }
 }

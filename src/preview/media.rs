@@ -23,6 +23,22 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
 const POSTER_EDGE: u32 = 1280;
 const ABSENT: &str = "Video preview needs ffmpeg (`ffprobe` and `ffmpeg` on PATH)";
 
+/// `ffmpeg` or `ffprobe` under the shared child-process rules, with the
+/// input pinned to local protocols.
+///
+/// ffmpeg picks a demuxer by content, so a file named `clip.mp4` may really
+/// be a playlist naming `http:` segments. ffmpeg's `file` protocol already
+/// limits what an input it opened may open in turn to this same list, so
+/// the option is belt and braces rather than the closing of a live hole,
+/// stated on every invocation so the intent outlives ffmpeg's defaults. It
+/// applies to the input that follows it, so it has to precede `-i`, and it
+/// leaves an output such as `pipe:1` alone.
+pub(super) fn ffmpeg_command(program: &str) -> Command {
+    let mut command = tool::command(program);
+    command.args(["-protocol_whitelist", "file,crypto,data"]);
+    command
+}
+
 /// What `ffprobe` says about a file: the streams, and the tags a container
 /// carries at the top level.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -67,7 +83,7 @@ pub fn probe(source: &Path, cancelled: &Arc<AtomicBool>) -> io::Result<MediaInfo
     let stdout_writer = stdout.try_clone()?;
     let stderr_writer = stderr.try_clone()?;
 
-    let mut command = Command::new("ffprobe");
+    let mut command = ffmpeg_command("ffprobe");
     command
         .args(["-v", "error", "-show_entries"])
         .arg(
@@ -191,7 +207,7 @@ pub fn poster_frame(
         tool::check_cancelled(cancelled, "Video preview")?;
         let stderr = tempfile::tempfile()?;
         let stderr_writer = stderr.try_clone()?;
-        let mut command = Command::new("ffmpeg");
+        let mut command = ffmpeg_command("ffmpeg");
         command
             .args(["-v", "error", "-nostdin", "-y"])
             .arg("-ss")
@@ -293,6 +309,24 @@ stream_0_channels=2
         assert_eq!(parse_probe(""), MediaInfo::default());
         assert_eq!(parse_probe("format_duration=\"N/A\"\n").duration, None);
         assert_eq!(parse_probe("format_duration=\"-1\"\n").duration, None);
+    }
+
+    /// The whitelist leads every command line, ahead of `-i`, and the
+    /// shared rules come with it.
+    #[test]
+    fn every_ffmpeg_invocation_is_pinned_to_local_protocols() {
+        for program in ["ffmpeg", "ffprobe"] {
+            let mut command = ffmpeg_command(program);
+            command.args(["-i", "clip.mp4"]);
+            let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned());
+            assert_eq!(
+                args.collect::<Vec<_>>(),
+                ["-protocol_whitelist", "file,crypto,data", "-i", "clip.mp4"]
+            );
+            assert!(
+                command.get_envs().any(|(key, value)| key == "LD_LIBRARY_PATH" && value.is_none())
+            );
+        }
     }
 
     #[test]
