@@ -247,8 +247,6 @@ impl Marcel {
             .when(is_trash, |this| {
                 this.on_click(cx.listener(|this, _, _, cx| {
                     this.start_trash_load(true, cx);
-                    // The load clears the session's filter; the field follows.
-                    this.show_filter_text(String::new(), cx);
                 }))
             })
             .child(icon)

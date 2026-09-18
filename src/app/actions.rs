@@ -584,10 +584,9 @@ impl Marcel {
     }
 
     fn replace_search_text(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
-        // InputState emits Change asynchronously. Keep the directory session,
-        // which is the authoritative value used by render(), in sync first so
-        // a render triggered by moving focus cannot restore the old query and
-        // discard the first type-to-filter character.
+        // Both halves are written by hand: `set_value` deliberately emits no
+        // Change event, so the session would otherwise never hear about a
+        // query that did not come from typing in the field.
         self.set_filter_query(value.clone(), cx);
         self.ui.search_input.update(cx, |input, cx| input.set_value(value, window, cx));
     }
@@ -598,6 +597,7 @@ impl Marcel {
     }
 
     pub(super) fn set_filter_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.show_filter_text(query.clone(), cx);
         if let Some(reconcile) = self.directory.set_filter_query(query) {
             self.reprojected(reconcile, cx);
         }

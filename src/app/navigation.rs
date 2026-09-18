@@ -64,7 +64,7 @@ fn load_kind(clear_filter: bool) -> LoadKind {
 
 impl Marcel {
     /// Reset everything a fresh listing invalidates.
-    fn begin_listing(&mut self, kind: LoadKind) {
+    fn begin_listing(&mut self, kind: LoadKind, cx: &mut Context<Self>) {
         self.ui.rename = None;
         self.ui.entry_menu = None;
         self.sidebar.bookmark_menu = None;
@@ -72,6 +72,8 @@ impl Marcel {
         if kind == LoadKind::Navigate {
             self.preview.reset_thumbnails();
             self.clear_selection();
+            // The load clears the session's filter; the field follows.
+            self.show_filter_text(String::new(), cx);
             // A navigation shows a new folder from the top. Only a refresh of
             // the same folder — which never clears the filter — keeps the
             // user's place; the old pixel offset in a different folder landed
@@ -97,7 +99,7 @@ impl Marcel {
             return;
         }
         let kind = load_kind(clear_filter);
-        self.begin_listing(kind);
+        self.begin_listing(kind, cx);
         let (ticket, path) = self.directory.begin_load(kind);
         // Watch from the start of the enumeration, not its end: a change
         // arriving while a large directory streamed used to be lost for good.
@@ -216,7 +218,7 @@ impl Marcel {
     pub(super) fn start_trash_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
         self.sidebar.browsing_trash = true;
         let kind = load_kind(clear_filter);
-        self.begin_listing(kind);
+        self.begin_listing(kind, cx);
         let ticket = self.directory.begin_virtual_load(kind);
         if kind == LoadKind::Navigate {
             self.sidebar.trash_records.clear();
