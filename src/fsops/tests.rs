@@ -1530,21 +1530,33 @@ fn copy_applies_modes_that_forbid_reading_the_copy_back_after_its_times() {
     let modified = UNIX_EPOCH + Duration::from_secs(1_650_000_123);
     let times = fs::FileTimes::new().set_modified(modified);
 
+    // The walker holds each source open from before it reads it, so the
+    // handles here predate the modes that would refuse a fresh open.
     let locked = sandbox.file("lock", b"held");
+    let mut locked_handle = fs::File::open(&locked).unwrap();
     let copied_lock = sandbox.path("lock copy");
-    copy_file_cancellable(&locked, &copied_lock, &no_cancel(), None).unwrap();
-    fs::File::open(&locked).unwrap().set_times(times).unwrap();
+    copy_file_cancellable(&mut locked_handle, &locked, &copied_lock, &no_cancel(), None).unwrap();
+    locked_handle.set_times(times).unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
     let dropbox = sandbox.dir("dropbox");
+    let dropbox_handle = fs::File::open(&dropbox).unwrap();
     let copied_dropbox = sandbox.dir("dropbox copy");
-    fs::File::open(&dropbox).unwrap().set_times(times).unwrap();
+    dropbox_handle.set_times(times).unwrap();
     fs::set_permissions(&dropbox, fs::Permissions::from_mode(0o300)).unwrap();
 
-    let lock_result =
-        preserve_metadata(&locked, &copied_lock, &fs::symlink_metadata(&locked).unwrap());
-    let dropbox_result =
-        preserve_metadata(&dropbox, &copied_dropbox, &fs::symlink_metadata(&dropbox).unwrap());
+    let lock_result = preserve_metadata(
+        &locked_handle,
+        &locked,
+        &copied_lock,
+        &fs::symlink_metadata(&locked).unwrap(),
+    );
+    let dropbox_result = preserve_metadata(
+        &dropbox_handle,
+        &dropbox,
+        &copied_dropbox,
+        &fs::symlink_metadata(&dropbox).unwrap(),
+    );
 
     // An unlistable folder cannot be torn down with the sandbox, so record
     // what happened and reopen everything before asserting anything.
@@ -1574,7 +1586,8 @@ fn copy_creates_files_owner_only_until_finished() {
     fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
     let staged = sandbox.path("staged");
 
-    copy_file_cancellable(&source, &staged, &no_cancel(), None).unwrap();
+    let mut input = fs::File::open(&source).unwrap();
+    copy_file_cancellable(&mut input, &source, &staged, &no_cancel(), None).unwrap();
 
     assert_eq!(fs::metadata(&staged).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(read(&staged), b"shh");
@@ -1783,4 +1796,227 @@ fn extraction_that_replaces_is_undone_by_restoring_the_occupant() {
     assert_eq!(read(&source), b"edited since");
     assert!(no_replacement_quarantines(sandbox.root()));
     assert!(!undone.is_undoable());
+}
+
+// ---------------------------------------------------------------------------
+// The window between inspecting a source entry and opening it.
+
+/// Everything Marcel leaves in a directory while it works, or fails to take
+/// back afterwards.
+fn no_working_names(directory: &Path) -> bool {
+    fs::read_dir(directory).unwrap().flatten().all(|entry| {
+        let name = entry.file_name();
+        !is_internal_working_name(&name) && !is_recovery_remnant_name(&name)
+    })
+}
+
+fn make_fifo(path: &Path) {
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+
+    mknodat(CWD, path, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+}
+
+/// Put `replacement` where `victim` is, the way a co-writer would: with a
+/// rename over the name, so the old inode cannot be handed straight back to
+/// the new object and make the identity check pass by coincidence.
+fn swap_in(victim: &Path, replacement: &Path) {
+    fs::rename(replacement, victim).unwrap();
+}
+
+/// Run a copy on its own thread and give up waiting after a while, so a copy
+/// that blocks on a FIFO fails the test instead of hanging it.
+fn copy_within(
+    timeout: Duration,
+    sources: Vec<PathBuf>,
+    destination: PathBuf,
+    interference: impl FnMut(&Path) + Send + 'static,
+) -> TransferOutcome {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _guard = copy::fault::between_inspection_and_open_do(interference);
+        let _ = sender.send(copy(&sources, &destination));
+    });
+    receiver.recv_timeout(timeout).expect("the copy must finish rather than block")
+}
+
+/// `open(2)` on a FIFO with no writer blocks until one arrives; a copy that
+/// opened its source by path after inspecting it could be parked forever by
+/// a FIFO swapped in between, with the cancel flag unable to reach it.
+#[test]
+fn copy_refuses_a_fifo_swapped_in_for_a_file_without_blocking() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    let report = sandbox.file("source/report.txt", b"report");
+    let destination = sandbox.dir("destination");
+    let fifo = sandbox.path("fifo");
+    make_fifo(&fifo);
+
+    let trigger = report.clone();
+    let outcome =
+        copy_within(Duration::from_secs(10), vec![source], destination.clone(), move |path| {
+            if path == trigger {
+                swap_in(&trigger, &fifo);
+            }
+        });
+
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(outcome.failures[0].message.contains("report.txt"), "{:?}", outcome.failures);
+    assert!(!destination.join("source").exists(), "nothing is published from a refused copy");
+    assert!(no_working_names(&destination));
+}
+
+/// A link swapped in for a file must not be read through: that would copy
+/// another readable file under the original's name and mode.
+#[test]
+fn copy_refuses_a_link_swapped_in_for_a_file() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    let report = sandbox.file("source/report.txt", b"report");
+    let secret = sandbox.file("secret", b"do not copy");
+    let link = sandbox.path("link");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let destination = sandbox.dir("destination");
+
+    let trigger = report.clone();
+    let outcome =
+        copy_within(Duration::from_secs(10), vec![source], destination.clone(), move |path| {
+            if path == trigger {
+                swap_in(&trigger, &link);
+            }
+        });
+
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(!destination.join("source").exists());
+    assert!(no_working_names(&destination));
+}
+
+/// A regular file swapped in for a regular file passes every type check, so
+/// only the identity of the opened descriptor can tell it apart from what the
+/// walker decided to copy.
+#[test]
+fn copy_refuses_a_file_replaced_between_inspection_and_open() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    let report = sandbox.file("source/report.txt", b"report");
+    let impostor = sandbox.file("impostor", b"impostor");
+    let destination = sandbox.dir("destination");
+
+    let trigger = report.clone();
+    let outcome =
+        copy_within(Duration::from_secs(10), vec![source], destination.clone(), move |path| {
+            if path == trigger {
+                swap_in(&trigger, &impostor);
+            }
+        });
+
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(outcome.failures[0].message.contains("was replaced"), "{:?}", outcome.failures);
+    assert!(!destination.join("source").exists());
+}
+
+/// A path-based walker resolved every entry from the root again, so a
+/// directory component swapped for a link mid-walk redirected the rest of the
+/// walk into whatever the link pointed at. Each level is held open now, and
+/// the entries below it are read through that descriptor.
+#[test]
+fn copy_reads_through_held_directories_when_a_component_is_swapped_for_a_link() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    sandbox.file("source/sub/deep/a.txt", b"original");
+    sandbox.file("source/sub/deep/b.txt", b"original too");
+    sandbox.file("outside/deep/a.txt", b"planted");
+    sandbox.file("outside/deep/b.txt", b"planted too");
+    let destination = sandbox.dir("destination");
+    let sub = sandbox.path("source/sub");
+    let aside = sandbox.path("sub-aside");
+    let outside = sandbox.path("outside");
+
+    let trigger = sandbox.path("source/sub/deep/a.txt");
+    let outcome =
+        copy_within(Duration::from_secs(10), vec![source], destination.clone(), move |path| {
+            if path == trigger {
+                fs::rename(&sub, &aside).unwrap();
+                std::os::unix::fs::symlink(&outside, &sub).unwrap();
+            }
+        });
+
+    assert_clean(&outcome);
+    assert_eq!(read(destination.join("source/sub/deep/a.txt")), b"original");
+    assert_eq!(read(destination.join("source/sub/deep/b.txt")), b"original too");
+    assert!(
+        destination.join("source/sub").symlink_metadata().unwrap().is_dir(),
+        "the copy holds the directory the walk entered, not the link swapped in"
+    );
+}
+
+/// A link swapped in for a directory the walker is about to enter is refused
+/// rather than entered.
+#[test]
+fn copy_refuses_a_link_swapped_in_for_a_directory_it_is_about_to_enter() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    sandbox.file("source/sub/a.txt", b"original");
+    sandbox.file("outside/a.txt", b"planted");
+    let destination = sandbox.dir("destination");
+    let sub = sandbox.path("source/sub");
+    let aside = sandbox.path("sub-aside");
+    let outside = sandbox.path("outside");
+
+    let trigger = sub.clone();
+    let outcome =
+        copy_within(Duration::from_secs(10), vec![source], destination.clone(), move |path| {
+            if path == trigger {
+                fs::rename(&sub, &aside).unwrap();
+                std::os::unix::fs::symlink(&outside, &sub).unwrap();
+            }
+        });
+
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(!destination.join("source").exists());
+}
+
+/// The copy primitives themselves refuse what the walker must never open:
+/// a FIFO returns at once instead of blocking, and a link is not followed.
+#[test]
+fn descriptor_opens_refuse_fifos_and_links_without_blocking() {
+    use super::local::{CWD, open_directory_at, open_regular_file_at};
+
+    let sandbox = Sandbox::new();
+    let fifo = sandbox.path("fifo");
+    make_fifo(&fifo);
+    let file = sandbox.file("file", b"content");
+    let directory = sandbox.dir("directory");
+    let file_link = sandbox.path("file-link");
+    let directory_link = sandbox.path("directory-link");
+    std::os::unix::fs::symlink(&file, &file_link).unwrap();
+    std::os::unix::fs::symlink(&directory, &directory_link).unwrap();
+
+    let started = std::time::Instant::now();
+    assert!(open_regular_file_at(CWD, &fifo).is_err());
+    assert!(started.elapsed() < Duration::from_secs(5), "a FIFO must not block the open");
+    assert!(open_regular_file_at(CWD, &file_link).is_err());
+    assert!(open_regular_file_at(CWD, &directory).is_err());
+    assert!(open_regular_file_at(CWD, &file).is_ok());
+    assert!(open_directory_at(CWD, &directory_link).is_err());
+    assert!(open_directory_at(CWD, &file).is_err());
+    assert!(open_directory_at(CWD, &directory).is_ok());
+}
+
+/// The self-containment check compares identities up the destination's
+/// ancestor chain, so a plainly nested destination is refused at every depth,
+/// not only when the source is the immediate parent.
+#[test]
+fn copy_refuses_a_destination_nested_anywhere_below_the_source() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.dir("source");
+    let deep = sandbox.dir("source/a/b/c");
+
+    let outcome = copy(std::slice::from_ref(&source), &deep);
+
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(outcome.failures[0].message.contains("into itself"), "{:?}", outcome.failures);
+    assert!(!deep.join("source").exists());
+    // A sibling of the source is not inside it, whatever it is called.
+    let sibling = sandbox.dir("source-sibling/a/b/c");
+    assert_clean(&copy(std::slice::from_ref(&source), &sibling));
 }

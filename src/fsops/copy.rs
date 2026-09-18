@@ -1,17 +1,38 @@
 //! Copying one entry into a private staging directory and publishing it with a
 //! single rename, and folding one directory into another.
 //!
+//! The source is read through descriptors, never re-resolved by path. The
+//! walker holds one directory descriptor per level and opens every entry
+//! relative to its parent with `O_NOFOLLOW`, so a component that another
+//! writer swaps for a symlink after the walk listed it is not followed, and a
+//! FIFO or link put in a file's place between inspection and open is refused
+//! rather than blocked on or read through. The destination is Marcel's own
+//! `0700` staging directory until the publishing rename, so it is addressed by
+//! path.
+//!
+//! Durability: every file's content is fsync'd before its metadata is applied,
+//! every directory of the staged tree is fsync'd once the whole tree is in
+//! place, and the directory a copy is published into is fsync'd after the
+//! rename. Publication is therefore crash-durable and not just ordered — after
+//! a power loss the destination holds either the whole copy or nothing, and
+//! the staging directory that held the rest is reclaimed as abandoned. The
+//! directory syncs are batched so they cost one journal commit per copy rather
+//! than one per directory; a merge likewise syncs each directory it added to
+//! once at the end, not once per file.
+//!
 //! Conceptually follows Yazi's copier and attribute preservation; no Yazi code
 //! is copied:
 //! https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-fs/src/engine/local/copier.rs
 //! https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-fs/src/engine/attrs.rs
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     ffi::OsStr,
     fs,
     io::{self, Read as _, Seek as _, Write as _},
+    os::fd::{AsFd as _, BorrowedFd},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -21,12 +42,16 @@ use anyhow::{Context as _, Result, bail};
 use super::{
     TransferProgress,
     conflict::describe_occupant,
-    identity::FileIdentity,
+    identity::{FileIdentity, ObjectKey},
     journal::{
         PathSnapshot, SnapshotCollector, SnapshotKind, rebase_snapshots,
         refresh_snapshot_identities,
     },
-    local::{ensure_unoccupied, inspect, rename_no_replace, sorted_children},
+    local::{
+        CWD, ensure_unoccupied, hold_directory, hold_entry, inspect, open_directory_at,
+        open_regular_file_at, read_link_target, rename_no_replace, sorted_child_names,
+        sorted_children,
+    },
 };
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -45,6 +70,23 @@ pub(super) fn copy_one(
     progress: Option<&TransferProgress>,
     snapshot_limit: usize,
 ) -> Result<CopiedItem> {
+    let copied = copy_one_unsynced(source, destination, cancelled, progress, snapshot_limit)?;
+    sync_directory(destination.parent().context("Copy destination has no parent directory")?);
+    Ok(copied)
+}
+
+/// [`copy_one`] without the final fsync of the directory published into.
+///
+/// A merge publishes many files into the same few directories and syncs each
+/// of them once at the end instead; doing it here would turn one journal
+/// commit per directory into one per file.
+fn copy_one_unsynced(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+    snapshot_limit: usize,
+) -> Result<CopiedItem> {
     // Prepare.
     ensure_unoccupied(destination)?;
     ensure_not_self_containing(source, destination, "copy")?;
@@ -57,6 +99,7 @@ pub(super) fn copy_one(
         hardlinks: HashMap::new(),
         sources: SnapshotCollector::new(snapshot_limit),
         created: SnapshotCollector::new(snapshot_limit),
+        staged_directories: Vec::new(),
     };
     copier.copy_tree(source, &staged)?;
     // Commit. The staging directory is removed when `staging` drops, taking
@@ -78,31 +121,65 @@ pub(super) fn copy_one(
     })
 }
 
+/// Make a directory's entries durable after something was published into it.
+///
+/// This runs after the commit, so it can only make the published entry
+/// survive a crash; it cannot make the publication fail. A filesystem that
+/// refuses to sync a directory has left the copy correct and reachable, and
+/// there is nothing the caller could undo or redo about it, so the error is
+/// not reported.
+fn sync_directory(directory: &Path) {
+    if let Ok(directory) = fs::File::open(directory) {
+        let _ = directory.sync_all();
+    }
+}
+
 /// Reject a copy or move whose destination resolves back inside its own
-/// source. A lexical prefix test misses a symlinked destination, which would
-/// place Marcel's staging directory inside the tree being walked and make the
-/// copy enumerate and re-copy its own output until `PATH_MAX` stops it.
+/// source. Otherwise Marcel's staging directory lands inside the tree being
+/// walked and the copy enumerates and re-copies its own output until
+/// `PATH_MAX` stops it.
+///
+/// The destination's ancestors are compared with the source by identity, not
+/// by path: a lexical prefix test misses a symlinked destination, and a
+/// canonical-path test misses a bind mount, which gives the same directory a
+/// second name that resolves to nothing in common with the first. Device and
+/// inode are shared by every name of a directory, so walking `..` from the
+/// destination's parent to the root and comparing each step catches both.
+/// (The bind-mount case is covered by construction; creating one needs root,
+/// so only the symlink case is exercised by the tests.)
 pub(super) fn ensure_not_self_containing(
     source: &Path,
     destination: &Path,
     action: &str,
 ) -> Result<()> {
-    if !inspect(source)?.file_type().is_dir() {
+    let source_metadata = inspect(source)?;
+    if !source_metadata.file_type().is_dir() {
         // Symbolic links are recreated as links rather than traversed, so a
         // link resolving into the destination cannot recurse.
         return Ok(());
     }
-    let source_real = source.canonicalize().at("Could not resolve", source)?;
+    let source_key = ObjectKey::of(&source_metadata);
     let parent = destination.parent().context("Destination has no parent directory")?;
-    let parent_real = parent.canonicalize().at("Could not resolve", parent)?;
-    let name = destination.file_name().context("Destination has no file name")?;
-    if parent_real.join(name).starts_with(&source_real) {
+    let refuse = || {
         bail!(
             "Cannot {action} “{}” into itself",
             source.file_name().unwrap_or_default().to_string_lossy()
-        );
+        )
+    };
+    let mut ancestor = hold_directory(CWD, parent).at("Could not resolve", parent)?;
+    loop {
+        let key = ObjectKey::of(&ancestor.metadata().at("Could not inspect", parent)?);
+        if key == source_key {
+            return refuse();
+        }
+        let above =
+            hold_directory(ancestor.as_fd(), Path::new("..")).at("Could not resolve", parent)?;
+        // The root is its own parent; nothing above it can be the source.
+        if ObjectKey::of(&above.metadata().at("Could not inspect", parent)?) == key {
+            return Ok(());
+        }
+        ancestor = above;
     }
-    Ok(())
 }
 
 /// Reserve a private staging directory beside the destination.
@@ -125,11 +202,17 @@ fn reserve_staging_directory(destination: &Path) -> Result<tempfile::TempDir> {
 /// directly.
 enum CopyStep {
     Visit {
+        /// The held directory `source` is named in, or `None` for the root,
+        /// whose whole path the user chose. Every pending child of a directory
+        /// shares its descriptor, which is what keeps the level open until
+        /// the last child has been read through it.
+        parent: Option<Rc<fs::File>>,
         source: PathBuf,
         destination: PathBuf,
     },
     FinishDirectory {
-        source: PathBuf,
+        source: Rc<fs::File>,
+        source_path: PathBuf,
         destination: PathBuf,
         metadata: fs::Metadata,
         created_index: Option<usize>,
@@ -145,6 +228,8 @@ struct Copier<'a> {
     hardlinks: HashMap<(u64, u64), PathBuf>,
     sources: SnapshotCollector,
     created: SnapshotCollector,
+    /// Every directory created so far, synced together before publication.
+    staged_directories: Vec<PathBuf>,
 }
 
 impl Copier<'_> {
@@ -155,21 +240,56 @@ impl Copier<'_> {
     /// deep enough tree aborted the whole process with a stack overflow
     /// mid-mutation. The archive and delete walkers already used explicit
     /// stacks; this matches them.
+    ///
+    /// The walk holds one descriptor per level of the path it is currently
+    /// inside, so a tree deeper than the process's descriptor limit fails
+    /// with `EMFILE` rather than escaping the guard. `PATH_MAX` keeps that
+    /// depth in the low thousands, and the usual soft limit is well above.
     fn copy_tree(&mut self, source: &Path, destination: &Path) -> Result<()> {
         let mut steps = vec![CopyStep::Visit {
+            parent: None,
             source: source.to_path_buf(),
             destination: destination.to_path_buf(),
         }];
         while let Some(step) = steps.pop() {
             match step {
-                CopyStep::Visit { source, destination } => {
-                    self.visit(source, destination, &mut steps)?
+                CopyStep::Visit { parent, source, destination } => {
+                    self.visit(parent, source, destination, &mut steps)?
                 }
-                CopyStep::FinishDirectory { source, destination, metadata, created_index } => {
-                    preserve_metadata(&source, &destination, &metadata)?;
+                CopyStep::FinishDirectory {
+                    source,
+                    source_path,
+                    destination,
+                    metadata,
+                    created_index,
+                } => {
+                    preserve_metadata(&source, &source_path, &destination, &metadata)?;
                     self.created.refresh(created_index, &destination, &inspect(&destination)?);
                     self.complete_item();
                 }
+            }
+        }
+        self.sync_staged_directories()
+    }
+
+    /// Make the staged directories durable, all at once, before publication.
+    ///
+    /// Every file was fsync'd as it was written, so what is still in flight
+    /// here is directory metadata: entries, times, modes. Syncing each
+    /// directory as it finished cost a journal commit apiece and doubled the
+    /// time to copy a tree of one-file directories (2.1 s to 3.8 s for a
+    /// thousand of them); done together after the last file, the first sync
+    /// commits everything and the rest find nothing dirty (about 0.1 s for
+    /// the same thousand). A directory whose copied mode denies its owner the
+    /// read bit cannot be opened for the sync; the publishing directory's own
+    /// fsync still covers it on a journaling filesystem, and there is nothing
+    /// else to do, so it is skipped.
+    fn sync_staged_directories(&mut self) -> Result<()> {
+        for directory in self.staged_directories.drain(..) {
+            match fs::File::open(&directory) {
+                Ok(opened) => opened.sync_all().at("Could not finish", &directory)?,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(error) => return Err(error).at("Could not finish", &directory),
             }
         }
         Ok(())
@@ -177,6 +297,7 @@ impl Copier<'_> {
 
     fn visit(
         &mut self,
+        parent: Option<Rc<fs::File>>,
         source: PathBuf,
         destination: PathBuf,
         steps: &mut Vec<CopyStep>,
@@ -184,7 +305,22 @@ impl Copier<'_> {
         if self.cancelled.load(Ordering::Acquire) {
             bail!("Operation cancelled");
         }
-        let metadata = inspect(&source)?;
+        let (dir, name): (BorrowedFd<'_>, &Path) = match &parent {
+            Some(parent) => (
+                parent.as_fd(),
+                Path::new(source.file_name().context("Source entry has no file name")?),
+            ),
+            None => (CWD, &source),
+        };
+        // Decide on the object first, then open it and check that the open
+        // reached the same object. Between the two, a writer sharing the
+        // directory can swap the name for a link or a FIFO; the identity
+        // check is what turns that into a refusal instead of a read of
+        // whatever the new name leads to.
+        let held = hold_entry(dir, name).at("Could not inspect", &source)?;
+        let metadata = held.metadata().at("Could not inspect", &source)?;
+        #[cfg(test)]
+        fault::between_inspection_and_open(&source);
         self.sources.push(&source, &metadata);
         let kind = metadata.file_type();
         if let Some(progress) = self.progress {
@@ -192,11 +328,16 @@ impl Copier<'_> {
         }
 
         if kind.is_dir() {
+            let opened = open_directory_at(dir, name).at("Could not open", &source)?;
+            ensure_same_object(&metadata, &opened, &source)?;
             fs::create_dir(&destination).at("Could not create", &destination)?;
             let created_index = self.created.push(&destination, &inspect(&destination)?);
-            let children = sorted_children(&source)?;
+            self.staged_directories.push(destination.clone());
+            let children = sorted_child_names(&opened).at("Could not read", &source)?;
+            let opened = Rc::new(opened);
             steps.push(CopyStep::FinishDirectory {
-                source,
+                source: Rc::clone(&opened),
+                source_path: source.clone(),
                 destination: destination.clone(),
                 metadata,
                 created_index,
@@ -204,19 +345,23 @@ impl Copier<'_> {
             // Reversed so children pop in enumeration order.
             for child in children.into_iter().rev() {
                 steps.push(CopyStep::Visit {
-                    destination: destination.join(child.file_name()),
-                    source: child.path(),
+                    parent: Some(Rc::clone(&opened)),
+                    destination: destination.join(&child),
+                    source: source.join(&child),
                 });
             }
             return Ok(());
         }
         if kind.is_file() {
-            self.copy_regular_file(&source, &destination, &metadata)?;
-            preserve_metadata(&source, &destination, &metadata)?;
+            let mut opened = open_regular_file_at(dir, name).at("Could not open", &source)?;
+            ensure_same_object(&metadata, &opened, &source)?;
+            self.copy_regular_file(&mut opened, &source, &destination, &metadata)?;
+            preserve_metadata(&opened, &source, &destination, &metadata)?;
         } else if kind.is_symlink() {
-            let target = fs::read_link(&source).at("Could not read link", &source)?;
+            // Linux keeps user and ACL attributes off symbolic links, so the
+            // target is all there is to preserve.
+            let target = read_link_target(&held).at("Could not read link", &source)?;
             std::os::unix::fs::symlink(target, &destination).at("Could not copy link", &source)?;
-            preserve_supported_xattrs(&source, &destination)?;
         } else {
             bail!("Special files are not supported yet: “{}”", source.display());
         }
@@ -233,6 +378,7 @@ impl Copier<'_> {
 
     fn copy_regular_file(
         &mut self,
+        input: &mut fs::File,
         source: &Path,
         destination: &Path,
         metadata: &fs::Metadata,
@@ -256,7 +402,7 @@ impl Copier<'_> {
             return Ok(());
         }
 
-        copy_file_cancellable(source, destination, self.cancelled, self.progress)?;
+        copy_file_cancellable(input, source, destination, self.cancelled, self.progress)?;
         if metadata.nlink() > 1 {
             self.hardlinks.insert(identity, destination.to_path_buf());
         }
@@ -264,7 +410,62 @@ impl Copier<'_> {
     }
 }
 
+/// Deterministic interference in the window between the walker inspecting a
+/// source entry and opening it — the window a co-writer in the source
+/// directory would use. Thread-local like `local::fault`, so parallel tests
+/// cannot interfere with one another.
+#[cfg(test)]
+pub(super) mod fault {
+    use std::{cell::RefCell, path::Path};
+
+    type Hook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run `hook` with every source path after it is inspected and before it
+    /// is opened, until the guard drops.
+    #[must_use = "the hook is removed when the guard drops"]
+    pub fn between_inspection_and_open_do(hook: impl FnMut(&Path) + 'static) -> Guard {
+        HOOK.with_borrow_mut(|slot| *slot = Some(Box::new(hook)));
+        Guard
+    }
+
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+
+    pub(super) fn between_inspection_and_open(source: &Path) {
+        HOOK.with_borrow_mut(|slot| {
+            if let Some(hook) = slot {
+                hook(source);
+            }
+        });
+    }
+}
+
+/// Refuse an opened descriptor unless it is the object the walker inspected.
+///
+/// `O_NOFOLLOW` already rejects a link in the final position; this catches the
+/// rest — a name unlinked and recreated as another file, or a directory
+/// swapped for a different one — by comparing device, inode, and type.
+fn ensure_same_object(expected: &fs::Metadata, opened: &fs::File, source: &Path) -> Result<()> {
+    let found = opened.metadata().at("Could not inspect", source)?;
+    if ObjectKey::of(&found) != ObjectKey::of(expected) || found.file_type() != expected.file_type()
+    {
+        bail!("“{}” was replaced while it was being copied", source.display());
+    }
+    Ok(())
+}
+
+/// Copy the content of an already opened, already verified regular file.
 pub(super) fn copy_file_cancellable(
+    input: &mut fs::File,
     source: &Path,
     destination: &Path,
     cancelled: &AtomicBool,
@@ -272,7 +473,6 @@ pub(super) fn copy_file_cancellable(
 ) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let mut input = fs::File::open(source).at("Could not open", source)?;
     // Owner-only until the content is in place. The staging directory is
     // already private, but the file should not depend on that: a copy of a
     // key or a cookie store is readable by nobody else at any point, and
@@ -283,13 +483,13 @@ pub(super) fn copy_file_cancellable(
         .mode(0o600)
         .open(destination)
         .at("Could not create", destination)?;
-    if !try_copy_sparse(&mut input, &mut output, source, cancelled, progress)? {
+    if !try_copy_sparse(input, &mut output, source, cancelled, progress)? {
         input.seek(io::SeekFrom::Start(0)).at("Could not rewind", source)?;
         output
             .set_len(0)
             .and_then(|()| output.seek(io::SeekFrom::Start(0)).map(|_| ()))
             .at("Could not restart", destination)?;
-        copy_buffered(&mut input, &mut output, source, destination, cancelled, progress)?;
+        copy_buffered(input, &mut output, source, destination, cancelled, progress)?;
     }
     output.sync_all().at("Could not finish", destination)
 }
@@ -403,12 +603,25 @@ fn try_copy_sparse(
 /// cannot be *opened* afterwards, and applying timestamps needs an open
 /// descriptor. Going last also keeps setuid and setgid off the copy until its
 /// content is final.
+///
+/// The whole mode is preserved, setuid, setgid, and sticky bits included. That
+/// is not an escalation: the copy is owned by whoever ran Marcel, so a setuid
+/// bit on it grants that user's own privileges and nothing more, exactly as
+/// `cp -p` would. A setgid bit that would hand the copy to a group the copier
+/// is not in is dropped by the kernel itself. Stripping the bits instead would
+/// silently break the copied program, which is the surprise `cp` chose not to
+/// spring either.
+///
+/// `source` is the open descriptor the content was read through, so the
+/// attributes come from the object that was copied rather than from whatever
+/// `source_path` names by the time they are read.
 pub(super) fn preserve_metadata(
-    source: &Path,
+    source: &fs::File,
+    source_path: &Path,
     destination: &Path,
     metadata: &fs::Metadata,
 ) -> Result<()> {
-    preserve_supported_xattrs(source, destination)?;
+    preserve_supported_xattrs(source, source_path, destination)?;
 
     let mut times = fs::FileTimes::new();
     let mut has_times = false;
@@ -429,21 +642,27 @@ pub(super) fn preserve_metadata(
         .at("Could not preserve permissions on", destination)
 }
 
-fn preserve_supported_xattrs(source: &Path, destination: &Path) -> Result<()> {
-    let attributes = match xattr::list(source) {
+fn preserve_supported_xattrs(
+    source: &fs::File,
+    source_path: &Path,
+    destination: &Path,
+) -> Result<()> {
+    use xattr::FileExt as _;
+
+    let attributes = match source.list_xattr() {
         Ok(attributes) => attributes,
         Err(error) if xattrs_unsupported(&error) => return Ok(()),
         Err(error) => {
-            return Err(error).at("Could not list attributes on", source);
+            return Err(error).at("Could not list attributes on", source_path);
         }
     };
 
     for name in attributes.filter(|name| supported_xattr_name(name)) {
-        let Some(value) = xattr::get(source, &name).with_context(|| {
+        let Some(value) = source.get_xattr(&name).with_context(|| {
             format!(
                 "Could not read attribute “{}” from “{}”",
                 name.to_string_lossy(),
-                source.display()
+                source_path.display()
             )
         })?
         else {
@@ -589,6 +808,8 @@ pub(super) fn merge_directories(
     let mut files = Vec::new();
     let mut undoable = true;
     let mut stopped = None;
+    // Every directory something was published into, synced once at the end.
+    let mut touched: BTreeSet<&Path> = BTreeSet::new();
 
     for directory in &plan.directories {
         if cancelled.load(Ordering::Acquire) {
@@ -600,6 +821,7 @@ pub(super) fn merge_directories(
             break;
         }
         directories.push(directory);
+        touched.extend(directory.parent());
         // Past the budget the merge still happens; it simply stops being
         // describable, and says so rather than filling a record half way.
         undoable &= directories.len() < snapshot_limit;
@@ -620,19 +842,26 @@ pub(super) fn merge_directories(
             } else {
                 0
             };
-            match copy_one(from, to, cancelled, progress, remaining / 2) {
-                Ok(copied) if copied.overflowed || !copied.undoable => undoable = false,
-                Ok(copied) if undoable => {
-                    files.extend(copied.created);
-                    undoable &= directories.len() + files.len() < snapshot_limit;
+            match copy_one_unsynced(from, to, cancelled, progress, remaining / 2) {
+                Ok(copied) => {
+                    touched.extend(to.parent());
+                    if copied.overflowed || !copied.undoable {
+                        undoable = false;
+                    } else if undoable {
+                        files.extend(copied.created);
+                        undoable &= directories.len() + files.len() < snapshot_limit;
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     stopped = Some(MergeStop::Failed(error));
                     break;
                 }
             }
         }
+    }
+
+    for directory in touched {
+        sync_directory(directory);
     }
 
     if !undoable {
