@@ -529,6 +529,8 @@ impl<'a> Transfer<'a> {
             if let Some(progress) = progress {
                 progress.set_current_path(Some(source.clone()));
             }
+            // `Ok(reversible)`: whether undo can still take this transfer
+            // back. A displaced item is only restorable while it can.
             let result = match mode {
                 TransferMode::Copy => {
                     let remaining = if copied_created.unavailable {
@@ -540,10 +542,18 @@ impl<'a> Transfer<'a> {
                         if copied.overflowed || !copied.undoable {
                             copied_sources.give_up();
                             copied_created.give_up();
+                            // Giving up empties the ledger of every earlier
+                            // copy too, so the items those copies displaced
+                            // can no longer be put back: their destinations
+                            // stay occupied by copies undo no longer knows.
+                            for item in replaced.drain(..) {
+                                erase_replacement_quarantine(&item);
+                            }
                         } else {
                             copied_sources.extend(copied.sources);
                             copied_created.extend(copied.created);
                         }
+                        !copied_created.unavailable
                     })
                 }
                 TransferMode::Move => {
@@ -553,6 +563,7 @@ impl<'a> Transfer<'a> {
                         budget.undo_snapshot_limit.saturating_sub(moved_snapshots)
                     };
                     move_one(source, &target, remaining).map(|record| {
+                        let reversible = record.is_some();
                         match record {
                             Some(record) => {
                                 moved_snapshots += record.expected_state.len();
@@ -564,19 +575,25 @@ impl<'a> Transfer<'a> {
                         if let Some(progress) = progress {
                             progress.complete_item();
                         }
+                        reversible
                     })
                 }
             };
 
             match result {
-                Ok(()) => {
+                Ok(reversible) => {
                     if let Some(item) = displaced {
                         // Holding the displaced object is what makes this
-                        // undoable. Past the budget the replacement still
-                        // stands; it simply stops being reversible, which the
-                        // caller reports.
+                        // undoable. Past the budget, or once the transfer
+                        // that displaced it has no undo of its own, the
+                        // replacement still stands; it simply stops being
+                        // reversible, which the caller reports. Recording it
+                        // anyway would have undo try to restore the item over
+                        // a destination it cannot clear.
                         let bytes = item.bytes();
-                        if replaced_bytes.saturating_add(bytes) > budget.replacement_undo_byte_limit
+                        if !reversible
+                            || replaced_bytes.saturating_add(bytes)
+                                > budget.replacement_undo_byte_limit
                         {
                             erase_replacement_quarantine(&item);
                             replacement_undo_unavailable = true;

@@ -2020,3 +2020,79 @@ fn copy_refuses_a_destination_nested_anywhere_below_the_source() {
     let sibling = sandbox.dir("source-sibling/a/b/c");
     assert_clean(&copy(std::slice::from_ref(&source), &sibling));
 }
+
+// ---------------------------------------------------------------------------
+// Replacements whose transfer lost its own undo.
+
+/// Giving up the copy ledger empties it of every earlier copy too, so an item
+/// one of those copies displaced had nowhere to return to: undo tried to put
+/// it back over a copy it no longer knew, failed with `EEXIST`, and left the
+/// original as a `.marcel-recovered-*` remnant. The quarantine is released as
+/// soon as it stops being restorable, whether the ledger was given up after
+/// the replacement or before it.
+#[test]
+fn a_replacement_whose_copy_lost_its_undo_is_released_rather_than_recorded() {
+    for overflow_first in [false, true] {
+        let sandbox = Sandbox::new();
+        // Merging stays within budget, so the operation keeps a record for
+        // undo to act on.
+        let photos = sandbox.dir("source/photos");
+        sandbox.file("source/photos/new.txt", b"new");
+        sandbox.dir("destination/photos");
+        let report = sandbox.file("source/report.txt", b"replacement");
+        let replaced = sandbox.file("destination/report.txt", b"the original");
+        let album = sandbox.dir("source/album");
+        for index in 0..6 {
+            sandbox.file(&format!("source/album/{index}.txt"), b"payload");
+        }
+        let destination = sandbox.path("destination");
+        let budget = TransferBudget { undo_snapshot_limit: 6, ..TransferBudget::default() };
+        let sources =
+            if overflow_first { vec![photos, album, report] } else { vec![photos, report, album] };
+
+        let outcome = budgeted(&sources, &destination, TransferMode::Copy, budget);
+
+        assert_clean(&outcome);
+        assert!(outcome.undo_unavailable, "overflow_first={overflow_first}: {outcome:?}");
+        assert_eq!(read(&replaced), b"replacement");
+        assert!(
+            no_working_names(&destination),
+            "overflow_first={overflow_first}: an unrestorable quarantine must be released"
+        );
+        let record = outcome.operation.expect("the merge keeps a record");
+        let undone = undo_operation(&record);
+        assert!(!undone.is_err(), "overflow_first={overflow_first}: undo must not fail");
+        assert!(!destination.join("photos/new.txt").exists(), "the merge is taken back");
+        assert_eq!(read(&replaced), b"replacement", "an unrecorded replacement stands");
+        assert!(no_working_names(&destination), "undo must leave no remnants");
+    }
+}
+
+/// A move whose own undo record was lost still stands, and so does what it
+/// displaced: recording the displaced item would have undo restore it over a
+/// destination that the record can no longer clear.
+#[test]
+fn a_replacement_whose_move_lost_its_undo_is_released_rather_than_recorded() {
+    let sandbox = Sandbox::new();
+    let note = sandbox.file("source/note.txt", b"note");
+    let album = sandbox.dir("source/album");
+    for index in 0..6 {
+        sandbox.file(&format!("source/album/{index}.txt"), b"payload");
+    }
+    let replaced = sandbox.file("destination/album", b"the original");
+    let destination = sandbox.path("destination");
+    let budget = TransferBudget { undo_snapshot_limit: 4, ..TransferBudget::default() };
+
+    let outcome = budgeted(&[note.clone(), album], &destination, TransferMode::Move, budget);
+
+    assert_clean(&outcome);
+    assert!(outcome.undo_unavailable, "{outcome:?}");
+    assert!(replaced.is_dir(), "the move stands");
+    assert!(no_working_names(&destination), "an unrestorable quarantine must be released");
+    let record = outcome.operation.expect("the first move keeps its record");
+    let undone = undo_operation(&record);
+    assert!(!undone.is_err(), "undo must not fail");
+    assert_eq!(read(&note), b"note", "the recorded move is taken back");
+    assert!(replaced.is_dir(), "the unrecorded move stands");
+    assert!(no_working_names(&destination), "undo must leave no remnants");
+}
