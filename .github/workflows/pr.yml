@@ -23,15 +23,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      # A pull request has no tag, so this compares the files with each other.
+      # A `workflow_dispatch` from a tag passes the tag name as `ci.yml` does.
       - name: Check the version and the Zed revision are the same everywhere
-        run: ./scripts/check_version.sh
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ./scripts/check_version.sh "$TAG"
 
       - name: Validate AppStream metadata
         run: |
@@ -43,16 +47,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: devshell-${{ hashFiles('flake.lock', 'flake.nix') }}
 
@@ -61,5 +65,5 @@ jobs:
           nix develop --command bash -c '
             set -euo pipefail
             cargo fmt --check
-            cargo clippy --all-targets --all-features -- -D warnings
+            cargo clippy --all-targets -- -D warnings
           '

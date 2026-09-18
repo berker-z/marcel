@@ -160,7 +160,14 @@ buildPackage (finalAttrs: {
     lld
   ];
 
-  nativeCheckInputs = [ dbus ];
+  # The archive tests skip quietly when no 7zz is on PATH, which is the right
+  # default on a developer machine and the wrong one here: a package built
+  # without archive coverage would still report green. Put 7zz on the check
+  # PATH and tell the suite to fail rather than skip without it.
+  nativeCheckInputs = [
+    dbus
+    _7zz
+  ];
 
   buildInputs = runtimeLibraries;
 
@@ -168,6 +175,7 @@ buildPackage (finalAttrs: {
     export HOME="$TMPDIR"
     export XDG_DATA_HOME="$TMPDIR/.local/share"
     export MARCEL_TEST_DBUS_SESSION_CONFIG=${./test-session.conf}
+    export MARCEL_TEST_REQUIRE_7ZZ=1
     mkdir -p "$XDG_DATA_HOME/Trash/files" "$XDG_DATA_HOME/Trash/info"
   '';
 
@@ -193,6 +201,8 @@ buildPackage (finalAttrs: {
         "manager"
       ];
     })
+    # No MimeType here: the entry is hidden, but an association offer is not,
+    # and with one on both entries some Open With lists showed Marcel twice.
     (makeDesktopItem {
       name = "marcel";
       desktopName = "Marcel";
@@ -201,7 +211,6 @@ buildPackage (finalAttrs: {
       exec = "marcel-rs %U";
       icon = "io.github.berker_z.Marcel";
       noDisplay = true;
-      mimeTypes = [ "inode/directory" ];
     })
   ];
 
@@ -218,6 +227,12 @@ buildPackage (finalAttrs: {
       "$out/share/marcel/icons/nordzy"
     cp -R --no-preserve=mode ${../assets/icons/hicolor} \
       "$out/share/icons/hicolor"
+    # MIT wants its notice to travel with every copy, and the Yazi notice in
+    # the third-party file is there for the same reason, so both ship next to
+    # the asset licenses rather than staying behind in the repository.
+    install -Dm644 ${../LICENSE} "$out/share/licenses/marcel/LICENSE"
+    install -Dm644 ${../THIRD_PARTY_NOTICES.md} \
+      "$out/share/licenses/marcel/THIRD_PARTY_NOTICES.md"
     install -Dm644 ${../assets/fonts/OFL-Iosevka.md} \
       "$out/share/licenses/marcel/OFL-Iosevka.md"
     install -Dm644 ${../assets/icons/nordzy/COPYING} \
