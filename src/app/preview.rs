@@ -169,6 +169,9 @@ pub struct PreviewState {
     folder_task: Option<Task<()>>,
     folder_scroll: UniformListScrollHandle,
     pdf_pages: HashMap<usize, PdfPageState>,
+    /// Repaints while audio plays; see `media_pane`.
+    pub(super) audio_repaints: Option<Task<()>>,
+    pub(super) scrub_bounds: super::media_pane::ScrubBounds,
     pdf_queue: WorkQueue<usize>,
     pdf_scroll: UniformListScrollHandle,
     wrap: Option<WrappedPreview>,
@@ -197,6 +200,8 @@ impl PreviewState {
             folder_task: None,
             folder_scroll: UniformListScrollHandle::new(),
             pdf_pages: HashMap::new(),
+            audio_repaints: None,
+            scrub_bounds: Rc::new(Cell::new(None)),
             pdf_queue: WorkQueue::new(PDF_PAGE_WORKERS),
             pdf_scroll: UniformListScrollHandle::new(),
             wrap: None,
@@ -253,6 +258,8 @@ impl PreviewState {
         self.folder_scroll = UniformListScrollHandle::new();
         self.pdf_queue.reset();
         self.pdf_pages.clear();
+        self.audio_repaints.take();
+        self.scrub_bounds.set(None);
         self.pdf_scroll = UniformListScrollHandle::new();
         self.wrap_task.take();
         self.resize_task.take();
@@ -650,6 +657,15 @@ impl Marcel {
                 "This image could not be decoded",
                 cx,
             ),
+            PreviewContent::Ready(Preview::Audio { info, waveform, cover, player }) => {
+                let (info, waveform, cover, player) =
+                    (info.clone(), waveform.clone(), cover.clone(), player.clone());
+                self.render_audio_preview(&info, &waveform, cover.as_ref(), &player, cx)
+            }
+            PreviewContent::Ready(Preview::Video { info, poster }) => {
+                let (info, poster) = (info.clone(), poster.clone());
+                self.render_video_preview(&info, &poster, cx)
+            }
             PreviewContent::Ready(Preview::Pdf { pages, .. }) => {
                 let pages = *pages;
                 let scroll = self.preview.pdf_scroll.clone();

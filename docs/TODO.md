@@ -2,7 +2,7 @@
 
 What is left, in the order it is likely to happen. Sprint documents under
 [`sprints/`](sprints/) turn items from here into bounded work with acceptance
-checks; the latest is [Sprint 26](sprints/026-tag-readiness.md). Finished
+checks; the latest is [Sprint 27](sprints/027-sound-and-a-frame.md). Finished
 work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
 
 ## Before `v0.1.0`
@@ -44,6 +44,12 @@ Small, and none of them blocks the tag.
 - Cache the source device for the life of a drag so a cross-filesystem drop
   reads as refused rather than accepted-then-failed.
 - One `IconProvider` per watcher instead of one per batch.
+- Make the media pane its own GPUI entity. While audio plays it repaints at
+  20 fps through `cx.notify()` on the window view, which re-renders the
+  sidebar and the listing too; a view of its own would repaint only the
+  bars and the clock.
+- An Opus decoder for symphonia, when one exists, so voice notes stop
+  needing ffmpeg.
 
 ## `0.2.0`
 
@@ -112,24 +118,15 @@ libraries, portals, icon and thumbnail paths).
 
 - X11 outbound drag. Wayland is the tested target.
 - Desktop clipboard interoperability for files.
-- Media previews, undecided. Measured on 2026-09-17: the whole Marcel
-  closure is 224 MiB, Poppler cost about 20 MiB of it, and `ffmpeg-headless`
-  would add about 300 MiB. Three tiers, in rising cost:
-  - A poster frame plus duration, codec, resolution, and tags through
-    `ffprobe`/`ffmpeg`, as one more loader modelled on `preview/pdf.rs`
-    (subprocess, cancellable, cached by identity), feeding the existing
-    image preview, the grid thumbnails, and Properties. About a day. The
-    open question is only the tool: bundle it like Poppler and double the
-    closure, or find it on `PATH` with a `settings.media` Nix switch that
-    wraps it in, and say "needs ffmpeg" otherwise.
-  - Audio playback with `symphonia` and `cpal`: pure Rust, a few MB of
-    binary, alsa-lib in the closure. Two or three days, mostly the
-    transport (play, pause, seek, stop when the preview is superseded).
-  - Video playback: GPUI has no video element, so it is `ffmpeg-next` or
-    `gstreamer-rs` decoding into a `RenderImage` per frame at 30 fps, plus
-    audio sync. One to two weeks, a 250 to 300 MiB closure either way, and
-    hot without VAAPI. Not worth it; a poster frame and Open in mpv is the
-    file-manager answer.
+- Bundle ffmpeg, or keep finding it on `PATH`. Decided on 2026-09-18 for
+  `PATH` plus the `settings.media` Nix switch: ffmpeg-headless is a 300 MiB
+  closure against Marcel's 224, and only video posters, video thumbnails,
+  and Opus audio need it. Revisit if "video shows an icon" becomes the
+  first thing new users report.
+- Video playback in the pane. GPUI has no video element, so it would be
+  ffmpeg piping raw frames into a `RenderImage` at 30 fps plus audio sync:
+  three to five days, hot without VAAPI, and the poster with a play button
+  that hands the file to mpv covers what a file manager needs.
 - Ebook previews.
 - Accessibility: there is no AT-SPI tree, so screen readers see nothing.
 - Editable Places, Open in New Tab. Tabs themselves are not planned.

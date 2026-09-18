@@ -29,8 +29,8 @@ use crate::{
 };
 
 use super::{
-    MAX_TEXT_BYTES, has_extension, is_image_extension, is_probably_text, pdf::inspect_pdf,
-    read_up_to,
+    MAX_TEXT_BYTES, audio, has_extension, is_image_extension, is_probably_text, media,
+    pdf::inspect_pdf, read_up_to, thumbnails,
 };
 
 /// Where a folder measurement stops counting. A tree this size is `/` or the
@@ -70,6 +70,22 @@ pub enum Details {
     Text {
         lines: usize,
         truncated: bool,
+    },
+    Audio {
+        duration: Option<Duration>,
+        codec: String,
+        sample_rate: u32,
+        channels: usize,
+        title: Option<String>,
+        artist: Option<String>,
+        album: Option<String>,
+    },
+    Video {
+        duration: Option<Duration>,
+        width: Option<u32>,
+        height: Option<u32>,
+        codec: Option<String>,
+        audio_codec: Option<String>,
     },
     Archive {
         entries: usize,
@@ -214,6 +230,43 @@ fn inspect_file(path: &Path, cancelled: &Arc<AtomicBool>) -> io::Result<(String,
             .unwrap_or(Details::None);
         check_cancelled(cancelled)?;
         return Ok(("application/pdf".to_string(), details));
+    }
+
+    if sniffed.as_deref().is_some_and(|mime| mime.starts_with("audio/")) || audio::supports(path) {
+        // Opening reads the headers and tags only; no samples are decoded.
+        let details = audio::AudioSource::open(path)
+            .map(|source| Details::Audio {
+                duration: source.info.duration,
+                codec: source.info.codec.clone(),
+                sample_rate: source.info.sample_rate,
+                channels: source.info.channels,
+                title: source.info.title.clone(),
+                artist: source.info.artist.clone(),
+                album: source.info.album.clone(),
+            })
+            .unwrap_or(Details::None);
+        check_cancelled(cancelled)?;
+        return Ok((fallback(sniffed), details));
+    }
+
+    if sniffed.as_deref().is_some_and(|mime| mime.starts_with("video/"))
+        || thumbnails::is_video(path)
+    {
+        let details = if media::available() {
+            media::probe(path, cancelled)
+                .map(|info| Details::Video {
+                    duration: info.duration,
+                    width: info.width,
+                    height: info.height,
+                    codec: info.codec,
+                    audio_codec: info.audio_codec,
+                })
+                .unwrap_or(Details::None)
+        } else {
+            Details::None
+        };
+        check_cancelled(cancelled)?;
+        return Ok((fallback(sniffed), details));
     }
 
     file.seek(SeekFrom::Start(0))?;

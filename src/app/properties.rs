@@ -29,6 +29,7 @@ use crate::{
         self, AccessClass, Details, ItemProperties, ObjectKind, TreeTotals, describe_access,
         symbolic_mode,
     },
+    preview::media::{describe_channels, format_duration},
 };
 
 use super::{Marcel, dialogs::footer};
@@ -348,6 +349,48 @@ impl PropertiesView {
                 } else {
                     row("Length", count)
                 }]
+            }
+            Details::Audio { duration, codec, sample_rate, channels, title, artist, album } => {
+                let mut rows = Vec::new();
+                if let Some(title) = title {
+                    rows.push(row("Title", title.clone()));
+                }
+                if let Some(artist) = artist {
+                    rows.push(row("Artist", artist.clone()));
+                }
+                if let Some(album) = album {
+                    rows.push(row("Album", album.clone()));
+                }
+                if let Some(duration) = duration {
+                    rows.push(row("Duration", format_duration(*duration)));
+                }
+                let stream = match (*sample_rate, *channels) {
+                    (0, _) => codec.clone(),
+                    (rate, 0) => format!("{codec}, {rate} Hz"),
+                    (rate, channels) => {
+                        format!("{codec}, {rate} Hz, {}", describe_channels(channels))
+                    }
+                };
+                rows.push(row("Stream", stream));
+                rows
+            }
+            Details::Video { duration, width, height, codec, audio_codec } => {
+                let mut rows = Vec::new();
+                if let Some(duration) = duration {
+                    rows.push(row("Duration", format_duration(*duration)));
+                }
+                if let (Some(width), Some(height)) = (width, height) {
+                    rows.push(row("Dimensions", format!("{width} × {height} pixels")));
+                }
+                let streams = [codec.as_deref(), audio_codec.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !streams.is_empty() {
+                    rows.push(row("Streams", streams));
+                }
+                rows
             }
             Details::Archive { entries, expanded } => vec![
                 row("Contains", plural(*entries as u64, "entry", "entries")),

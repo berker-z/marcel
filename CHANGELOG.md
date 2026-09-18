@@ -24,9 +24,11 @@ of reloading. Comfortable at 50,000 entries.
 ### Preview
 
 A preview pane that stays open while you browse: text and code, images,
-continuously scrolling PDFs, and folder listings. Thumbnails come from the
-freedesktop cache, so they are shared with other applications rather than
-duplicated.
+continuously scrolling PDFs, folder listings, audio with a waveform, cover
+art, and spectrum bars, and a poster frame with a play button for video.
+Thumbnails come from the freedesktop cache, so they are shared with other
+applications rather than duplicated; video thumbnails and anything Marcel
+cannot decode itself (Opus) need ffmpeg on `PATH`.
 
 ### File operations
 

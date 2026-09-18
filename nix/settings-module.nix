@@ -135,6 +135,18 @@ in
           Null uses Marcel's bundled Iosevka Mono family.
         '';
       };
+
+      media = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Put ffmpeg on Marcel's PATH, for video previews and thumbnails and
+          for audio symphonia cannot decode (Opus voice notes). Marcel looks
+          for `ffprobe` and `ffmpeg` on PATH either way; this only makes
+          sure they are there. Off by default because ffmpeg is a 300 MiB
+          closure, larger than Marcel itself.
+        '';
+      };
     };
   };
 

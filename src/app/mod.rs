@@ -27,6 +27,7 @@ mod chrome;
 mod dialogs;
 mod edits;
 mod location;
+mod media_pane;
 mod menu;
 mod navigation;
 mod picker;

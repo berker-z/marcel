@@ -418,11 +418,43 @@ impl Marcel {
             self.preview.thumbnail_queue.is_pending(&entry.path),
             supported,
         ) {
-            ThumbnailPresentation::Ready(thumbnail) => square()
-                .overflow_hidden()
-                .rounded(radius)
-                .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain))
-                .into_any_element(),
+            ThumbnailPresentation::Ready(thumbnail) => {
+                let picture = square()
+                    .overflow_hidden()
+                    .rounded(radius)
+                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain));
+                // A video's tile is a frame of it, which would pass for a
+                // photo; the play mark in the middle is what tells them apart.
+                if thumbnails::is_video(&entry.path) {
+                    div()
+                        .relative()
+                        .size(px(GRID_VISUAL_SIZE))
+                        .child(picture)
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .size_7()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(colors.background.opacity(0.85))
+                                        .text_color(colors.foreground)
+                                        .text_sm()
+                                        .child("▶"),
+                                ),
+                        )
+                        .into_any_element()
+                } else {
+                    picture.into_any_element()
+                }
+            }
             ThumbnailPresentation::Loading => badged(0.5, "…", colors.muted_foreground),
             ThumbnailPresentation::Failed => badged(0.72, "!", colors.danger),
             ThumbnailPresentation::Unsupported => fallback(1.0),

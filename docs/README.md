@@ -5,7 +5,9 @@ decided and why, and what is left.
 
 ## Where things stand
 
-`v0.1.0` is untagged and close. [Sprint 26](sprints/026-tag-readiness.md)
+`v0.1.0` is untagged and close. [Sprint 27](sprints/027-sound-and-a-frame.md)
+added audio playback and video posters to the preview pane, with ffmpeg
+found on `PATH` rather than bundled. [Sprint 26](sprints/026-tag-readiness.md)
 closed the last review's blockers and added editable permissions, sorting,
 and a theme that persists; its acceptance list holds the hand-checks still
 open. [`TODO.md`](TODO.md) is the one list of what is left, in order, and

@@ -2,6 +2,7 @@
   lib,
   symlinkJoin,
   makeWrapper,
+  ffmpeg-headless,
   marcel,
   settings ? { },
 }:
@@ -10,6 +11,7 @@ let
     theme = "nord";
     icon_theme = null;
     ui_font = null;
+    media = false;
   }
   // settings;
   wrapperArgs = [
@@ -26,6 +28,16 @@ let
     "--set"
     "MARCEL_FONT_FAMILY"
     resolved.ui_font
+  ]
+  # ffmpeg is found on PATH rather than bundled: it is about 300 MiB of
+  # closure against Marcel's 224, and only video previews and Opus audio
+  # need it. `settings.media` puts it on the wrapper's PATH for people who
+  # want those guaranteed rather than dependent on what else is installed.
+  ++ lib.optionals resolved.media [
+    "--prefix"
+    "PATH"
+    ":"
+    (lib.makeBinPath [ ffmpeg-headless ])
   ];
 in
 symlinkJoin {

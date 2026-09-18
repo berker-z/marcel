@@ -46,6 +46,25 @@ pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<Arc<RenderImage>> 
     Ok(Arc::new(RenderImage::new(frames)))
 }
 
+/// A still image from bytes already in memory: an embedded cover.
+pub fn prepare_bytes(bytes: &[u8]) -> Result<Arc<RenderImage>> {
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        bail!("image exceeds the 64 MiB preview source limit");
+    }
+    let mut limits = Limits::no_limits();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+    let mut reader = ImageReader::new(io::Cursor::new(bytes));
+    reader.limits(limits);
+    let decoder = reader.with_guessed_format()?.into_decoder()?;
+    validate_dimensions(decoder.dimensions())?;
+    let image = bound_preview_dimensions(DynamicImage::from_decoder(decoder)?);
+    let mut image = image.to_rgba8();
+    rgba_to_bgra(&mut image);
+    Ok(Arc::new(RenderImage::new(vec![Frame::new(image)])))
+}
+
 fn decode_bounded_still(path: &Path, cancelled: &AtomicBool) -> Result<Frame> {
     let mut limits = Limits::no_limits();
     limits.max_alloc = Some(MAX_DECODE_BYTES);

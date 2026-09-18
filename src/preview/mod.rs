@@ -6,10 +6,14 @@ use std::{
 
 use gpui::RenderImage;
 
+pub mod audio;
 pub mod details;
 pub mod image;
+pub mod media;
 pub mod pdf;
+pub mod player;
 pub mod thumbnails;
+pub mod tool;
 
 use crate::browse::entries::{FileEntry, format_size};
 
@@ -41,6 +45,17 @@ pub enum Preview {
         render_rich: bool,
         truncated: bool,
         clipped_lines: bool,
+    },
+    Audio {
+        info: audio::AudioInfo,
+        /// Peak per bucket across the file, empty when not measured.
+        waveform: Arc<[f32]>,
+        cover: Option<Arc<RenderImage>>,
+        player: Arc<player::Player>,
+    },
+    Video {
+        info: media::MediaInfo,
+        poster: Result<Arc<RenderImage>, String>,
     },
     Metadata {
         summary: String,
@@ -95,6 +110,30 @@ pub fn load_preview(
         return Ok(Preview::Pdf { source: document.source, pages: document.pages });
     }
 
+    if inferred.as_deref().is_some_and(|mime| mime.starts_with("audio/"))
+        || audio::supports(&entry.path)
+    {
+        return load_audio(entry, cancelled);
+    }
+
+    if inferred.as_deref().is_some_and(|mime| mime.starts_with("video/"))
+        || thumbnails::is_video(&entry.path)
+    {
+        if !media::available() {
+            return Ok(Preview::Metadata {
+                summary: metadata_summary(
+                    entry,
+                    "Video preview needs ffmpeg on PATH (`ffprobe` and `ffmpeg`)".to_string(),
+                ),
+            });
+        }
+        let video = media::inspect_video(&entry.path, cancelled)?;
+        let poster = video
+            .poster
+            .and_then(|path| image::prepare(&path, cancelled).map_err(|error| error.to_string()));
+        return Ok(Preview::Video { info: video.info, poster });
+    }
+
     let markdown = has_extension(&entry.path, &["md", "markdown", "mdown", "mkd"]);
     let language = language_for_path(&entry.path);
     file.seek(SeekFrom::Start(0))?;
@@ -122,6 +161,38 @@ pub fn load_preview(
     })
 }
 
+/// The tags and cover, one pass for the waveform, and a player that stays
+/// idle until asked. A file symphonia cannot open falls back to the plain
+/// summary rather than an error, since "no preview" is the truth of it.
+fn load_audio(
+    entry: &FileEntry,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) -> io::Result<Preview> {
+    let path = &entry.path;
+    let mut source = match audio::AudioSource::open(path) {
+        Ok(source) => source,
+        Err(error)
+            if matches!(error.kind(), io::ErrorKind::Unsupported | io::ErrorKind::InvalidData) =>
+        {
+            return Ok(Preview::Metadata { summary: metadata_summary(entry, error.to_string()) });
+        }
+        Err(error) => return Err(error),
+    };
+    let cover = source.info.cover.as_deref().and_then(|bytes| image::prepare_bytes(bytes).ok());
+    let waveform = audio::waveform(path, &mut source, cancelled);
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Audio preview was cancelled"));
+    }
+    let mut info = source.info.clone();
+    // The bytes served their purpose; the preview keeps the decoded image.
+    info.cover = None;
+    Ok(Preview::Audio {
+        info,
+        waveform: waveform.into(),
+        cover,
+        player: Arc::new(player::Player::new(path)),
+    })
+}
 /// Kind, size, and a closing line, one per row.
 ///
 /// `format_size` returns an empty string for an entry with no size — a special

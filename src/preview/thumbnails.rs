@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
+    sync::{Arc, atomic::AtomicBool},
     time::UNIX_EPOCH,
 };
 
@@ -12,14 +13,27 @@ use url::Url;
 
 use crate::fsops::local::create_private_dir_all;
 
+use super::media;
+
 const THUMBNAIL_EDGE: u32 = 128;
 const MAX_SOURCE_PIXELS: u64 = 25_000_000;
 const MAX_SOURCE_DIMENSION: u32 = 25_000;
 const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DECODE_BYTES: u64 = 128 * 1024 * 1024;
 
+/// What a thumbnail can be made for: any image, and a video when ffmpeg is
+/// on `PATH` to take a frame from it. A video thumbnail another application
+/// already made is used either way; see `load_or_create`.
 pub fn supports(path: &Path) -> bool {
+    is_image(path) || is_video(path)
+}
+
+fn is_image(path: &Path) -> bool {
     mime_guess::from_path(path).first().is_some_and(|mime| mime.type_() == "image")
+}
+
+pub fn is_video(path: &Path) -> bool {
+    mime_guess::from_path(path).first().is_some_and(|mime| mime.type_() == "video")
 }
 
 pub fn load_or_create(path: &Path) -> Result<PathBuf> {
@@ -36,7 +50,9 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
         // FIFO named like an image would park a worker thread forever.
         bail!("not a regular file");
     }
-    if metadata.len() > MAX_SOURCE_BYTES {
+    // The size limit guards the image decode; a video is only ever decoded
+    // by ffmpeg, one frame at a time, so its length does not matter here.
+    if !is_video(&canonical) && metadata.len() > MAX_SOURCE_BYTES {
         bail!("image exceeds thumbnail source-size limit");
     }
 
@@ -52,13 +68,29 @@ fn load_or_create_in(path: &Path, cache_home: &Path) -> Result<PathBuf> {
         return Ok(cache_path);
     }
 
+    // A video's frame comes from ffmpeg, and only then goes through the
+    // resize below like any picture. Without ffmpeg the cache lookup above
+    // is all a video gets: a thumbnail Nautilus or Dolphin left behind
+    // shows, and one that was never made stays an icon.
+    let frame;
+    let decode_source: &Path = if is_video(&canonical) {
+        if !media::available() {
+            bail!("video thumbnails need ffmpeg on PATH");
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        frame = media::thumbnail_frame(&canonical, &cancelled)?;
+        &frame
+    } else {
+        &canonical
+    };
+
     let mut limits = Limits::no_limits();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
     limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
 
     let mut reader =
-        ImageReader::new(BufReader::new(crate::fsops::local::open_regular_file(&canonical)?));
+        ImageReader::new(BufReader::new(crate::fsops::local::open_regular_file(decode_source)?));
     reader.limits(limits);
     let mut decoder = reader.with_guessed_format()?.into_decoder()?;
     let dimensions = decoder.dimensions();
@@ -153,6 +185,9 @@ mod tests {
         assert!(supports(Path::new("photo.jpeg")));
         assert!(supports(Path::new("animation.gif")));
         assert!(!supports(Path::new("notes.md")));
+        assert!(supports(Path::new("clip.mp4")));
+        assert!(is_video(Path::new("clip.mkv")));
+        assert!(!is_video(Path::new("photo.jpeg")));
     }
 
     #[test]

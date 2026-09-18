@@ -34,6 +34,7 @@ path = "src/main.rs"
 anyhow = "1"
 async-channel = "2.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+cpal = "0.18.2"
 globset = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
@@ -44,8 +45,10 @@ md-5 = "0.10"
 mime_guess = "2"
 notify = "7"
 png = "0.18"
+realfft = "3.5.0"
 rustix = { version = "1", features = ["fs", "process"] }
 smol = "2"
+symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac"] }
 tempfile = "3"
 trash = "5"
 unicode-width = "0.2"

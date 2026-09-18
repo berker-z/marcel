@@ -1,26 +1,18 @@
 use std::{
-    fs::{self, File},
-    io::{self, Read, Seek, SeekFrom},
+    fs, io,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
-    time::{Duration, Instant, UNIX_EPOCH},
+    process::{Command, ExitStatus, Stdio},
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
-use md5::{Digest, Md5};
-
 use crate::fsops::local::create_private_dir_all;
+
+use super::tool::{self, cache_dir, prune_cache, read_bounded, tool_failure};
 
 const PDF_RENDER_LIMIT: u32 = 1_800;
 const PDF_JPEG_QUALITY: u8 = 85;
 const PDF_PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
-const PDF_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(15);
-const MAX_TOOL_OUTPUT_BYTES: u64 = 64 * 1024;
-const MAX_CACHE_FILES: usize = 512;
 /// The page count is read from a document the user merely selected, so it is
 /// untrusted input feeding a uniform-list item count. Cap it rather than
 /// letting one hostile file lay out a scroll region of billions of pages.
@@ -161,51 +153,6 @@ fn run_pdfinfo(
     Ok(pages)
 }
 
-fn run_child(command: &mut Command, cancelled: &AtomicBool) -> io::Result<ExitStatus> {
-    let mut child = command.spawn().map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "PDF preview requires Poppler (`pdfinfo` and `pdftoppm`)",
-            )
-        } else {
-            error
-        }
-    })?;
-    let deadline = Instant::now() + PDF_PROCESS_TIMEOUT;
-
-    loop {
-        if cancelled.load(Ordering::Acquire) {
-            terminate(&mut child);
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "PDF preview was cancelled"));
-        }
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            terminate(&mut child);
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "PDF preview exceeded the 20 second time limit",
-            ));
-        }
-        thread::sleep(PDF_PROCESS_POLL_INTERVAL);
-    }
-}
-
-fn terminate(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
-    if cancelled.load(Ordering::Acquire) {
-        Err(io::Error::new(io::ErrorKind::Interrupted, "PDF preview was cancelled"))
-    } else {
-        Ok(())
-    }
-}
-
 fn parse_page_count(output: &[u8]) -> Option<usize> {
     // Document metadata strings (Title, Author, …) print *before* the real
     // `Pages:` line and may carry embedded newlines straight out of the PDF,
@@ -238,77 +185,28 @@ fn cached_page_count(cache_dir: &Path, identity: &str) -> Option<usize> {
         .filter(valid_page_count)
 }
 
+fn run_child(command: &mut Command, cancelled: &AtomicBool) -> io::Result<ExitStatus> {
+    tool::run_child(
+        command,
+        cancelled,
+        PDF_PROCESS_TIMEOUT,
+        "PDF preview",
+        "PDF preview requires Poppler (`pdfinfo` and `pdftoppm`)",
+    )
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
+    tool::check_cancelled(cancelled, "PDF preview")
+}
+
 fn file_identity(path: &Path) -> io::Result<String> {
-    let metadata = path.metadata()?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let mut hash = Md5::new();
-    hash.update(b"marcel-pdf-v1");
-    hash.update(path.as_os_str().as_encoded_bytes());
-    hash.update(metadata.len().to_le_bytes());
-    hash.update(modified.to_le_bytes());
-    hash.update(PDF_RENDER_LIMIT.to_le_bytes());
-    Ok(format!("{:x}", hash.finalize()))
+    let mut salt = b"marcel-pdf-v1".to_vec();
+    salt.extend_from_slice(&PDF_RENDER_LIMIT.to_le_bytes());
+    tool::file_identity(path, &salt)
 }
 
 fn pdf_cache_dir() -> PathBuf {
-    absolute_env_path("XDG_CACHE_HOME")
-        .or_else(|| absolute_env_path("HOME").map(|home| home.join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("marcel")
-        .join("pdf-v1")
-}
-
-fn absolute_env_path(name: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os(name)?);
-    path.is_absolute().then_some(path)
-}
-
-fn read_bounded(mut file: File) -> io::Result<Vec<u8>> {
-    // `File::try_clone` duplicates the descriptor but shares its open-file
-    // position. Poppler therefore leaves the reader positioned at EOF after
-    // writing; rewind before consuming the bounded output.
-    file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    file.by_ref().take(MAX_TOOL_OUTPUT_BYTES).read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn tool_failure(tool: &str, status: ExitStatus, stderr: Vec<u8>) -> io::Error {
-    let detail = String::from_utf8_lossy(&stderr);
-    let detail = detail.trim();
-    let message = if detail.is_empty() {
-        format!("`{tool}` exited with {status}")
-    } else {
-        format!("`{tool}` exited with {status}: {detail}")
-    };
-    io::Error::other(message)
-}
-
-fn prune_cache(cache_dir: &Path) {
-    let Ok(entries) = fs::read_dir(cache_dir) else {
-        return;
-    };
-    let mut files = entries
-        .flatten()
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            metadata.is_file().then(|| (metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()))
-        })
-        .collect::<Vec<_>>();
-    if files.len() <= MAX_CACHE_FILES {
-        return;
-    }
-
-    files.sort_unstable_by_key(|(modified, _)| *modified);
-    let remove_count = files.len() - MAX_CACHE_FILES;
-    for (_, path) in files.into_iter().take(remove_count) {
-        let _ = fs::remove_file(path);
-    }
+    cache_dir("pdf-v1")
 }
 
 #[cfg(test)]
