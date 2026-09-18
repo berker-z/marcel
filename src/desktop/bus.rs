@@ -1,13 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow, bail};
 use async_channel::{Receiver, Sender, TrySendError};
 use url::Url;
-use zbus::{self, zvariant::OwnedValue};
+use zbus::{self, message::Header, zvariant::OwnedValue};
 
 use super::{
     file_chooser::{self, ReplyTracker},
@@ -23,6 +25,29 @@ pub const CLAIM_FILE_MANAGER_ENV: &str = "MARCEL_CLAIM_FILE_MANAGER1";
 const MAX_REQUEST_URIS: usize = 64;
 const MAX_REQUEST_URI_BYTES: usize = 64 * 1024;
 const REQUEST_QUEUE_CAPACITY: usize = 32;
+
+/// How long a launch waits for the running Marcel to take its request.
+///
+/// The primary validates every path with `metadata` and `canonicalize`
+/// before it answers, and on a hung NFS or FUSE mount that never returns.
+/// Without a bound the launcher sat there with no window and no message.
+pub const FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Requests one bus peer may make per minute on the request interfaces.
+///
+/// Every peer on the session bus may ask for a window, and a Flatpak with
+/// `--talk-name=org.freedesktop.FileManager1` is a realistic one. A person
+/// clicks "show in folder" a few times a minute; thirty leaves room for a
+/// launcher opening a batch and still keeps one peer from filling the
+/// screen with windows.
+pub(crate) const REQUESTS_PER_MINUTE: usize = 30;
+pub(crate) const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+/// Peers remembered at once; past this the quietest is forgotten.
+const RATE_LIMIT_TRACKED_SENDERS: usize = 256;
+
+/// How often, and how long, a runtime tries to get back on the bus.
+const RECONNECT_ATTEMPTS: u32 = 10;
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RevealedLocation {
@@ -71,10 +96,11 @@ pub enum InstanceStartup {
 }
 
 pub struct DesktopRuntime {
-    _connection: zbus::Connection,
+    connection: zbus::Connection,
+    roles: BusRoles,
+    services: Services,
     requests: Receiver<DesktopRequest>,
     pickers: Receiver<PickerRequest>,
-    replies: ReplyTracker,
 }
 
 impl DesktopRuntime {
@@ -90,8 +116,135 @@ impl DesktopRuntime {
 
     /// File-chooser answers still on their way to the bus; see [`ReplyTracker`].
     pub fn replies(&self) -> ReplyTracker {
-        self.replies.clone()
+        self.services.replies.clone()
     }
+
+    /// Hold the bus connection, and rebuild it if the bus drops it.
+    ///
+    /// Resolves only once the runtime has given up, saying why. A dropped
+    /// connection used to go unnoticed: the request receivers stayed open
+    /// with nothing feeding them, and "show in folder" silently did nothing
+    /// for the rest of the session. The bus itself surviving a disconnect is
+    /// unusual but real — `dbus-daemon` restarted at the same socket path, a
+    /// bus that closed the connection over a protocol violation — and the
+    /// channel senders live here rather than in the services, so a fresh
+    /// connection feeds the same receivers the application already reads.
+    pub async fn serve_until_lost(mut self) -> String {
+        loop {
+            self.connection.closed().await;
+            eprintln!("Marcel lost its session bus connection; reconnecting");
+            match self.reconnect().await {
+                Ok(connection) => {
+                    eprintln!("Marcel is back on the session bus");
+                    self.connection = connection;
+                }
+                Err(reason) => return reason,
+            }
+        }
+    }
+
+    async fn reconnect(&self) -> Result<zbus::Connection, String> {
+        let mut error = match connect(&self.services, self.roles).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => error,
+        };
+        for _ in 1..RECONNECT_ATTEMPTS {
+            smol::Timer::after(RECONNECT_DELAY).await;
+            match connect(&self.services, self.roles).await {
+                Ok(connection) => return Ok(connection),
+                Err(next) => error = next,
+            }
+        }
+        Err(match error {
+            // The bus may still list the dead connection as the owner for
+            // a moment, which is why `NameTaken` is retried like any other
+            // failure; held for the whole run, it means another Marcel took
+            // the name meanwhile, and requests go there now.
+            zbus::Error::NameTaken => {
+                format!("another Marcel now owns {APPLICATION_ID}; desktop requests go to it")
+            }
+            error => format!(
+                "could not get back on the session bus after {RECONNECT_ATTEMPTS} attempts: {error}"
+            ),
+        })
+    }
+}
+
+/// What the bus services hand requests to, kept apart from any one
+/// connection so a reconnect can serve the same channels again.
+#[derive(Clone)]
+struct Services {
+    requests: Sender<DesktopRequest>,
+    pickers: Sender<PickerRequest>,
+    replies: ReplyTracker,
+    /// One budget for both request interfaces: a peer that is refused on
+    /// `FileManager1` must not get a fresh allowance on `Application`.
+    limiter: SharedRateLimiter,
+}
+
+pub(crate) type SharedRateLimiter = Arc<Mutex<RateLimiter>>;
+
+/// Requests admitted per sender in a sliding window.
+///
+/// Keyed by the unique connection name from the message header, which the
+/// bus fills in and a peer cannot forge. Nothing here knows about time
+/// passing on its own; the caller says what "now" is, so the tests can too.
+pub(crate) struct RateLimiter {
+    limit: usize,
+    window: Duration,
+    senders: HashMap<String, VecDeque<Instant>>,
+}
+
+impl RateLimiter {
+    pub(crate) fn new(limit: usize, window: Duration) -> Self {
+        Self { limit, window, senders: HashMap::new() }
+    }
+
+    pub(crate) fn shared(limit: usize, window: Duration) -> SharedRateLimiter {
+        Arc::new(Mutex::new(Self::new(limit, window)))
+    }
+
+    /// Whether `sender` may make one more request at `now`.
+    pub(crate) fn admit(&mut self, sender: &str, now: Instant) -> bool {
+        let window = self.window;
+        // Forgetting quiet senders on every call keeps the map from growing
+        // with names that connected once and left.
+        self.senders.retain(|_, times| {
+            while times.front().is_some_and(|time| now.duration_since(*time) >= window) {
+                times.pop_front();
+            }
+            !times.is_empty()
+        });
+        if !self.senders.contains_key(sender) && self.senders.len() >= RATE_LIMIT_TRACKED_SENDERS {
+            let quietest = self
+                .senders
+                .iter()
+                .min_by_key(|(_, times)| times.back().copied())
+                .map(|(name, _)| name.clone());
+            if let Some(name) = quietest {
+                self.senders.remove(&name);
+            }
+        }
+        let times = self.senders.entry(sender.to_string()).or_default();
+        if times.len() >= self.limit {
+            return false;
+        }
+        times.push_back(now);
+        true
+    }
+}
+
+/// Admit the request in `header`, or say why not.
+pub(crate) fn admit(limiter: &Mutex<RateLimiter>, header: &Header<'_>) -> zbus::fdo::Result<()> {
+    let sender = header.sender().map(|name| name.as_str()).unwrap_or_default();
+    let mut limiter = limiter.lock().unwrap_or_else(PoisonError::into_inner);
+    if limiter.admit(sender, Instant::now()) {
+        return Ok(());
+    }
+    Err(zbus::fdo::Error::LimitsExceeded(format!(
+        "{sender} has asked Marcel more than {} times in the last minute; try again later",
+        limiter.limit
+    )))
 }
 
 /// The optional session-bus roles an instance may take on top of its own name.
@@ -115,11 +268,13 @@ impl BusRoles {
 #[derive(Clone)]
 struct ApplicationService {
     requests: Sender<DesktopRequest>,
+    limiter: SharedRateLimiter,
 }
 
 #[derive(Clone)]
 struct FileManagerService {
     requests: Sender<DesktopRequest>,
+    limiter: SharedRateLimiter,
 }
 
 pub async fn acquire_or_forward(initial_uris: Option<Vec<String>>) -> InstanceStartup {
@@ -132,54 +287,80 @@ async fn acquire_or_forward_with_roles(
 ) -> InstanceStartup {
     let (sender, receiver) = async_channel::bounded(REQUEST_QUEUE_CAPACITY);
     let (picker_sender, picker_receiver) = file_chooser::request_channel();
-    let replies = ReplyTracker::default();
-    let builder = match zbus::connection::Builder::session() {
-        Ok(builder) => builder,
-        Err(error) => return InstanceStartup::Unavailable(error.to_string()),
+    let services = Services {
+        requests: sender,
+        pickers: picker_sender,
+        replies: ReplyTracker::default(),
+        limiter: RateLimiter::shared(REQUESTS_PER_MINUTE, RATE_LIMIT_WINDOW),
     };
-    let builder = match builder
-        .serve_at(APPLICATION_OBJECT_PATH, ApplicationService { requests: sender.clone() })
-        .and_then(|builder| {
-            builder.serve_at(FILE_MANAGER_OBJECT_PATH, FileManagerService { requests: sender })
-        })
-        .and_then(|builder| builder.name(APPLICATION_ID))
-    {
-        Ok(builder) => builder.allow_name_replacements(false).replace_existing_names(false),
-        Err(error) => return InstanceStartup::Unavailable(error.to_string()),
-    };
-    match builder.build().await {
-        Ok(connection) => {
-            // Only after the application name is owned: the generic name is an
-            // opt-in extra, never a startup condition. Requesting both through
-            // the builder conflated them — another file manager owning
-            // `org.freedesktop.FileManager1` made `build()` fail with
-            // `NameTaken`, which reads as "another Marcel is running" and
-            // forwards the launch to an application name nobody owns,
-            // re-activating another Marcel that fails the same way.
-            if roles.file_manager {
-                claim_generic_file_manager_name(&connection).await;
+    match connect(&services, roles).await {
+        Ok(connection) => InstanceStartup::Primary(DesktopRuntime {
+            connection,
+            roles,
+            services,
+            requests: receiver,
+            pickers: picker_receiver,
+        }),
+        Err(zbus::Error::NameTaken) => {
+            match forward_to_primary(initial_uris, FORWARD_TIMEOUT).await {
+                Ok(()) => InstanceStartup::Forwarded,
+                Err(error) => InstanceStartup::Unavailable(describe_forward_failure(&error)),
             }
-            // Same rule for the portal backend name: an extra, not a
-            // condition. A failure here leaves a Marcel that browses files
-            // and cannot show pickers, which beats no Marcel at all.
-            if roles.file_chooser
-                && let Err(error) =
-                    file_chooser::serve(&connection, picker_sender, replies.clone()).await
-            {
-                eprintln!("could not serve {}: {error}", file_chooser::FILE_CHOOSER_BUS_NAME);
-            }
-            InstanceStartup::Primary(DesktopRuntime {
-                _connection: connection,
-                requests: receiver,
-                pickers: picker_receiver,
-                replies,
-            })
         }
-        Err(zbus::Error::NameTaken) => match forward_to_primary(initial_uris).await {
-            Ok(()) => InstanceStartup::Forwarded,
-            Err(error) => InstanceStartup::Unavailable(error.to_string()),
-        },
         Err(error) => InstanceStartup::Unavailable(error.to_string()),
+    }
+}
+
+/// Connect to the session bus as the primary Marcel: own the application
+/// name, serve the request interfaces, and take on the opt-in roles.
+async fn connect(services: &Services, roles: BusRoles) -> zbus::Result<zbus::Connection> {
+    let application = ApplicationService {
+        requests: services.requests.clone(),
+        limiter: services.limiter.clone(),
+    };
+    let file_manager = FileManagerService {
+        requests: services.requests.clone(),
+        limiter: services.limiter.clone(),
+    };
+    let connection = zbus::connection::Builder::session()?
+        .serve_at(APPLICATION_OBJECT_PATH, application)?
+        .serve_at(FILE_MANAGER_OBJECT_PATH, file_manager)?
+        .name(APPLICATION_ID)?
+        .allow_name_replacements(false)
+        .replace_existing_names(false)
+        .build()
+        .await?;
+    // Only after the application name is owned: the generic name is an
+    // opt-in extra, never a startup condition. Requesting both through
+    // the builder conflated them — another file manager owning
+    // `org.freedesktop.FileManager1` made `build()` fail with
+    // `NameTaken`, which reads as "another Marcel is running" and
+    // forwards the launch to an application name nobody owns,
+    // re-activating another Marcel that fails the same way.
+    if roles.file_manager {
+        claim_generic_file_manager_name(&connection).await;
+    }
+    // Same rule for the portal backend name: an extra, not a
+    // condition. A failure here leaves a Marcel that browses files
+    // and cannot show pickers, which beats no Marcel at all.
+    if roles.file_chooser
+        && let Err(error) =
+            file_chooser::serve(&connection, services.pickers.clone(), services.replies.clone())
+                .await
+    {
+        eprintln!("could not serve {}: {error}", file_chooser::FILE_CHOOSER_BUS_NAME);
+    }
+    Ok(connection)
+}
+
+/// Why a launch could not be handed to the running Marcel, for the user.
+fn describe_forward_failure(error: &zbus::Error) -> String {
+    match error {
+        zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut => format!(
+            "the running Marcel did not answer within {} seconds; opening a window here instead",
+            FORWARD_TIMEOUT.as_secs()
+        ),
+        other => format!("could not hand the request to the running Marcel: {other}"),
     }
 }
 
@@ -200,8 +381,11 @@ async fn claim_generic_file_manager_name(connection: &zbus::Connection) {
     }
 }
 
-async fn forward_to_primary(initial_uris: Option<Vec<String>>) -> zbus::Result<()> {
-    let connection = zbus::Connection::session().await?;
+async fn forward_to_primary(
+    initial_uris: Option<Vec<String>>,
+    timeout: Duration,
+) -> zbus::Result<()> {
+    let connection = zbus::connection::Builder::session()?.method_timeout(timeout).build().await?;
     let proxy = zbus::Proxy::new(
         &connection,
         APPLICATION_ID,
@@ -220,15 +404,22 @@ async fn forward_to_primary(initial_uris: Option<Vec<String>>) -> zbus::Result<(
 
 #[zbus::interface(interface = "org.freedesktop.Application")]
 impl ApplicationService {
-    async fn activate(&self, _platform_data: HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+    async fn activate(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        _platform_data: HashMap<String, OwnedValue>,
+    ) -> zbus::fdo::Result<()> {
+        admit(&self.limiter, &header)?;
         enqueue(&self.requests, DesktopRequest::Activate)
     }
 
     async fn open(
         &self,
+        #[zbus(header)] header: Header<'_>,
         uris: Vec<String>,
         _platform_data: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<()> {
+        admit(&self.limiter, &header)?;
         validate_and_enqueue(&self.requests, UriRequestKind::Open, uris).await
     }
 
@@ -246,19 +437,33 @@ impl ApplicationService {
 
 #[zbus::interface(interface = "org.freedesktop.FileManager1")]
 impl FileManagerService {
-    async fn show_folders(&self, uris: Vec<String>, _startup_id: String) -> zbus::fdo::Result<()> {
+    async fn show_folders(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        uris: Vec<String>,
+        _startup_id: String,
+    ) -> zbus::fdo::Result<()> {
+        admit(&self.limiter, &header)?;
         validate_and_enqueue(&self.requests, UriRequestKind::ShowFolders, uris).await
     }
 
-    async fn show_items(&self, uris: Vec<String>, _startup_id: String) -> zbus::fdo::Result<()> {
+    async fn show_items(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        uris: Vec<String>,
+        _startup_id: String,
+    ) -> zbus::fdo::Result<()> {
+        admit(&self.limiter, &header)?;
         validate_and_enqueue(&self.requests, UriRequestKind::ShowItems, uris).await
     }
 
     async fn show_item_properties(
         &self,
+        #[zbus(header)] header: Header<'_>,
         uris: Vec<String>,
         _startup_id: String,
     ) -> zbus::fdo::Result<()> {
+        admit(&self.limiter, &header)?;
         validate_and_enqueue(&self.requests, UriRequestKind::ShowItemProperties, uris).await
     }
 }
@@ -514,26 +719,94 @@ mod tests {
     }
 
     #[test]
+    fn a_sender_is_refused_past_its_budget_and_admitted_once_the_window_moves_on() {
+        let mut limiter = RateLimiter::new(3, Duration::from_secs(60));
+        let start = Instant::now();
+        assert!(limiter.admit(":1.7", start));
+        assert!(limiter.admit(":1.7", start + Duration::from_secs(10)));
+        assert!(limiter.admit(":1.7", start + Duration::from_secs(20)));
+        assert!(!limiter.admit(":1.7", start + Duration::from_secs(30)));
+        // A refusal does not count against the budget, so the first request
+        // ages out on schedule and the peer gets one back.
+        assert!(!limiter.admit(":1.7", start + Duration::from_secs(59)));
+        assert!(limiter.admit(":1.7", start + Duration::from_secs(60)));
+        assert!(!limiter.admit(":1.7", start + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn budgets_are_per_sender() {
+        let mut limiter = RateLimiter::new(1, Duration::from_secs(60));
+        let now = Instant::now();
+        assert!(limiter.admit(":1.7", now));
+        assert!(!limiter.admit(":1.7", now));
+        assert!(limiter.admit(":1.8", now));
+        assert!(!limiter.admit(":1.8", now));
+    }
+
+    #[test]
+    fn quiet_senders_are_forgotten_and_the_table_stays_bounded() {
+        let mut limiter = RateLimiter::new(2, Duration::from_secs(60));
+        let start = Instant::now();
+        for peer in 0..RATE_LIMIT_TRACKED_SENDERS * 2 {
+            assert!(
+                limiter.admit(&format!(":1.{peer}"), start + Duration::from_millis(peer as u64))
+            );
+        }
+        assert!(limiter.senders.len() <= RATE_LIMIT_TRACKED_SENDERS);
+        // Being forgotten is not the same as being reset: the peer whose
+        // entry was evicted was the quietest, and the newest is still held.
+        let newest = format!(":1.{}", RATE_LIMIT_TRACKED_SENDERS * 2 - 1);
+        assert!(limiter.senders.contains_key(&newest));
+        assert!(!limiter.senders.contains_key(":1.0"));
+
+        assert!(limiter.admit(":1.0", start + Duration::from_secs(61)));
+        assert_eq!(limiter.senders.len(), 1, "everything older than the window is gone");
+    }
+
+    #[test]
+    fn a_forwarding_timeout_is_explained_as_the_primary_not_answering() {
+        let timeout =
+            zbus::Error::InputOutput(Arc::new(std::io::Error::from(std::io::ErrorKind::TimedOut)));
+        let message = describe_forward_failure(&timeout);
+        assert!(message.contains("did not answer within 10 seconds"), "{message}");
+        assert!(message.contains("opening a window here"), "{message}");
+        let other = describe_forward_failure(&zbus::Error::NameTaken);
+        assert!(other.contains("could not hand the request"), "{other}");
+    }
+
+    #[test]
     fn private_session_bus_integration() {
         if std::env::var_os(PRIVATE_BUS_CHILD).is_some() {
             return;
         }
 
+        // libtest names tests without the crate, which `module_path!`
+        // includes; with it, `--exact` matched nothing and the child passed
+        // by running no test at all.
+        let module = module_path!()
+            .strip_prefix(concat!(env!("CARGO_PKG_NAME"), "::"))
+            .unwrap_or(module_path!());
         let mut command = Command::new("dbus-run-session");
         if let Some(config) = std::env::var_os(PRIVATE_BUS_CONFIG) {
             command.arg("--config-file").arg(config);
         }
-        let status = command
+        let output = command
             .arg("--")
             .arg(std::env::current_exe().expect("test executable must have a path"))
             .arg("--exact")
-            .arg(concat!(module_path!(), "::private_session_bus_child"))
+            .arg(format!("{module}::private_session_bus_child"))
             .arg("--nocapture")
             .env(PRIVATE_BUS_CHILD, "1")
-            .status()
+            .output()
             .expect("dbus-run-session must be available in Marcel's development environment");
 
-        assert!(status.success(), "private session-bus child failed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "private session-bus child failed:\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child must have run exactly one test:\n{stdout}\n{stderr}"
+        );
     }
 
     /// Wait for the bus to release the application name, then own it.
@@ -627,7 +900,82 @@ mod tests {
                 .expect("ShowItems must accept a local file");
             assert_eq!(receive(&requests).await, DesktopRequest::ShowItems(vec![location]));
 
-            drop(primary);
+            // One peer gets a budget, not the run of the session. The
+            // budget is per unique name, so a flooding peer does not use up
+            // the client's.
+            let flooder = zbus::Connection::session().await.expect("flooding peer must connect");
+            let flooding_application = zbus::Proxy::new(
+                &flooder,
+                APPLICATION_ID,
+                APPLICATION_OBJECT_PATH,
+                "org.freedesktop.Application",
+            )
+            .await
+            .expect("flooding proxy must initialize");
+            for _ in 0..REQUESTS_PER_MINUTE {
+                flooding_application
+                    .call::<_, _, ()>("Activate", &(HashMap::<String, OwnedValue>::new(),))
+                    .await
+                    .expect("requests within the budget must be taken");
+                assert_eq!(receive(&requests).await, DesktopRequest::Activate);
+            }
+            let refused: zbus::Result<()> = flooding_application
+                .call("Activate", &(HashMap::<String, OwnedValue>::new(),))
+                .await;
+            match refused.expect_err("the request past the budget must be refused") {
+                zbus::Error::MethodError(name, _, _) => {
+                    assert_eq!(name.as_str(), "org.freedesktop.DBus.Error.LimitsExceeded")
+                }
+                error => panic!("expected a typed LimitsExceeded reply, got {error}"),
+            }
+            let flooder_file_manager = zbus::Proxy::new(
+                &flooder,
+                APPLICATION_ID,
+                FILE_MANAGER_OBJECT_PATH,
+                "org.freedesktop.FileManager1",
+            )
+            .await
+            .expect("flooding file-manager proxy must initialize");
+            let refused: zbus::Result<()> =
+                flooder_file_manager.call("ShowItems", &(vec![uri(&file)], String::new())).await;
+            assert!(
+                matches!(refused, Err(zbus::Error::MethodError(ref name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.LimitsExceeded"),
+                "the budget is shared by both request interfaces"
+            );
+            assert!(requests.is_empty(), "refused requests must not be queued");
+            application
+                .call::<_, _, ()>("Activate", &(HashMap::<String, OwnedValue>::new(),))
+                .await
+                .expect("another peer's flood must not cost the client its budget");
+            assert_eq!(receive(&requests).await, DesktopRequest::Activate);
+            drop(flooder);
+
+            // Losing the connection is survived: the runtime comes back on
+            // the bus and the same receiver keeps getting requests.
+            let old_connection = primary.connection.clone();
+            let old_name = old_connection.unique_name().expect("primary has a unique name").clone();
+            let watcher = smol::spawn(primary.serve_until_lost());
+            old_connection.close().await.expect("closing the primary's socket");
+            let marcel_name = zbus::names::BusName::try_from(APPLICATION_ID).unwrap();
+            let mut reclaimed = false;
+            for _ in 0..200 {
+                if let Ok(owner) = bus.get_name_owner(marcel_name.clone()).await
+                    && owner.as_str() != old_name.as_str()
+                {
+                    reclaimed = true;
+                    break;
+                }
+                smol::Timer::after(Duration::from_millis(25)).await;
+            }
+            assert!(reclaimed, "the runtime must reclaim its name after a disconnect");
+            application
+                .call::<_, _, ()>("Activate", &(HashMap::<String, OwnedValue>::new(),))
+                .await
+                .expect("the reconnected primary must answer");
+            assert_eq!(receive(&requests).await, DesktopRequest::Activate);
+
+            // Dropping the watcher drops the runtime and, with it, the name.
+            drop(watcher);
             let replacement = become_primary(FILE_MANAGER_ROLE).await.unwrap_or_else(|error| {
                 panic!("application name was not released after primary exit: {error:?}")
             });
@@ -769,7 +1117,161 @@ mod tests {
             drop(request);
             let (code, _) = call.await.expect("a dropped request still replies");
             assert_eq!(code, file_chooser::RESPONSE_OTHER);
+
+            // A second request on a handle that is still pending is refused,
+            // and the first keeps its request object: `Close` still reaches
+            // it. Removing the object for the refused one used to take that
+            // path away from the request that owned it.
+            let handle = "/org/freedesktop/portal/desktop/request/test/4";
+            let call = call_open_file(handle);
+            let request = receive(&pickers).await;
+            match call_open_file(handle).await.expect_err("a duplicate handle must be refused") {
+                zbus::Error::MethodError(name, _, _) => {
+                    assert_eq!(name.as_str(), "org.freedesktop.DBus.Error.InvalidArgs")
+                }
+                error => panic!("expected a typed InvalidArgs reply, got {error}"),
+            }
+            assert!(pickers.is_empty(), "the duplicate must never reach a window");
+            let request_object = proxy(
+                file_chooser::FILE_CHOOSER_BUS_NAME,
+                handle,
+                "org.freedesktop.impl.portal.Request",
+            )
+            .await
+            .expect("request proxy must initialize");
+            request_object
+                .call::<_, _, ()>("Close", &())
+                .await
+                .expect("the first request's object must still be served");
+            request.closed.recv().await.expect("the first request is told it was withdrawn");
+            request.reply.send(PickerResponse::Closed).await.expect("the backend is waiting");
+            let (code, _) = call.await.expect("the first request still replies");
+            assert_eq!(code, file_chooser::RESPONSE_OTHER);
+
+            // A title that would abort the compositor connection is refused
+            // before any window sees it.
+            let long_title = "x".repeat(8192);
+            let refused: zbus::Result<ChooserReply> = chooser
+                .call(
+                    "OpenFile",
+                    &(
+                        zbus::zvariant::OwnedObjectPath::try_from(
+                            "/org/freedesktop/portal/desktop/request/test/5",
+                        )
+                        .unwrap(),
+                        "org.example.App",
+                        "",
+                        long_title.as_str(),
+                        HashMap::<String, OwnedValue>::new(),
+                    ),
+                )
+                .await;
+            match refused.expect_err("an over-long title must be refused") {
+                zbus::Error::MethodError(name, _, _) => {
+                    assert_eq!(name.as_str(), "org.freedesktop.DBus.Error.InvalidArgs")
+                }
+                error => panic!("expected a typed InvalidArgs reply, got {error}"),
+            }
+            assert!(pickers.is_empty());
+            assert_eq!(backend.replies().pending(), 0, "a refused request is never pending");
+
+            // One peer's dialogs are budgeted too. The client has spent a
+            // few already; the rest are spent here until one is refused.
+            let mut refused_within_budget = None;
+            for index in 0..=file_chooser::PICKERS_PER_MINUTE {
+                let handle = format!("/org/freedesktop/portal/desktop/request/test/budget{index}");
+                let mut call = call_open_file(&handle);
+                // Either a window is asked, or the call comes back refused;
+                // borrowing the task keeps it alive whichever way it goes.
+                let step =
+                    smol::future::race(async { Step::Asked(receive(&pickers).await) }, async {
+                        Step::Replied((&mut call).await)
+                    })
+                    .await;
+                match step {
+                    Step::Asked(request) => {
+                        request
+                            .reply
+                            .send(PickerResponse::Cancelled)
+                            .await
+                            .expect("the backend is waiting");
+                        let (code, _) = call.await.expect("an answered request replies");
+                        assert_eq!(code, file_chooser::RESPONSE_CANCELLED);
+                    }
+                    Step::Replied(reply) => {
+                        match reply.expect_err("a call that replied unasked was refused") {
+                            zbus::Error::MethodError(name, _, _) => assert_eq!(
+                                name.as_str(),
+                                "org.freedesktop.DBus.Error.LimitsExceeded"
+                            ),
+                            error => panic!("expected a typed LimitsExceeded reply, got {error}"),
+                        }
+                        refused_within_budget = Some(index);
+                        break;
+                    }
+                }
+            }
+            let refused_at = refused_within_budget.expect("the budget must run out");
+            assert!(refused_at > 0 && refused_at < file_chooser::PICKERS_PER_MINUTE);
+
+            // A primary that never answers — validating a path on a hung
+            // mount — must not hang the launcher with it.
+            drop(backend);
+            let hanging = own_name_with(HangingApplication).await;
+            let started = Instant::now();
+            let error = forward_to_primary(None, Duration::from_millis(300))
+                .await
+                .expect_err("forwarding to a primary that never answers must time out");
+            assert!(
+                matches!(&error, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut),
+                "expected a timeout, got {error}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(5), "the timeout must be the bound");
+            drop(hanging);
         });
+    }
+
+    /// What happened first to a budgeted dialog request.
+    enum Step {
+        Asked(PickerRequest),
+        Replied(zbus::Result<(u32, HashMap<String, OwnedValue>)>),
+    }
+
+    /// An application service whose methods never return.
+    #[derive(Clone)]
+    struct HangingApplication;
+
+    #[zbus::interface(interface = "org.freedesktop.Application")]
+    impl HangingApplication {
+        async fn activate(&self, _platform_data: HashMap<String, OwnedValue>) {
+            std::future::pending::<()>().await
+        }
+    }
+
+    /// Own Marcel's application name with `service`, waiting for the bus to
+    /// release it first.
+    async fn own_name_with<S>(service: S) -> zbus::Connection
+    where
+        S: zbus::object_server::Interface + Clone,
+    {
+        for _ in 0..80 {
+            let attempt = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .serve_at(APPLICATION_OBJECT_PATH, service.clone())
+                .expect("serve the application object")
+                .name(APPLICATION_ID)
+                .expect("valid application name")
+                .build()
+                .await;
+            match attempt {
+                Ok(connection) => return connection,
+                Err(zbus::Error::NameTaken) => {
+                    smol::Timer::after(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("could not own the application name: {error}"),
+            }
+        }
+        panic!("the application name was never released");
     }
 
     /// The next message on `channel`, or a panic once the bus has clearly

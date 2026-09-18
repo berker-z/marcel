@@ -1,8 +1,10 @@
+use std::{cell::Cell, rc::Rc};
+
 use gpui::App;
 use marcel::{
     desktop::{
         bus::{self, DesktopRequest, InstanceStartup, RevealedLocation},
-        launch,
+        launch::{self, Invocation},
     },
     surface, window,
 };
@@ -11,11 +13,33 @@ use marcel::{
 /// Under GPUI's 200 ms shutdown budget, and well past what one reply needs.
 const REPLY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// How long a bus-activated start waits for its request before opening a
+/// window anyway. The request is normally on the bus before the process is;
+/// a few seconds is far past that and still short of "Marcel opened nothing".
+const BUS_REQUEST_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The exit status for a command line Marcel could not read, as `getopt`
+/// users expect.
+const USAGE_EXIT_CODE: i32 = 2;
+
 fn main() {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let explicit_launch = !arguments.is_empty();
-    let start_path = launch::start_path(arguments, current_dir);
+    let (start_path, explicit_launch) =
+        match launch::parse_arguments(std::env::args_os().skip(1), current_dir) {
+            Ok(Invocation::Open { start_path, explicit }) => (start_path, explicit),
+            Ok(Invocation::Help) => {
+                print!("{}", launch::USAGE);
+                return;
+            }
+            Ok(Invocation::Version) => {
+                println!("marcel-rs {}", launch::VERSION);
+                return;
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(USAGE_EXIT_CODE);
+            }
+        };
 
     // A bus-activated start has no folder of its own: its working directory
     // is the daemon's. Should another Marcel already be primary (it was
@@ -23,6 +47,10 @@ fn main() {
     // forwarded request is "show me Marcel", not "open the daemon's cwd".
     let bus_activated = !explicit_launch && launch::started_by_bus_activation();
     let initial_uris = if bus_activated { None } else { launch::launch_uris(&start_path) };
+    // ...and when such a start does have to show a folder — an `Activate`
+    // with no window to raise, or no request at all — it shows home.
+    let start_path =
+        if bus_activated { launch::service_start_path(start_path) } else { start_path };
     let desktop_runtime = match smol::block_on(bus::acquire_or_forward(initial_uris)) {
         InstanceStartup::Primary(runtime) => Some(runtime),
         InstanceStartup::Forwarded => return,
@@ -57,9 +85,12 @@ fn main() {
             let pickers = runtime.pickers();
             let replies = runtime.replies();
             let fallback_path = start_path.clone();
+            // Whether any request has arrived, for the grace timer below.
+            let request_seen = Rc::new(Cell::new(false));
+            let seen = request_seen.clone();
             cx.spawn(async move |cx| {
-                let _runtime = runtime;
                 while let Ok(request) = requests.recv().await {
+                    seen.set(true);
                     cx.update(|cx| handle_desktop_request(request, &fallback_path, cx));
                 }
                 Ok::<_, anyhow::Error>(())
@@ -68,8 +99,10 @@ fn main() {
             // A file chooser is a window of its own kind: it neither reuses
             // nor counts as a browsing window, and its answer goes back over
             // the bus rather than to the user.
+            let seen = request_seen.clone();
             cx.spawn(async move |cx| {
                 while let Ok(request) = pickers.recv().await {
+                    seen.set(true);
                     cx.update(|cx| {
                         if let Err(error) = window::open_picker(request, cx) {
                             eprintln!("Marcel could not open a file chooser: {error}");
@@ -78,6 +111,46 @@ fn main() {
                     });
                 }
                 Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+            // The bus-started detection is a heuristic, and a request that
+            // was routed elsewhere or lost leaves a Marcel with no window and
+            // no way to get one. Past the grace period, "nothing arrived"
+            // means "show the folder we have" rather than "keep waiting".
+            if wait_for_bus_request {
+                let fallback_path = start_path.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(BUS_REQUEST_GRACE).await;
+                    if request_seen.get() {
+                        return;
+                    }
+                    cx.update(|cx| {
+                        eprintln!(
+                            "Marcel was started as a bus service but no request arrived within {} s; opening a window",
+                            BUS_REQUEST_GRACE.as_secs()
+                        );
+                        open_window_or_report(fallback_path, cx);
+                    })
+                })
+                .detach();
+            }
+            // The runtime owns the bus connection. It rebuilds the connection
+            // if the bus drops it, and only speaks up once that has failed
+            // for good — silently losing the bus used to mean "show in
+            // folder" did nothing for the rest of the session.
+            cx.spawn(async move |cx| {
+                let reason = runtime.serve_until_lost().await;
+                eprintln!("Marcel is off the session bus for good: {reason}");
+                cx.update(|cx| {
+                    if let Some(handle) = surface::current(None, cx) {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            surface::Report::Error(format!(
+                                "Lost the session bus: {reason}. Marcel keeps working, but \"show in folder\" and file dialogs will not reach it until it is restarted"
+                            ))
+                            .show(window, cx);
+                        });
+                    }
+                })
             })
             .detach();
             // A picker was the last window, the user closed it, and the
@@ -122,7 +195,7 @@ fn handle_desktop_request(request: DesktopRequest, fallback_path: &std::path::Pa
                 // nothing to raise, "show me the Marcel I have" means opening
                 // one.
                 None => {
-                    let _ = window::open(fallback_path.to_path_buf(), cx);
+                    open_window_or_report(fallback_path.to_path_buf(), cx);
                 }
             }
         }
@@ -151,7 +224,7 @@ fn show_properties(paths: Vec<std::path::PathBuf>, may_reuse: bool, cx: &mut App
             .and_then(|path| path.parent())
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        window::open(directory, cx).ok()
+        open_window_or_report(directory, cx)
     });
     let Some(target) = target else {
         return;
@@ -164,6 +237,27 @@ fn show_properties(paths: Vec<std::path::PathBuf>, may_reuse: bool, cx: &mut App
         window.activate_window();
     });
     cx.activate(true);
+}
+
+/// Open a window at `path`, and say so somewhere when that is refused.
+///
+/// The one refusal is the window cap, and a request that hits it used to
+/// vanish: no window, no message, nothing in the log. The user asked for
+/// something, so the answer goes to whichever window is speaking for Marcel,
+/// and to stderr for the case where none is.
+fn open_window_or_report(path: std::path::PathBuf, cx: &mut App) -> Option<window::MarcelWindow> {
+    match window::open(path, cx) {
+        Ok(opened) => Some(opened),
+        Err(error) => {
+            eprintln!("Marcel could not open a window: {error}");
+            if let Some(handle) = surface::current(None, cx) {
+                let _ = handle.update(cx, |_, window, cx| {
+                    surface::Report::Error(error.to_string()).show(window, cx);
+                });
+            }
+            None
+        }
+    }
 }
 
 /// Show each location, in a window each, reusing one for the first if allowed.
