@@ -1,8 +1,9 @@
 use std::{
     ffi::{OsStr, OsString},
-    io,
-    path::Path,
-    process::{Command, Stdio},
+    fs, io,
+    io::Read as _,
+    path::{Path, PathBuf},
+    process::Stdio,
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -17,9 +18,9 @@ pub fn open_terminal(directory: &Path) -> Result<()> {
     // Prefer the proposed cross-desktop default-terminal interface before
     // falling back to individual emulators:
     // https://github.com/Vladimir-csp/xdg-terminal-exec
-    let mut xdg_dir = OsString::from("--dir=");
-    xdg_dir.push(directory.as_os_str());
-    if spawn("xdg-terminal-exec", [xdg_dir.as_os_str()], directory)? {
+    let launcher = find_in_path(OsStr::new(XDG_TERMINAL_EXEC), std::env::var_os("PATH").as_deref());
+    let arguments = xdg_terminal_exec_arguments(launcher.as_deref(), directory);
+    if spawn(XDG_TERMINAL_EXEC, arguments.iter().map(OsString::as_os_str), directory)? {
         return Ok(());
     }
 
@@ -47,18 +48,16 @@ where
     I::Item: AsRef<OsStr>,
     S: AsRef<OsStr>,
 {
-    let mut command = Command::new(program);
+    // The shared builder keeps the Nix shell's private LD_LIBRARY_PATH out of
+    // an independently packaged terminal; `tool::command` explains the hazard.
+    let mut command = crate::preview::tool::command(program);
     command
         .args(arguments)
         .current_dir(directory)
-        // Do not leak the Nix development shell's private native-library
-        // search path into an independently packaged terminal.
-        .env_remove("LD_LIBRARY_PATH")
         // `nix develop` replaces SHELL with its build shell (normally Bash).
         // Let the terminal resolve the user's configured login shell instead
         // of inheriting that implementation detail from Marcel.
         .env_remove("SHELL")
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     match command.spawn() {
@@ -84,6 +83,46 @@ fn reap(mut child: std::process::Child) {
     });
 }
 
+const XDG_TERMINAL_EXEC: &str = "xdg-terminal-exec";
+/// The launcher is a shell script of a few hundred lines; anything larger is
+/// not the script this check knows how to read.
+const LAUNCHER_READ_LIMIT: u64 = 1024 * 1024;
+
+/// What to hand `xdg-terminal-exec`. Releases before 0.12 have no `--dir`
+/// option and treat the first argument as the command to run, so the
+/// terminal opens, fails to execute `--dir=/some/folder`, and exits while
+/// `spawn` has already reported success. The launcher is a script, so
+/// whether it documents the option is readable; a launcher that does not, or
+/// that cannot be read, gets no arguments and inherits the working directory.
+fn xdg_terminal_exec_arguments(launcher: Option<&Path>, directory: &Path) -> Vec<OsString> {
+    if launcher.is_some_and(|launcher| mentions(launcher, b"--dir=")) {
+        let mut option = OsString::from("--dir=");
+        option.push(directory.as_os_str());
+        vec![option]
+    } else {
+        Vec::new()
+    }
+}
+
+fn mentions(path: &Path, needle: &[u8]) -> bool {
+    let Ok(file) = fs::File::open(path) else { return false };
+    let mut contents = Vec::new();
+    if file.take(LAUNCHER_READ_LIMIT).read_to_end(&mut contents).is_err() {
+        return false;
+    }
+    contents.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Where `spawn` will find `program`: the first regular file of that name on
+/// `search_path`, as `execvp` resolves it.
+fn find_in_path(program: &OsStr, search_path: Option<&OsStr>) -> Option<PathBuf> {
+    let search_path = search_path?;
+    std::env::split_paths(search_path)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
 fn terminal_fallbacks(directory: &Path) -> Vec<(&'static str, Vec<OsString>)> {
     let path = directory.as_os_str();
     vec![
@@ -107,6 +146,33 @@ fn terminal_fallbacks(directory: &Path) -> Vec<(&'static str, Vec<OsString>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xdg_terminal_exec_gets_the_folder_only_when_it_documents_the_option() {
+        let sandbox = crate::testing::Sandbox::new();
+        let directory = Path::new("/tmp/a folder");
+        let modern =
+            sandbox.file("modern", "#!/bin/sh\n# --dir=DIR  start in DIR\nexec foot \"$@\"\n");
+        let legacy = sandbox.file("legacy", "#!/bin/sh\nexec foot \"$@\"\n");
+        let mut option = OsString::from("--dir=");
+        option.push(directory.as_os_str());
+        assert_eq!(xdg_terminal_exec_arguments(Some(&modern), directory), vec![option]);
+        assert!(xdg_terminal_exec_arguments(Some(&legacy), directory).is_empty());
+        assert!(xdg_terminal_exec_arguments(None, directory).is_empty());
+        assert!(xdg_terminal_exec_arguments(Some(&sandbox.path("absent")), directory).is_empty());
+    }
+
+    #[test]
+    fn the_launcher_is_looked_up_on_path_as_a_regular_file() {
+        let sandbox = crate::testing::Sandbox::new();
+        let bin = sandbox.dir("bin");
+        sandbox.dir("bin/not-a-file");
+        let launcher = sandbox.file("bin/launcher", "#!/bin/sh\n");
+        let search_path = std::env::join_paths([sandbox.path("elsewhere"), bin.clone()]).unwrap();
+        assert_eq!(find_in_path(OsStr::new("launcher"), Some(&search_path)), Some(launcher));
+        assert_eq!(find_in_path(OsStr::new("not-a-file"), Some(&search_path)), None);
+        assert_eq!(find_in_path(OsStr::new("launcher"), None), None);
+    }
 
     #[test]
     fn fallback_arguments_keep_the_directory_as_one_os_argument() {

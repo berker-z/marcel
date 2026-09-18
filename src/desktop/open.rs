@@ -47,18 +47,14 @@ async fn open_through_portal(path: PathBuf, ask: bool) -> Result<()> {
 }
 
 async fn run_gio(path: &Path) -> Result<bool> {
-    let mut command = smol::process::Command::new("gio");
+    // The shared builder keeps the Nix shell's private LD_LIBRARY_PATH out of
+    // an independently packaged handler; `tool::command` explains the hazard.
+    let mut command = smol::process::Command::from(crate::preview::tool::command("gio"));
     command
         .arg("open")
         // A path is data, never more options, whatever it starts with.
         .arg("--")
         .arg(path)
-        // The Nix development shell supplies Marcel's native runtime libraries
-        // through LD_LIBRARY_PATH. Letting that private search path leak into
-        // a desktop handler can make an independently packaged application
-        // load an incompatible glibc or graphics stack.
-        .env_remove("LD_LIBRARY_PATH")
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let result = command.status().await;
