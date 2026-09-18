@@ -1,9 +1,11 @@
 //! Reading audio: the tags, the cover, the samples.
 //!
-//! Symphonia decodes in-process, so nothing here shells out and nothing is
-//! bundled. `AudioSource` is one open file yielding interleaved `f32`
-//! samples on demand; the preview reads it once through for the waveform,
-//! and the player reads it again, at listening speed, on its own thread.
+//! Symphonia decodes in-process, so nothing here shells out for what it
+//! knows and nothing is bundled. `AudioSource` is one open file yielding
+//! interleaved `f32` samples on demand. The preview opens one for the tags
+//! and cover, `waveform` opens another and reads it once through, and the
+//! player opens a third and reads at listening speed on its own thread;
+//! each is cheap next to the decode, and none has to wait for another.
 
 use std::{
     io,
@@ -78,8 +80,7 @@ struct FfmpegChild {
 
 impl Drop for FfmpegChild {
     fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
+        tool::terminate(&mut self.process);
     }
 }
 
@@ -266,7 +267,7 @@ fn spawn_ffmpeg(
     rate: u32,
     channels: usize,
 ) -> io::Result<FfmpegChild> {
-    let mut process = std::process::Command::new("ffmpeg")
+    let mut process = media::ffmpeg_command("ffmpeg")
         .args(["-v", "error", "-nostdin"])
         .arg("-ss")
         .arg(format!("{:.3}", start.as_secs_f64()))
@@ -278,7 +279,6 @@ fn spawn_ffmpeg(
         .arg("-ar")
         .arg(rate.to_string())
         .arg("pipe:1")
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()?;
@@ -339,28 +339,33 @@ fn read_tags(format: &mut Box<dyn FormatReader>, info: &mut AudioInfo) {
 }
 
 /// Peak amplitude per bucket across the whole file, each in `0..=1`, or an
-/// empty vector when the file is too long to read through or was cancelled.
+/// empty vector when the file is too long to read through, cannot be
+/// opened, or `cancelled` was set part way.
 ///
-/// The pass is one full decode, so its result is kept under the cache by
-/// the file's identity: a track is measured the first time it is selected
-/// and read back from 1 KB afterwards.
-pub fn waveform(path: &Path, source: &mut AudioSource, cancelled: &AtomicBool) -> Vec<f32> {
-    waveform_in(&tool::cache_dir("waveform-v1"), path, source, cancelled)
+/// This is the slow half of an audio preview and stands on its own so the
+/// pane can show the tags and cover first and fill the scrubber in when
+/// this returns. The pass is one full decode, so its result is kept under
+/// the cache by the file's identity, and the cache is consulted before the
+/// file is opened: a track is measured the first time it is selected and
+/// costs a 1 KB read afterwards. The flag is honoured between packets.
+pub fn waveform(path: &Path, cancelled: &AtomicBool) -> Vec<f32> {
+    waveform_in(&tool::cache_dir("waveform-v1"), path, cancelled)
 }
 
-fn waveform_in(
-    cache: &Path,
-    path: &Path,
-    source: &mut AudioSource,
-    cancelled: &AtomicBool,
-) -> Vec<f32> {
+fn waveform_in(cache: &Path, path: &Path, cancelled: &AtomicBool) -> Vec<f32> {
+    if cancelled.load(Ordering::Acquire) {
+        return Vec::new();
+    }
     let cached_at = tool::file_identity(path, b"marcel-waveform-v1")
         .ok()
         .map(|identity| cache.join(format!("{identity}.peaks")));
     if let Some(peaks) = cached_at.as_deref().and_then(read_cached_waveform) {
         return peaks;
     }
-    let peaks = measure_waveform(source, cancelled);
+    let Ok(mut source) = AudioSource::open(path) else {
+        return Vec::new();
+    };
+    let peaks = measure_waveform(&mut source, cancelled);
     if !peaks.is_empty()
         && let Some(cache_path) = cached_at
         && create_private_dir_all(cache).is_ok()
@@ -396,6 +401,22 @@ fn measure_waveform(source: &mut AudioSource, cancelled: &AtomicBool) -> Vec<f32
     if duration.as_secs_f64() > MAX_WAVEFORM_SECONDS || duration.is_zero() {
         return Vec::new();
     }
+    fold_peaks(duration, cancelled, |chunk| match source.next_chunk(chunk) {
+        // The layout is read after the pull: the first chunk fixes it when
+        // the container did not say.
+        Ok(true) => Some((source.info.channels, source.info.sample_rate)),
+        Ok(false) | Err(_) => None,
+    })
+}
+
+/// The measuring loop over any supply of chunks. `next` fills the buffer
+/// and says its channel count and rate, or `None` at the end; the flag is
+/// read before every pull so a cancelled pass stops within one packet.
+fn fold_peaks(
+    duration: Duration,
+    cancelled: &AtomicBool,
+    mut next: impl FnMut(&mut Vec<f32>) -> Option<(usize, u32)>,
+) -> Vec<f32> {
     let mut chunk = Vec::new();
     let mut peaks = vec![0_f32; WAVEFORM_BUCKETS];
     let mut frames_seen: u64 = 0;
@@ -403,13 +424,11 @@ fn measure_waveform(source: &mut AudioSource, cancelled: &AtomicBool) -> Vec<f32
         if cancelled.load(Ordering::Acquire) {
             return Vec::new();
         }
-        match source.next_chunk(&mut chunk) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => break,
-        }
-        let channels = source.info.channels.max(1);
-        let rate = f64::from(source.info.sample_rate.max(1));
-        let total_frames = (duration.as_secs_f64() * rate).max(1.0);
+        let Some((channels, rate)) = next(&mut chunk) else {
+            break;
+        };
+        let channels = channels.max(1);
+        let total_frames = (duration.as_secs_f64() * f64::from(rate.max(1))).max(1.0);
         for frame in chunk.chunks(channels) {
             let peak = frame.iter().fold(0_f32, |peak, sample| peak.max(sample.abs()));
             let bucket = ((frames_seen as f64 / total_frames) * WAVEFORM_BUCKETS as f64) as usize;
@@ -421,8 +440,6 @@ fn measure_waveform(source: &mut AudioSource, cancelled: &AtomicBool) -> Vec<f32
     if frames_seen == 0 {
         return Vec::new();
     }
-    // Rewind so a player that reuses this source starts at the top.
-    let _ = source.seek(Duration::ZERO);
     peaks.iter_mut().for_each(|peak| *peak = peak.clamp(0.0, 1.0));
     peaks
 }
@@ -468,21 +485,16 @@ mod tests {
         let path = dir.path().join("tone.wav");
         tone(&path);
 
-        let mut source = AudioSource::open(&path).unwrap();
+        let source = AudioSource::open(&path).unwrap();
         assert_eq!(source.info.sample_rate, 8_000);
         assert_eq!(source.info.channels, 1);
         assert_eq!(source.info.duration, Some(Duration::from_secs(1)));
         assert_eq!(source.info.codec, "pcm_s16le");
 
         let cache = dir.path().join("cache");
-        let peaks = waveform_in(&cache, &path, &mut source, &AtomicBool::new(false));
+        let peaks = waveform_in(&cache, &path, &AtomicBool::new(false));
         assert_eq!(peaks.len(), WAVEFORM_BUCKETS);
         assert!(peaks.iter().all(|peak| (0.45..=0.55).contains(peak)), "{peaks:?}");
-
-        // Rewound: the first chunk after the waveform is the file's start.
-        let mut chunk = Vec::new();
-        assert!(source.next_chunk(&mut chunk).unwrap());
-        assert!(!chunk.is_empty());
     }
 
     #[test]
@@ -490,33 +502,72 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tone.wav");
         tone(&path);
-        let mut source = AudioSource::open(&path).unwrap();
         let cancelled = Arc::new(AtomicBool::new(true));
-        assert!(waveform_in(&dir.path().join("cache"), &path, &mut source, &cancelled).is_empty());
+        assert!(waveform_in(&dir.path().join("cache"), &path, &cancelled).is_empty());
+    }
+
+    /// The flag raised part way through stops the pass at the next packet
+    /// boundary: nothing more is pulled from the decoder, and the partial
+    /// measurement is not published as if it were whole.
+    #[test]
+    fn a_waveform_pass_stops_between_packets_once_cancelled() {
+        let cancelled = AtomicBool::new(false);
+        let mut pulls = 0;
+        let peaks = fold_peaks(Duration::from_secs(60), &cancelled, |chunk| {
+            pulls += 1;
+            if pulls == 3 {
+                cancelled.store(true, Ordering::Release);
+            }
+            chunk.clear();
+            chunk.extend(std::iter::repeat_n(0.5_f32, 1_024));
+            Some((1, 8_000))
+        });
+        assert!(peaks.is_empty());
+        assert_eq!(pulls, 3, "the pull after the flag was set never happens");
+
+        // The same supply, left alone, is measured to the end.
+        let mut pulls = 0;
+        let peaks = fold_peaks(Duration::from_secs(1), &AtomicBool::new(false), |chunk| {
+            pulls += 1;
+            if pulls > 8 {
+                return None;
+            }
+            chunk.clear();
+            chunk.extend(std::iter::repeat_n(0.5_f32, 1_000));
+            Some((1, 8_000))
+        });
+        assert_eq!(peaks.len(), WAVEFORM_BUCKETS);
+        assert!(peaks.iter().all(|peak| *peak == 0.5), "{peaks:?}");
     }
 
     /// The second look at a file reads the peaks back rather than decoding
-    /// it again: whatever the cache file says is what comes back.
+    /// it again: whatever the cache file says is what comes back, and the
+    /// file itself is not even opened for it.
     #[test]
     fn a_measured_waveform_is_read_from_the_cache_next_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tone.wav");
         tone(&path);
         let cache = dir.path().join("cache");
-        let mut source = AudioSource::open(&path).unwrap();
-        let first = waveform_in(&cache, &path, &mut source, &AtomicBool::new(false));
+        let first = waveform_in(&cache, &path, &AtomicBool::new(false));
         assert_eq!(first.len(), WAVEFORM_BUCKETS);
 
         let cached = std::fs::read_dir(&cache).unwrap().flatten().next().unwrap().path();
         let planted =
             (0..WAVEFORM_BUCKETS).flat_map(|_| 0.75_f32.to_le_bytes()).collect::<Vec<_>>();
         std::fs::write(&cached, planted).unwrap();
-        let second = waveform_in(&cache, &path, &mut source, &AtomicBool::new(false));
-        assert!(second.iter().all(|peak| *peak == 0.75));
+        // Make the source unreadable: the cache alone has to answer.
+        let mut readable = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut readable, 0o000);
+        std::fs::set_permissions(&path, readable.clone()).unwrap();
+        let second = waveform_in(&cache, &path, &AtomicBool::new(false));
+        std::os::unix::fs::PermissionsExt::set_mode(&mut readable, 0o644);
+        std::fs::set_permissions(&path, readable).unwrap();
+        assert!(second.iter().all(|peak| *peak == 0.75), "{second:?}");
 
         // A cache entry of the wrong shape is ignored, not trusted.
         std::fs::write(&cached, b"junk").unwrap();
-        let third = waveform_in(&cache, &path, &mut source, &AtomicBool::new(false));
+        let third = waveform_in(&cache, &path, &AtomicBool::new(false));
         assert_eq!(third, first);
     }
 
@@ -557,7 +608,7 @@ mod tests {
         assert!((1.9..=2.1).contains(&duration), "{duration}");
 
         let cache = dir.path().join("cache");
-        let peaks = waveform_in(&cache, &path, &mut source, &AtomicBool::new(false));
+        let peaks = waveform_in(&cache, &path, &AtomicBool::new(false));
         assert_eq!(peaks.len(), WAVEFORM_BUCKETS);
         // lavfi's sine is quiet (about 0.125 of full scale); a steady tone
         // fills the buckets evenly at whatever level it has.

@@ -5,15 +5,25 @@
 //! this file only reads its numbers. While something plays, a foreground
 //! task asks for a repaint twenty times a second and stops a moment after
 //! the sound does, so the bars can fall.
+//!
+//! The spectrum and the waveform are each one `canvas` painting a quad per
+//! bar rather than a row of `div`s. Twenty times a second they would
+//! otherwise be close to three hundred layout nodes rebuilt and measured
+//! per frame; a quad is the cheapest thing the renderer draws and skips
+//! layout altogether.
 
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, FontWeight, MouseButton, MouseDownEvent, ObjectFit, Pixels,
-    RenderImage, div, img, px, relative,
+    AnyElement, Bounds, Context, FontWeight, Hsla, MouseButton, MouseDownEvent, ObjectFit, Pixels,
+    RenderImage, Window, canvas, div, fill, img, point, px, relative, size,
 };
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
 
 use crate::preview::{
     audio::AudioInfo,
@@ -21,11 +31,19 @@ use crate::preview::{
     player::{Player, Shared},
 };
 
-use super::{Marcel, pointer::painted_bounds};
+use super::Marcel;
 
 const COVER_EDGE: f32 = 220.0;
 const SPECTRUM_HEIGHT: f32 = 72.0;
+const SPECTRUM_BAR_WIDTH: f32 = 4.0;
+const SPECTRUM_BAR_GAP: f32 = 2.0;
 const WAVEFORM_HEIGHT: f32 = 48.0;
+const WAVEFORM_BAR_GAP: f32 = 1.0;
+/// Bars drawn while the waveform has not been measured, so the scrubber
+/// has a shape to press on.
+const PLACEHOLDER_BARS: usize = 120;
+const PLACEHOLDER_PEAK: f32 = 0.35;
+const TRANSPORT_BUTTON_EDGE: f32 = 36.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 /// Repaints kept going after the sound stops, so the bars settle.
 const SETTLE_TICKS: u32 = 24;
@@ -144,54 +162,40 @@ impl Marcel {
             (None, None) => None,
         };
 
-        // The bars. Each is a rectangle whose height is the band's level;
-        // the row is the cheapest thing the renderer draws.
+        // The bars: one quad each, the height the band's level.
         let spectrum = shared.spectrum();
-        let bars = h_flex()
-            .w_full()
-            .h(px(SPECTRUM_HEIGHT))
-            .items_end()
-            .justify_center()
-            .gap(px(2.0))
-            .children(spectrum.iter().enumerate().map(|(index, level)| {
-                let height = (SPECTRUM_HEIGHT - 2.0) * level + 2.0;
-                div()
-                    .id(("spectrum-bar", index))
-                    .w(px(4.0))
-                    .h(px(height))
-                    .rounded_sm()
-                    .bg(if *level > 0.02 { colors.primary } else { colors.border })
-            }));
+        let (lit, unlit) = (colors.primary, colors.border);
+        let bars = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, _| paint_spectrum(window, bounds, &spectrum, lit, unlit),
+        )
+        .w_full()
+        .h(px(SPECTRUM_HEIGHT));
 
         // The waveform doubles as the scrubber: a press anywhere on it seeks
         // to that fraction of the file. Its painted bounds are what turn
-        // the pointer into a fraction.
+        // the pointer into a fraction. gpui-component's `Slider` draws a
+        // track and a thumb over its own state entity, and what is wanted
+        // here is a slider whose track is the waveform, so it is painted.
         let scrub_bounds = self.preview.scrub_bounds.clone();
-        let peaks: Vec<f32> = if waveform.is_empty() { vec![0.35; 120] } else { waveform.to_vec() };
-        let peaks_len = peaks.len().max(1);
-        let played_bars = (fraction * peaks_len as f32).round() as usize;
+        let peaks = waveform.clone();
         let player_for_seek = player.clone();
+        let waveform_canvas = canvas(
+            {
+                let scrub_bounds = scrub_bounds.clone();
+                move |bounds, _, _| scrub_bounds.set(Some(bounds))
+            },
+            move |bounds, (), window, _| {
+                paint_waveform(window, bounds, &peaks, fraction, lit, unlit)
+            },
+        )
+        .size_full();
         let waveform_row = div()
             .id("audio-waveform")
-            .relative()
             .w_full()
             .h(px(WAVEFORM_HEIGHT))
             .cursor_pointer()
-            .child(h_flex().size_full().items_center().gap(px(1.0)).children(
-                peaks.iter().enumerate().map(|(index, peak)| {
-                    let height = (WAVEFORM_HEIGHT - 4.0) * peak.max(0.04);
-                    div()
-                        .flex_1()
-                        .min_w(px(1.0))
-                        .h(px(height))
-                        .rounded_sm()
-                        .bg(if index < played_bars { colors.primary } else { colors.border })
-                }),
-            ))
-            .child(painted_bounds({
-                let scrub_bounds = scrub_bounds.clone();
-                move |bounds| scrub_bounds.set(Some(bounds))
-            }))
+            .child(waveform_canvas)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -205,20 +209,12 @@ impl Marcel {
             );
 
         let player_for_toggle = player.clone();
-        let button = div()
-            .id("audio-toggle")
-            .flex()
-            .flex_none()
-            .size(px(36.0))
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(colors.primary)
-            .text_color(colors.button_primary_foreground)
+        let button = Button::new("audio-toggle")
+            .primary()
+            .with_size(px(TRANSPORT_BUTTON_EDGE))
+            .rounded(px(TRANSPORT_BUTTON_EDGE / 2.0))
             .font_family(cx.theme().mono_font_family.clone())
             .line_height(relative(1.0))
-            .cursor_pointer()
-            .hover(|this| this.bg(colors.button_primary_hover))
             .child(if playing { "▮▮" } else { "▶" })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_playback(&player_for_toggle, cx);
@@ -378,6 +374,65 @@ fn stream_line(info: &AudioInfo) -> String {
         parts.push(describe_channels(info.channels));
     }
     parts.join(" · ")
+}
+
+/// The spectrum's bars, standing on the bottom edge and centred across
+/// `bounds`; a bar that is all but silent takes the quiet colour.
+fn paint_spectrum(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    levels: &[f32],
+    lit: Hsla,
+    unlit: Hsla,
+) {
+    if levels.is_empty() {
+        return;
+    }
+    let span =
+        levels.len() as f32 * SPECTRUM_BAR_WIDTH + (levels.len() - 1) as f32 * SPECTRUM_BAR_GAP;
+    let left = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - span) / 2.0;
+    let bottom = f32::from(bounds.origin.y) + f32::from(bounds.size.height);
+    let range = f32::from(bounds.size.height) - 2.0;
+    for (index, level) in levels.iter().enumerate() {
+        let height = range * level + 2.0;
+        let x = left + index as f32 * (SPECTRUM_BAR_WIDTH + SPECTRUM_BAR_GAP);
+        let bar = Bounds::new(
+            point(px(x), px(bottom - height)),
+            size(px(SPECTRUM_BAR_WIDTH), px(height)),
+        );
+        let color = if *level > 0.02 { lit } else { unlit };
+        window.paint_quad(fill(bar, color).corner_radii(px(1.0)));
+    }
+}
+
+/// The waveform: a bar per peak sharing the width, centred on the middle
+/// line, with the part before the playhead in `played`. No peaks yet means
+/// an even row of placeholder bars, so the scrubber still has a shape.
+fn paint_waveform(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    peaks: &[f32],
+    fraction: f32,
+    played: Hsla,
+    rest: Hsla,
+) {
+    let placeholder = [PLACEHOLDER_PEAK; PLACEHOLDER_BARS];
+    let peaks = if peaks.is_empty() { &placeholder[..] } else { peaks };
+    let stride = f32::from(bounds.size.width) / peaks.len() as f32;
+    let bar_width = (stride - WAVEFORM_BAR_GAP).max(1.0);
+    let left = f32::from(bounds.origin.x);
+    let middle = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+    let range = f32::from(bounds.size.height) - 4.0;
+    let played_bars = (fraction * peaks.len() as f32).round() as usize;
+    for (index, peak) in peaks.iter().enumerate() {
+        let height = range * peak.max(0.04);
+        let bar = Bounds::new(
+            point(px(left + index as f32 * stride), px(middle - height / 2.0)),
+            size(px(bar_width), px(height)),
+        );
+        let color = if index < played_bars { played } else { rest };
+        window.paint_quad(fill(bar, color).corner_radii(px(1.0)));
+    }
 }
 
 /// Where the scrubber was last painted, for turning a press into a seek.

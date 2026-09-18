@@ -161,16 +161,24 @@ pub fn load_preview(
     })
 }
 
-/// The tags and cover, one pass for the waveform, and a player that stays
-/// idle until asked. A file symphonia cannot open falls back to the plain
-/// summary rather than an error, since "no preview" is the truth of it.
+/// Whether `load_preview` measures an audio file's waveform before handing
+/// the preview over. The measurement is a full decode, tens of seconds for
+/// a long set, and the pane has no reason to wait for it: the tags, cover,
+/// and player are ready at once and `audio::waveform` can run as a second
+/// job that fills the scrubber through [`Preview::set_waveform`]. Until the
+/// window starts that job, the one pass keeps the scrubber drawn.
+const WAVEFORM_IN_FIRST_PASS: bool = true;
+
+/// The tags and cover, and a player that stays idle until asked; the
+/// waveform too while `WAVEFORM_IN_FIRST_PASS` holds. A file symphonia
+/// cannot open falls back to the plain summary rather than an error, since
+/// "no preview" is the truth of it.
 fn load_audio(
     entry: &FileEntry,
     cancelled: &Arc<std::sync::atomic::AtomicBool>,
 ) -> io::Result<Preview> {
-    let path = &entry.path;
-    let mut source = match audio::AudioSource::open(path) {
-        Ok(source) => source,
+    let mut preview = match load_audio_facts(entry) {
+        Ok(preview) => preview,
         Err(error)
             if matches!(error.kind(), io::ErrorKind::Unsupported | io::ErrorKind::InvalidData) =>
         {
@@ -178,21 +186,57 @@ fn load_audio(
         }
         Err(error) => return Err(error),
     };
-    let cover = source.info.cover.as_deref().and_then(|bytes| image::prepare_bytes(bytes).ok());
-    let waveform = audio::waveform(path, &mut source, cancelled);
-    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "Audio preview was cancelled"));
+    if WAVEFORM_IN_FIRST_PASS {
+        preview.set_waveform(audio::waveform(&entry.path, cancelled));
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Audio preview was cancelled"));
+        }
     }
-    let mut info = source.info.clone();
+    Ok(preview)
+}
+
+/// The first stage of an audio preview, and all of it that has to be read
+/// before the pane can show something: what the tags say, the cover, and a
+/// player. The waveform is left empty for `audio::waveform` to fill in.
+pub fn load_audio_facts(entry: &FileEntry) -> io::Result<Preview> {
+    let path = &entry.path;
+    let source = audio::AudioSource::open(path)?;
+    let cover = source.info.cover.as_deref().and_then(|bytes| image::prepare_bytes(bytes).ok());
+    let mut info = source.info;
     // The bytes served their purpose; the preview keeps the decoded image.
     info.cover = None;
     Ok(Preview::Audio {
         info,
-        waveform: waveform.into(),
+        waveform: Arc::from([]),
         cover,
         player: Arc::new(player::Player::new(path)),
     })
 }
+
+impl Preview {
+    /// Give an audio preview its measured waveform. Anything else is left
+    /// as it is and says so, for the job that finishes after the pane has
+    /// moved on to a different kind of file.
+    pub fn set_waveform(&mut self, peaks: Vec<f32>) -> bool {
+        match self {
+            Preview::Audio { waveform, .. } => {
+                *waveform = peaks.into();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// An audio preview whose waveform has not been measured: the second
+    /// stage still owes it one.
+    pub fn wants_waveform(&self) -> Option<&Path> {
+        match self {
+            Preview::Audio { waveform, player, .. } if waveform.is_empty() => Some(player.path()),
+            _ => None,
+        }
+    }
+}
+
 /// Kind, size, and a closing line, one per row.
 ///
 /// `format_size` returns an empty string for an entry with no size — a special
@@ -320,6 +364,28 @@ mod tests {
             "Unknown format".to_string(),
         );
         assert_eq!(sized, "File\n2.0 KiB\nUnknown format");
+    }
+
+    /// The second stage of an audio preview patches the first: only an
+    /// audio preview takes a waveform, and only an unmeasured one asks.
+    #[test]
+    fn a_waveform_patches_an_audio_preview_and_nothing_else() {
+        let path = PathBuf::from("/music/track.flac");
+        let mut preview = Preview::Audio {
+            info: audio::AudioInfo::default(),
+            waveform: Arc::from([]),
+            cover: None,
+            player: Arc::new(player::Player::new(&path)),
+        };
+        assert_eq!(preview.wants_waveform(), Some(path.as_path()));
+        assert!(preview.set_waveform(vec![0.5; audio::WAVEFORM_BUCKETS]));
+        assert_eq!(preview.wants_waveform(), None);
+        let Preview::Audio { waveform, .. } = &preview else { unreachable!() };
+        assert_eq!(waveform.len(), audio::WAVEFORM_BUCKETS);
+
+        let mut other = Preview::Metadata { summary: String::new() };
+        assert_eq!(other.wants_waveform(), None);
+        assert!(!other.set_waveform(vec![0.5]));
     }
 
     #[test]

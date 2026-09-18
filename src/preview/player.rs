@@ -115,6 +115,11 @@ impl Player {
         &self.shared
     }
 
+    /// The file this player is for.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn play(&self) {
         self.send(Command::Play);
     }
