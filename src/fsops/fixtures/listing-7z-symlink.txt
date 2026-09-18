@@ -1,0 +1,40 @@
+Path = tree
+Size = 0
+Packed Size = 0
+Modified = 2026-09-18 15:26:36.5506073
+Attributes = D drwxr-xr-x
+CRC = 
+Encrypted = -
+Method = 
+Block = 
+
+Path = tree/abslink
+Size = 11
+Packed Size = 27
+Modified = 2026-09-18 15:26:36.5506073
+Attributes = A lrwxrwxrwx
+CRC = 291FB90A
+Encrypted = -
+Method = LZMA2:12
+Block = 0
+
+Path = tree/file.txt
+Size = 4
+Packed Size = 
+Modified = 2026-09-18 15:26:36.5483426
+Attributes = A -rw-r--r--
+CRC = ADF3F363
+Encrypted = -
+Method = LZMA2:12
+Block = 0
+
+Path = tree/link
+Size = 8
+Packed Size = 
+Modified = 2026-09-18 15:26:36.5496073
+Attributes = A lrwxrwxrwx
+CRC = E0F71625
+Encrypted = -
+Method = LZMA2:12
+Block = 0
+
