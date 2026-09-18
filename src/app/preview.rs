@@ -422,6 +422,11 @@ impl PreviewState {
         (self.ticket, cancelled)
     }
 
+    /// Replace whatever is on show with an error, releasing what it held.
+    pub(super) fn show_error(&mut self, message: String) {
+        self.begin(PreviewContent::Error(message));
+    }
+
     /// Queue the decoded images the current preview holds for release.
     fn retire_shown_images(&mut self) {
         let PreviewContent::Ready(preview) = &self.state else {

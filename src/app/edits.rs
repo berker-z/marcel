@@ -30,7 +30,6 @@ use crate::{
     fsops::{TransferMode, archive::default_zip_name, validate_entry_name},
     names::{display_path_name, select_stem},
     operations::{FileClipboard, OperationProgressKind},
-    preview::PreviewState as PreviewContent,
     surface::Report,
 };
 
@@ -675,7 +674,7 @@ impl Marcel {
             if let Err(error) = task.await {
                 let _ = this.update(cx, |this, cx| {
                     if still_relevant(this) {
-                        this.preview.state = PreviewContent::Error(error.to_string());
+                        this.preview.show_error(error.to_string());
                         cx.notify();
                     }
                 });
