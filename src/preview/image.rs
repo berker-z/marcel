@@ -20,8 +20,13 @@ const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SOURCE_DIMENSION: u32 = 25_000;
 const MAX_SOURCE_PIXELS: u64 = 40_000_000;
 const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+/// An animation is kept whole up to these, and cut there: the frames decoded
+/// so far play as a loop. Every frame is retained for as long as the preview
+/// shows, so the byte bound is what matters — 240 frames of a bounded
+/// 2048×2048 GIF would be 4 GiB — and the frame bound keeps a tiny endless
+/// GIF from being decoded for seconds before anything appears.
 const MAX_ANIMATION_FRAMES: usize = 240;
-const MAX_ANIMATION_OUTPUT_PIXELS: u64 = 64_000_000;
+const MAX_ANIMATION_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<Arc<RenderImage>> {
     check_cancelled(cancelled)?;
@@ -111,21 +116,15 @@ fn decode_bounded_animation(
     };
 
     let mut output = Vec::new();
-    let mut output_pixels = 0u64;
+    let mut budget = AnimationBudget::default();
     for frame in frames {
         check_cancelled(cancelled)?;
-        if output.len() >= MAX_ANIMATION_FRAMES {
-            bail!("animation exceeds the {MAX_ANIMATION_FRAMES}-frame preview limit");
-        }
         let frame = frame?;
         let delay = frame.delay();
         let mut image =
             bound_preview_dimensions(DynamicImage::ImageRgba8(frame.into_buffer())).to_rgba8();
-        output_pixels = output_pixels
-            .checked_add(u64::from(image.width()) * u64::from(image.height()))
-            .context("animation preview size overflowed")?;
-        if output_pixels > MAX_ANIMATION_OUTPUT_PIXELS {
-            bail!("animation exceeds the decoded preview memory limit");
+        if !budget.admit(image.width(), image.height()) {
+            break;
         }
         rgba_to_bgra(&mut image);
         output.push(Frame::from_parts(image, 0, 0, delay));
@@ -134,6 +133,33 @@ fn decode_bounded_animation(
         bail!("animation contains no frames");
     }
     Ok(output)
+}
+
+/// What an animated preview may still take: frames and decoded bytes.
+struct AnimationBudget {
+    frames: usize,
+    bytes: u64,
+}
+
+impl Default for AnimationBudget {
+    fn default() -> Self {
+        Self { frames: MAX_ANIMATION_FRAMES, bytes: MAX_ANIMATION_BYTES }
+    }
+}
+
+impl AnimationBudget {
+    /// Whether a `width`×`height` RGBA frame still fits, charging it if so.
+    /// A refusal ends the animation where it is; the frames before it are
+    /// kept.
+    fn admit(&mut self, width: u32, height: u32) -> bool {
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        if self.frames == 0 || bytes > self.bytes {
+            return false;
+        }
+        self.frames -= 1;
+        self.bytes -= bytes;
+        true
+    }
 }
 
 fn rgba_to_bgra(image: &mut image::RgbaImage) {
@@ -231,12 +257,14 @@ mod tests {
         assert_eq!(output.as_bytes(0), Some([30, 20, 10, 40].as_slice()));
     }
 
+    /// A long animation is cut at the limit and plays what was decoded,
+    /// rather than failing the preview outright.
     #[test]
-    fn rejects_animations_over_the_frame_limit() {
+    fn animations_over_the_frame_limit_keep_the_first_frames() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("many.gif");
         let mut encoder = GifEncoder::new(BufWriter::new(File::create(&source).unwrap()));
-        for _ in 0..=MAX_ANIMATION_FRAMES {
+        for _ in 0..MAX_ANIMATION_FRAMES + 5 {
             encoder
                 .encode_frame(Frame::from_parts(
                     RgbaImage::new(1, 1),
@@ -248,7 +276,44 @@ mod tests {
         }
         drop(encoder);
 
-        assert!(prepare(&source, &AtomicBool::new(false)).is_err());
+        let output = prepare(&source, &AtomicBool::new(false)).unwrap();
+        assert_eq!(output.frame_count(), MAX_ANIMATION_FRAMES);
+    }
+
+    /// The byte budget is the binding one for anything but a tiny GIF: it
+    /// admits whole frames until the next would not fit, whatever the count.
+    #[test]
+    fn the_animation_budget_stops_at_the_first_frame_that_does_not_fit() {
+        let mut budget = AnimationBudget { frames: 10, bytes: 100 };
+        // 4×2 RGBA is 32 bytes: three fit, the fourth would need 128.
+        assert!(budget.admit(4, 2));
+        assert!(budget.admit(4, 2));
+        assert!(budget.admit(4, 2));
+        assert!(!budget.admit(4, 2));
+        assert_eq!(budget.bytes, 4);
+        assert_eq!(budget.frames, 7);
+        // Smaller frames still fit in what is left.
+        assert!(budget.admit(1, 1));
+        assert!(!budget.admit(1, 1));
+    }
+
+    #[test]
+    fn the_animation_budget_counts_frames_independently_of_bytes() {
+        let mut budget = AnimationBudget { frames: 2, bytes: u64::MAX };
+        assert!(budget.admit(1, 1));
+        assert!(budget.admit(1, 1));
+        assert!(!budget.admit(1, 1));
+    }
+
+    /// The default budget: a bounded 2048×2048 frame is 16 MiB, so four of
+    /// them fit and a fifth does not, well short of the frame count.
+    #[test]
+    fn the_default_budget_holds_four_full_size_frames() {
+        let mut budget = AnimationBudget::default();
+        for _ in 0..4 {
+            assert!(budget.admit(PREVIEW_EDGE, PREVIEW_EDGE));
+        }
+        assert!(!budget.admit(PREVIEW_EDGE, PREVIEW_EDGE));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! it, and how it is drawn.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, OnceCell},
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
     ops::Range,
@@ -17,8 +17,9 @@ use std::{
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Hsla, Img, IntoElement, ObjectFit, Pixels, Stateful,
-    Task, TextRun, UniformListScrollHandle, Window, div, font, img, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, Hsla, Img, IntoElement, ObjectFit, Pixels,
+    RenderImage, Resource, Stateful, Task, TextRun, UniformListScrollHandle, Window, div, font,
+    image_cache, img, px, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, scroll::ScrollableElement as _, text::TextView};
 use unicode_width::UnicodeWidthChar;
@@ -34,13 +35,33 @@ use crate::{
 
 use super::{
     DIRECTORY_ROW_HEIGHT, Marcel,
+    image_cache::BoundedImageCache,
     navigation::{pump, unblock},
 };
 
+/// How many thumbnail *paths* the browser remembers. This bounds the map
+/// from file to cache PNG, not the pixels: those are decoded by `img` into
+/// the browser's image cache, which has a byte budget of its own.
 const MAX_MEMORY_THUMBNAILS: usize = 512;
 const THUMBNAIL_WORKERS: usize = 2;
 const PDF_PAGE_WORKERS: usize = 2;
 const PDF_PAGE_LOOKAHEAD: usize = 1;
+/// The most of a hovered folder the pane lists. A glance at a folder does
+/// not need all of it, and streaming a 50k-entry folder into the pane on
+/// every hover costs the same as loading it.
+const FOLDER_PREVIEW_LIMIT: usize = 1_000;
+const FOLDER_PREVIEW_LIMIT_LABEL: &str = "1,000+ items";
+/// The pane's budget for images drawn from a path. Only PDF pages go through
+/// it — decoded previews are `RenderImage`s the pane releases itself — and a
+/// page rasterized at `-scale-to 1800` is about 10 MB of BGRA, so this holds
+/// a dozen: what is on screen, the lookahead, and a few pages scrolled past
+/// that come back free. Paging through a long paper used to leave every
+/// page resident, close to a gigabyte for a hundred pages.
+const PANE_IMAGE_BUDGET: usize = 128 * 1024 * 1024;
+/// The browser's budget: thumbnails and icons. A thumbnail is at most
+/// 128×128 BGRA, 64 KiB, so every one of `MAX_MEMORY_THUMBNAILS` fits in
+/// 32 MiB; the rest is for icons, which a theme can ship as 512 px PNGs.
+const BROWSER_IMAGE_BUDGET: usize = 64 * 1024 * 1024;
 const DEFAULT_PREVIEW_WIDTH: f32 = 420.0;
 const PREVIEW_TEXT_CHROME_WIDTH: f32 = 92.0;
 const PREVIEW_WRAP_DEBOUNCE: Duration = Duration::from_millis(80);
@@ -153,19 +174,85 @@ impl<K: Hash + Eq + Clone> WorkQueue<K> {
     }
 }
 
+/// The hovered folder as the pane lists it: the first `FOLDER_PREVIEW_LIMIT`
+/// entries in sort order, with the counts kept as the stream arrives rather
+/// than recounted every frame.
+#[derive(Default)]
+pub struct FolderPreview {
+    pub entries: Vec<FileEntry>,
+    folders: usize,
+    files: usize,
+    /// The stream was stopped at the limit, so the counts are a floor.
+    truncated: bool,
+    pub loading: bool,
+    error: Option<String>,
+}
+
+impl FolderPreview {
+    /// Fold a batch in. Returns whether the stream should keep coming.
+    fn absorb(&mut self, batch: Vec<FileEntry>, sort: SortOrder) -> bool {
+        let folders = batch.iter().filter(|entry| entry.navigable).count();
+        self.folders += folders;
+        self.files += batch.len() - folders;
+        self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), batch, sort);
+        if self.entries.len() <= FOLDER_PREVIEW_LIMIT {
+            return true;
+        }
+        self.entries.truncate(FOLDER_PREVIEW_LIMIT);
+        self.truncated = true;
+        self.loading = false;
+        false
+    }
+
+    fn summary(&self) -> String {
+        let progress = if self.loading { " · Loading…" } else { "" };
+        if self.truncated {
+            format!("Folder · {FOLDER_PREVIEW_LIMIT_LABEL}")
+        } else {
+            format!("Folder · {} folders · {} files{progress}", self.folders, self.files)
+        }
+    }
+}
+
+/// The last thumbnail schedule, so scrolling that changes nothing costs
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThumbnailWindow {
+    visible: Range<usize>,
+    nearby: Range<usize>,
+    /// The listing's `projection_revision`: the same indices name different
+    /// files after a batch lands or the filter changes.
+    revision: u64,
+}
+
 pub struct PreviewState {
     pub thumbnails: HashMap<PathBuf, ThumbnailState>,
     thumbnail_order: VecDeque<PathBuf>,
     pub thumbnail_queue: WorkQueue<PathBuf>,
     /// Invalidated while a decode was in flight: the result is dropped.
     thumbnail_stale: HashSet<PathBuf>,
+    /// Set when the listing changes, so a decode that outlives its listing —
+    /// an ffmpeg child, in particular — stops instead of finishing for
+    /// nobody.
+    thumbnail_cancel: Arc<AtomicBool>,
+    thumbnail_window: Option<ThumbnailWindow>,
+    /// Images drawn from a path that the pane and browser caches should let
+    /// go of: thumbnails whose file changed or whose entry was forgotten,
+    /// and the pages of a PDF no longer shown. Released on the next frame.
+    stale_pane_images: Vec<PathBuf>,
+    stale_browser_images: Vec<PathBuf>,
+    /// Decoded previews the pane stopped showing. `img(RenderImage)` bypasses
+    /// every cache, so their atlas tiles are released here, on the next frame.
+    retired_images: Vec<Arc<RenderImage>>,
+    /// Created on first draw: `Marcel::new` builds this state before it has
+    /// a context to create entities with.
+    pane_images: OnceCell<Entity<BoundedImageCache>>,
+    browser_images: OnceCell<Entity<BoundedImageCache>>,
     pub state: PreviewContent,
     pub ticket: u64,
     task: Option<Task<()>>,
     cancel: Option<Arc<AtomicBool>>,
-    pub folder_entries: Vec<FileEntry>,
-    pub folder_loading: bool,
-    folder_error: Option<String>,
+    pub folder: FolderPreview,
     folder_task: Option<Task<()>>,
     folder_scroll: UniformListScrollHandle,
     pdf_pages: HashMap<usize, PdfPageState>,
@@ -190,13 +277,18 @@ impl PreviewState {
             thumbnail_order: VecDeque::new(),
             thumbnail_queue: WorkQueue::new(THUMBNAIL_WORKERS),
             thumbnail_stale: HashSet::new(),
+            thumbnail_cancel: Arc::new(AtomicBool::new(false)),
+            thumbnail_window: None,
+            stale_pane_images: Vec::new(),
+            stale_browser_images: Vec::new(),
+            retired_images: Vec::new(),
+            pane_images: OnceCell::new(),
+            browser_images: OnceCell::new(),
             state: PreviewContent::Empty,
             ticket: 0,
             task: None,
             cancel: None,
-            folder_entries: Vec::new(),
-            folder_loading: false,
-            folder_error: None,
+            folder: FolderPreview::default(),
             folder_task: None,
             folder_scroll: UniformListScrollHandle::new(),
             pdf_pages: HashMap::new(),
@@ -215,21 +307,30 @@ impl PreviewState {
     }
 
     pub fn reset_thumbnails(&mut self) {
+        // Decodes already running belong to the listing that is going away.
+        std::mem::replace(&mut self.thumbnail_cancel, Arc::new(AtomicBool::new(false)))
+            .store(true, Ordering::Release);
         self.thumbnail_queue.reset();
         self.thumbnail_stale.clear();
         self.thumbnails.clear();
         self.thumbnail_order.clear();
+        self.thumbnail_window = None;
     }
 
     pub fn invalidate_thumbnails(&mut self, paths: &[PathBuf]) {
         for path in paths {
-            self.thumbnails.remove(path);
+            // The cache PNG for a changed file keeps its name, so the pixels
+            // the browser decoded from it are stale too.
+            if let Some(ThumbnailState::Ready(thumbnail)) = self.thumbnails.remove(path) {
+                self.stale_browser_images.push(thumbnail);
+            }
             self.thumbnail_order.retain(|existing| existing != path);
             self.thumbnail_queue.forget(path);
             if self.thumbnail_queue.inflight.contains(path) {
                 self.thumbnail_stale.insert(path.clone());
             }
         }
+        self.thumbnail_window = None;
     }
 
     fn remember_thumbnail(&mut self, path: PathBuf, state: ThumbnailState) {
@@ -237,8 +338,51 @@ impl PreviewState {
         self.thumbnail_order.push_back(path.clone());
         self.thumbnails.insert(path, state);
         while self.thumbnail_order.len() > MAX_MEMORY_THUMBNAILS {
-            if let Some(expired) = self.thumbnail_order.pop_front() {
-                self.thumbnails.remove(&expired);
+            if let Some(ThumbnailState::Ready(thumbnail)) = self
+                .thumbnail_order
+                .pop_front()
+                .and_then(|expired| self.thumbnails.remove(&expired))
+            {
+                self.stale_browser_images.push(thumbnail);
+            }
+        }
+    }
+
+    /// The pane's image cache, created on first use.
+    fn pane_images(&self, cx: &mut App) -> Entity<BoundedImageCache> {
+        self.pane_images.get_or_init(|| BoundedImageCache::new(PANE_IMAGE_BUDGET, cx)).clone()
+    }
+
+    /// The browser's image cache, created on first use.
+    pub(super) fn browser_images(&self, cx: &mut App) -> Entity<BoundedImageCache> {
+        self.browser_images.get_or_init(|| BoundedImageCache::new(BROWSER_IMAGE_BUDGET, cx)).clone()
+    }
+
+    /// Free what the last frame drew and this one will not.
+    ///
+    /// The sites that supersede a preview or forget a thumbnail have no
+    /// window to release atlas tiles into, and `clear()` has no context at
+    /// all, so releases queue up and happen here, at the start of the draw
+    /// that stops showing them — before any `img` asks the caches again.
+    fn release_superseded_images(&mut self, window: &mut Window, cx: &mut App) {
+        for image in self.retired_images.drain(..) {
+            cx.drop_image(image, Some(window));
+        }
+        for (cache, stale) in [
+            (self.pane_images.get(), &mut self.stale_pane_images),
+            (self.browser_images.get(), &mut self.stale_browser_images),
+        ] {
+            let Some(cache) = cache else {
+                stale.clear();
+                continue;
+            };
+            let stale = stale.drain(..).map(Resource::from).collect::<Vec<_>>();
+            if !stale.is_empty() {
+                cache.update(cx, |cache, cx| {
+                    for resource in &stale {
+                        cache.remove(resource, window, cx);
+                    }
+                });
             }
         }
     }
@@ -250,14 +394,16 @@ impl PreviewState {
         if let Some(cancel) = self.cancel.take() {
             cancel.store(true, Ordering::Release);
         }
+        self.retire_shown_images();
         self.task.take();
         self.folder_task.take();
-        self.folder_entries.clear();
-        self.folder_loading = false;
-        self.folder_error = None;
+        self.folder = FolderPreview::default();
         self.folder_scroll = UniformListScrollHandle::new();
         self.pdf_queue.reset();
-        self.pdf_pages.clear();
+        self.stale_pane_images.extend(self.pdf_pages.drain().filter_map(|(_, page)| match page {
+            PdfPageState::Ready(path) => Some(path),
+            PdfPageState::Failed(_) => None,
+        }));
         self.audio_repaints.take();
         self.scrub_bounds.set(None);
         self.pdf_scroll = UniformListScrollHandle::new();
@@ -269,6 +415,19 @@ impl PreviewState {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.cancel = Some(cancelled.clone());
         (self.ticket, cancelled)
+    }
+
+    /// Queue the decoded images the current preview holds for release.
+    fn retire_shown_images(&mut self) {
+        let PreviewContent::Ready(preview) = &self.state else {
+            return;
+        };
+        match preview {
+            Preview::Image { image, .. } => self.retired_images.push(image.clone()),
+            Preview::Audio { cover: Some(cover), .. } => self.retired_images.push(cover.clone()),
+            Preview::Video { poster: Ok(poster), .. } => self.retired_images.push(poster.clone()),
+            _ => {}
+        }
     }
 
     pub fn clear(&mut self) {
@@ -330,9 +489,10 @@ impl Marcel {
         cancelled: Arc<AtomicBool>,
         cx: &mut Context<Self>,
     ) {
-        self.preview.folder_loading = true;
+        self.preview.folder.loading = true;
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
+        let stop = cancelled.clone();
         unblock(cx, move || {
             stream_directory(&stream_path, sender, Some(&cancelled), SortOrder::default())
         })
@@ -349,14 +509,16 @@ impl Marcel {
             if shown != &path {
                 return false;
             }
-            let finished = matches!(&update, DirectoryUpdate::Done | DirectoryUpdate::Error(_));
+            let mut keep_streaming =
+                !matches!(&update, DirectoryUpdate::Done | DirectoryUpdate::Error(_));
             match update {
                 DirectoryUpdate::Batch(batch) => {
-                    this.preview.folder_entries = merge_sorted_entries(
-                        std::mem::take(&mut this.preview.folder_entries),
-                        batch,
-                        SortOrder::default(),
-                    );
+                    if !this.preview.folder.absorb(batch, SortOrder::default()) {
+                        // Enough for a glance: stop the walk rather than
+                        // letting it stat the rest of the folder for nothing.
+                        stop.store(true, Ordering::Release);
+                        keep_streaming = false;
+                    }
                 }
                 DirectoryUpdate::Degraded { skipped, examples } => {
                     let examples = if examples.is_empty() {
@@ -364,17 +526,17 @@ impl Marcel {
                     } else {
                         format!(": {}", examples.join("; "))
                     };
-                    this.preview.folder_error =
+                    this.preview.folder.error =
                         Some(format!("Skipped {skipped} unreadable entries{examples}"));
                 }
-                DirectoryUpdate::Done => this.preview.folder_loading = false,
+                DirectoryUpdate::Done => this.preview.folder.loading = false,
                 DirectoryUpdate::Error(error) => {
-                    this.preview.folder_loading = false;
-                    this.preview.folder_error = Some(error);
+                    this.preview.folder.loading = false;
+                    this.preview.folder.error = Some(error);
                 }
             }
             cx.notify();
-            !finished
+            keep_streaming
         }));
     }
 
@@ -389,7 +551,7 @@ impl Marcel {
             return;
         }
         if let Some(entry) =
-            self.preview.folder_entries.iter().find(|entry| entry.path == path).cloned()
+            self.preview.folder.entries.iter().find(|entry| entry.path == path).cloned()
         {
             self.open_entry(entry, window, cx);
         }
@@ -463,30 +625,47 @@ impl Marcel {
         }
     }
 
+    /// Called from the grid's item callback, so every frame; it only does
+    /// anything when the viewport or the listing under it has changed.
     pub(super) fn ensure_thumbnails(
         &mut self,
         visible: Range<usize>,
         nearby: Range<usize>,
         cx: &mut Context<Self>,
     ) {
+        let window =
+            ThumbnailWindow { visible, nearby, revision: self.directory.projection_revision() };
+        if self.preview.thumbnail_window.as_ref() == Some(&window) {
+            return;
+        }
+        let ThumbnailWindow { visible, nearby, .. } = window.clone();
+        self.preview.thumbnail_window = Some(window);
+
+        let thumbnails = &self.preview.thumbnails;
         let priority = prioritize_thumbnail_indices(visible, nearby)
             .into_iter()
             .filter_map(|index| self.directory.visible_entry(index))
-            .filter(|entry| !entry.navigable && thumbnails::supports(&entry.path))
+            .filter(|entry| {
+                !entry.navigable
+                    && thumbnails::supports(&entry.path)
+                    && !thumbnails.contains_key(&entry.path)
+            })
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
-        let done = self.preview.thumbnails.keys().cloned().collect::<HashSet<_>>();
-        self.preview.thumbnail_queue.schedule(priority, |path| done.contains(path));
+        self.preview.thumbnail_queue.schedule(priority, |_| false);
         self.ensure_workers(
             cx,
             |this| &mut this.preview.thumbnail_queue,
             |this| this.directory.generation,
-            |_, path| {
-                let path = path.clone();
-                Some(Box::new(move || thumbnails::load_or_create(&path)))
+            |this, path| {
+                let (path, cancelled) = (path.clone(), this.preview.thumbnail_cancel.clone());
+                Some(Box::new(move || thumbnails::load_or_create(&path, &cancelled)))
             },
             |this, path, result, _| {
                 if this.preview.thumbnail_stale.remove(&path) {
+                    // The file changed under the decode. Its tile is still
+                    // on screen, so the next frame must schedule it again.
+                    this.preview.thumbnail_window = None;
                     return;
                 }
                 let state = match result {
@@ -507,8 +686,8 @@ impl Marcel {
         // viewport and retains only a one-page lookahead:
         // https://github.com/sxyazi/yazi/blob/e58022b9aafc8dabf586e2cc29b79a230071716f/yazi-plugin/preset/plugins/pdf.lua
         let priority = prioritize_pdf_pages(visible, *pages);
-        let done = self.preview.pdf_pages.keys().copied().collect::<HashSet<_>>();
-        self.preview.pdf_queue.schedule(priority, |page| done.contains(page));
+        let rendered = &self.preview.pdf_pages;
+        self.preview.pdf_queue.schedule(priority, |page| rendered.contains_key(page));
         self.ensure_workers(
             cx,
             |this| &mut this.preview.pdf_queue,
@@ -604,10 +783,7 @@ impl Marcel {
         if let Some(entry) = self.primary_entry() {
             lines.push((entry.name.clone(), colors.foreground));
             let details = if entry.navigable {
-                let folders = self.preview.folder_entries.iter().filter(|e| e.navigable).count();
-                let files = self.preview.folder_entries.len() - folders;
-                let progress = if self.preview.folder_loading { " · Loading…" } else { "" };
-                format!("Folder · {folders} folders · {files} files{progress}")
+                self.preview.folder.summary()
             } else {
                 match format_size(entry.size) {
                     size if size.is_empty() => entry.display_kind().to_string(),
@@ -643,6 +819,19 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.update_preview_font_metrics(window, cx);
+        self.preview.release_superseded_images(window, cx);
+        let content = self.render_preview_content(cx);
+        // Everything drawn from a path in the pane — PDF pages, the folder
+        // listing's icons — decodes into the pane's budgeted cache instead of
+        // GPUI's grow-only global one.
+        image_cache(self.preview.pane_images(cx))
+            .flex()
+            .size_full()
+            .child(content)
+            .into_any_element()
+    }
+
+    fn render_preview_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         match &self.preview.state {
@@ -789,8 +978,8 @@ impl Marcel {
     fn render_folder_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
-        if self.preview.folder_entries.is_empty() {
-            return match (&self.preview.folder_error, self.preview.folder_loading) {
+        if self.preview.folder.entries.is_empty() {
+            return match (&self.preview.folder.error, self.preview.folder.loading) {
                 (Some(error), _) => {
                     message(format!("Could not read this folder\n{error}"), colors.danger)
                 }
@@ -801,11 +990,11 @@ impl Marcel {
         let scroll = self.preview.folder_scroll.clone();
         let list = uniform_list(
             ("folder-preview-entries", self.preview.ticket),
-            self.preview.folder_entries.len(),
+            self.preview.folder.entries.len(),
             cx.processor(move |this, range: Range<usize>, _, cx| {
                 range
                     .filter_map(|index| {
-                        let entry = this.preview.folder_entries.get(index)?.clone();
+                        let entry = this.preview.folder.entries.get(index)?.clone();
                         let click_path = entry.path.clone();
                         let detail = match format_size(entry.size) {
                             size if size.is_empty() => entry.display_kind().to_string(),
@@ -971,6 +1160,7 @@ fn preview_wrap_break(line: &str, columns: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_file_entry;
 
     #[test]
     fn code_fence_grows_past_fences_in_content() {
@@ -1026,5 +1216,101 @@ mod tests {
         assert_eq!(queue.take(), Some(3));
         queue.finish(&1);
         assert!(!queue.is_pending(&1));
+    }
+
+    fn entries(range: Range<usize>, navigable: bool) -> Vec<FileEntry> {
+        range.map(|index| test_file_entry(&format!("/folder/{index:05}"), navigable)).collect()
+    }
+
+    /// The pane lists the first thousand and stops the walk there; the
+    /// footer says so instead of a count it does not have.
+    #[test]
+    fn a_folder_preview_stops_at_the_limit_and_says_so() {
+        let mut folder = FolderPreview { loading: true, ..FolderPreview::default() };
+        assert!(folder.absorb(entries(0..10, true), SortOrder::default()));
+        assert!(folder.absorb(entries(10..FOLDER_PREVIEW_LIMIT, false), SortOrder::default()));
+        assert_eq!(folder.entries.len(), FOLDER_PREVIEW_LIMIT);
+        assert_eq!(folder.summary(), "Folder · 10 folders · 990 files · Loading…");
+
+        assert!(!folder.absorb(
+            entries(FOLDER_PREVIEW_LIMIT..FOLDER_PREVIEW_LIMIT + 1, false),
+            SortOrder::default()
+        ));
+        assert_eq!(folder.entries.len(), FOLDER_PREVIEW_LIMIT);
+        assert!(!folder.loading, "a stopped stream is not still loading");
+        assert_eq!(folder.summary(), format!("Folder · {FOLDER_PREVIEW_LIMIT_LABEL}"));
+    }
+
+    #[test]
+    fn a_finished_folder_preview_counts_once_per_batch() {
+        let mut folder = FolderPreview::default();
+        folder.absorb(entries(0..3, true), SortOrder::default());
+        folder.absorb(entries(3..8, false), SortOrder::default());
+        assert_eq!(folder.summary(), "Folder · 3 folders · 5 files");
+    }
+
+    /// Forgetting a thumbnail — because the file changed, or because the
+    /// path map is full — also queues its decoded pixels for release from the
+    /// browser's image cache, and reopens the scheduling window.
+    #[test]
+    fn forgotten_thumbnails_queue_their_cached_pixels_for_release() {
+        let mut preview = PreviewState::new(px(12.0));
+        preview.thumbnail_window =
+            Some(ThumbnailWindow { visible: 0..4, nearby: 0..8, revision: 1 });
+        let changed = PathBuf::from("/photos/changed.jpg");
+        preview.remember_thumbnail(changed.clone(), ThumbnailState::Ready("/cache/a.png".into()));
+        preview.remember_thumbnail("/photos/broken.jpg".into(), ThumbnailState::Failed);
+
+        preview.invalidate_thumbnails(std::slice::from_ref(&changed));
+        assert_eq!(preview.stale_browser_images, vec![PathBuf::from("/cache/a.png")]);
+        assert!(preview.thumbnail_window.is_none());
+        assert!(!preview.thumbnails.contains_key(&changed));
+
+        preview.stale_browser_images.clear();
+        for index in 0..=MAX_MEMORY_THUMBNAILS {
+            preview.remember_thumbnail(
+                PathBuf::from(format!("/photos/{index}.jpg")),
+                ThumbnailState::Ready(PathBuf::from(format!("/cache/{index}.png"))),
+            );
+        }
+        // `broken.jpg` was the oldest and holds no pixels; `0.jpg` is next.
+        assert_eq!(preview.thumbnails.len(), MAX_MEMORY_THUMBNAILS);
+        assert_eq!(preview.stale_browser_images, vec![PathBuf::from("/cache/0.png")]);
+    }
+
+    /// A new listing cancels the decodes of the old one, so an ffmpeg child
+    /// started for a folder the user has left stops instead of running out
+    /// its timeout.
+    #[test]
+    fn resetting_thumbnails_cancels_the_decodes_in_flight() {
+        let mut preview = PreviewState::new(px(12.0));
+        let old = preview.thumbnail_cancel.clone();
+        preview.reset_thumbnails();
+        assert!(old.load(Ordering::Acquire));
+        assert!(!preview.thumbnail_cancel.load(Ordering::Acquire));
+        assert!(preview.thumbnail_window.is_none());
+    }
+
+    /// Superseding a preview queues what it drew for release: rendered PDF
+    /// pages from the pane's cache, and decoded images from the atlas.
+    #[test]
+    fn superseding_a_preview_retires_its_images() {
+        let mut preview = PreviewState::new(px(12.0));
+        preview.pdf_pages.insert(1, PdfPageState::Ready("/cache/pdf/p1.jpg".into()));
+        preview.pdf_pages.insert(2, PdfPageState::Failed("no".into()));
+        preview.begin(PreviewContent::Empty);
+        assert_eq!(preview.stale_pane_images, vec![PathBuf::from("/cache/pdf/p1.jpg")]);
+        assert!(preview.pdf_pages.is_empty());
+
+        let image =
+            Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
+        preview.begin(PreviewContent::Ready(Preview::Image {
+            image: image.clone(),
+            mime: "image/png".into(),
+        }));
+        assert!(preview.retired_images.is_empty(), "the image being shown is not retired");
+        preview.clear();
+        assert_eq!(preview.retired_images.len(), 1);
+        assert!(Arc::ptr_eq(&preview.retired_images[0], &image));
     }
 }
