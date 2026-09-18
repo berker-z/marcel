@@ -14,7 +14,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read},
-    os::unix::{fs::PermissionsExt as _, process::CommandExt as _},
+    os::unix::fs::PermissionsExt as _,
     path::{Component, Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
@@ -122,21 +122,12 @@ impl SevenZipBackend {
         Self { program }
     }
 
-    /// The backend process before its arguments: nothing on stdin, both
-    /// outputs captured, its own process group so cancellation can kill
-    /// whatever it spawned.
-    ///
-    /// The installed wrapper sets `LD_LIBRARY_PATH` to Marcel's private
-    /// runtime, and `src/desktop/open.rs` explains why that must not leak to
-    /// a child that was linked against a different glibc. This 7-Zip is one.
+    /// The backend process before its arguments: both outputs captured, and
+    /// the shared builder's hygiene (no stdin, no leaked `LD_LIBRARY_PATH`,
+    /// its own process group so cancellation can kill whatever it spawned).
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.program);
-        command
-            .env_remove("LD_LIBRARY_PATH")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+        let mut command = crate::preview::tool::command(&self.program);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         command
     }
 

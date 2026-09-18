@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         Arc,
@@ -29,7 +29,8 @@ use crate::{
         DirectoryUpdate, FileEntry, SortOrder, format_size, merge_sorted_entries, stream_directory,
     },
     preview::{
-        Preview, PreviewState as PreviewContent, load_preview, pdf::render_pdf_page, thumbnails,
+        Preview, PreviewState as PreviewContent, audio, load_preview, pdf::render_pdf_page,
+        thumbnails,
     },
 };
 
@@ -258,6 +259,8 @@ pub struct PreviewState {
     pdf_pages: HashMap<usize, PdfPageState>,
     /// Repaints while audio plays; see `media_pane`.
     pub(super) audio_repaints: Option<Task<()>>,
+    /// The second stage of an audio preview, measuring its waveform.
+    waveform_task: Option<Task<()>>,
     pub(super) scrub_bounds: super::media_pane::ScrubBounds,
     pdf_queue: WorkQueue<usize>,
     pdf_scroll: UniformListScrollHandle,
@@ -293,6 +296,7 @@ impl PreviewState {
             folder_scroll: UniformListScrollHandle::new(),
             pdf_pages: HashMap::new(),
             audio_repaints: None,
+            waveform_task: None,
             scrub_bounds: Rc::new(Cell::new(None)),
             pdf_queue: WorkQueue::new(PDF_PAGE_WORKERS),
             pdf_scroll: UniformListScrollHandle::new(),
@@ -405,6 +409,7 @@ impl PreviewState {
             PdfPageState::Failed(_) => None,
         }));
         self.audio_repaints.take();
+        self.waveform_task.take();
         self.scrub_bounds.set(None);
         self.pdf_scroll = UniformListScrollHandle::new();
         self.wrap_task.take();
@@ -471,6 +476,7 @@ impl Marcel {
                     Err(error) => PreviewContent::Error(error.to_string()),
                 };
                 this.start_preview_wrap(cx);
+                this.start_waveform_measure(cx);
                 cx.notify();
             });
         }));
@@ -711,6 +717,32 @@ impl Marcel {
     }
 
     // Text wrapping.
+
+    /// The second stage of an audio preview: measure the waveform off the
+    /// foreground and patch it into the preview, if that preview is still the
+    /// one on show. Started only on the Ready transition, never from render:
+    /// a file over the decode limit, or one that cannot be read, legitimately
+    /// keeps the placeholder bars, and `wants_waveform` would say yes forever.
+    fn start_waveform_measure(&mut self, cx: &mut Context<Self>) {
+        let PreviewContent::Ready(preview) = &self.preview.state else { return };
+        let Some(path) = preview.wants_waveform().map(Path::to_path_buf) else { return };
+        let Some(cancelled) = self.preview.cancel.clone() else { return };
+        let ticket = self.preview.ticket;
+        let measure = unblock(cx, move || audio::waveform(&path, &cancelled));
+        self.preview.waveform_task = Some(cx.spawn(async move |this, cx| {
+            let peaks = measure.await;
+            let _ = this.update(cx, |this, cx| {
+                if ticket != this.preview.ticket || peaks.is_empty() {
+                    return;
+                }
+                if let PreviewContent::Ready(preview) = &mut this.preview.state
+                    && preview.set_waveform(peaks)
+                {
+                    cx.notify();
+                }
+            });
+        }));
+    }
 
     pub(super) fn start_preview_wrap(&mut self, cx: &mut Context<Self>) {
         let PreviewContent::Ready(Preview::Text { lines, render_rich: false, .. }) =

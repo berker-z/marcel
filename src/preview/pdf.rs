@@ -70,7 +70,7 @@ pub fn render_pdf_page(
     let stderr = tempfile::tempfile()?;
     let stderr_writer = stderr.try_clone()?;
 
-    let mut command = Command::new("pdftoppm");
+    let mut command = tool::command("pdftoppm");
     command
         .arg("-f")
         .arg(page.to_string())
@@ -132,7 +132,7 @@ fn run_pdfinfo(
     let stdout_writer = stdout.try_clone()?;
     let stderr_writer = stderr.try_clone()?;
 
-    let mut command = Command::new("pdfinfo");
+    let mut command = tool::command("pdfinfo");
     command
         .arg("--")
         .arg(source)

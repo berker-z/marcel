@@ -167,7 +167,7 @@ pub fn load_preview(
 /// and player are ready at once and `audio::waveform` can run as a second
 /// job that fills the scrubber through [`Preview::set_waveform`]. Until the
 /// window starts that job, the one pass keeps the scrubber drawn.
-const WAVEFORM_IN_FIRST_PASS: bool = true;
+const WAVEFORM_IN_FIRST_PASS: bool = false;
 
 /// The tags and cover, and a player that stays idle until asked; the
 /// waveform too while `WAVEFORM_IN_FIRST_PASS` holds. A file symphonia
