@@ -23,7 +23,16 @@ const WATCH_COALESCE_IDLE: Duration = Duration::from_millis(250);
 const WATCH_COALESCE_MAX: Duration = Duration::from_secs(1);
 const WATCH_CANCEL_POLL: Duration = Duration::from_millis(100);
 const POLL_FALLBACK_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_PATHS_PER_BATCH: usize = 4096;
+/// How many changed paths one batch will re-validate before giving up and
+/// asking for a rescan instead.
+///
+/// Re-validating a path is one `stat`; a rescan is a `stat` of every entry in
+/// the folder plus a fresh stream through the foreground. So the cap has to
+/// sit above the size of any folder Marcel means to be comfortable in, or a
+/// burst of changes in a large folder (a build finishing, an extraction) would
+/// take the more expensive route, and a folder that kept changing would take it
+/// again and again. It matches the raw-event cap, which bounds it anyway.
+const MAX_PATHS_PER_BATCH: usize = 65_536;
 /// How many raw notify events one coalescing window will hold.
 ///
 /// The raw channel is unbounded, and draining it into a `Vec` for up to a
@@ -225,6 +234,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(paths, vec![child]);
+    }
+
+    /// A burst the size of a large folder is re-validated path by path rather
+    /// than answered with a rescan, which is what made a churning folder
+    /// reload in a loop.
+    #[test]
+    fn a_large_burst_is_revalidated_rather_than_rescanned() {
+        let directory = PathBuf::from("/folder");
+        let events = (0..50_000)
+            .map(|index| {
+                Ok(Event::new(EventKind::Create(CreateKind::File))
+                    .add_path(directory.join(format!("item-{index}"))))
+            })
+            .collect();
+
+        let paths = collect_changed_paths(&directory, events).expect("under the cap");
+
+        assert_eq!(paths.len(), 50_000);
     }
 
     #[test]

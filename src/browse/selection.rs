@@ -141,7 +141,14 @@ impl SelectionModel {
         self.collapse_if_single();
     }
 
-    pub fn retain(&mut self, ordered: &[PathBuf], mut predicate: impl FnMut(&Path) -> bool) {
+    /// Keep only what `predicate` admits. `ordered` is consulted only when the
+    /// primary went, to promote the first survivor; it is borrowed rather than
+    /// owned so a caller reconciling a large listing need not copy it.
+    pub fn retain<'a>(
+        &mut self,
+        ordered: impl IntoIterator<Item = &'a Path>,
+        mut predicate: impl FnMut(&Path) -> bool,
+    ) {
         self.touch();
         self.selected.retain(|path| predicate(path));
         if self.primary.as_ref().is_some_and(|path| !predicate(path)) {
@@ -150,7 +157,7 @@ impl SelectionModel {
         if self.anchor.as_ref().is_some_and(|path| !predicate(path)) {
             self.anchor = None;
         }
-        self.ensure_primary(ordered);
+        self.promote_first_selected(ordered);
     }
 
     pub fn add_all(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
@@ -165,8 +172,15 @@ impl SelectionModel {
 
     pub fn ensure_primary(&mut self, ordered: &[PathBuf]) {
         self.touch();
+        self.promote_first_selected(ordered.iter().map(PathBuf::as_path));
+    }
+
+    fn promote_first_selected<'a>(&mut self, ordered: impl IntoIterator<Item = &'a Path>) {
         if self.primary.is_none() && !self.selected.is_empty() {
-            self.primary = ordered.iter().find(|path| self.selected.contains(*path)).cloned();
+            self.primary = ordered
+                .into_iter()
+                .find(|path| self.selected.contains(*path))
+                .map(Path::to_path_buf);
             self.anchor = self.primary.clone();
         }
     }
@@ -289,7 +303,7 @@ mod tests {
         selection.toggle(path("visible"), &[path("hidden"), path("visible")]);
         selection.make_primary(Path::new("hidden"));
 
-        selection.retain(&[path("visible")], |candidate| candidate == Path::new("visible"));
+        selection.retain([Path::new("visible")], |candidate| candidate == Path::new("visible"));
 
         assert_eq!(selection.selected(), &HashSet::from([path("visible")]));
         assert_eq!(selection.primary(), Some(&path("visible")));
@@ -319,7 +333,7 @@ mod tests {
         assert_advanced(&selection, "make_primary");
         selection.add_all([path("a")]);
         assert_advanced(&selection, "add_all");
-        selection.retain(&ordered, |_| true);
+        selection.retain(ordered.iter().map(PathBuf::as_path), |_| true);
         assert_advanced(&selection, "retain");
         selection.ensure_primary(&ordered);
         assert_advanced(&selection, "ensure_primary");

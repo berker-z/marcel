@@ -1,39 +1,65 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
+/// Where icons come from, found once per process.
+///
+/// Reading the GTK settings file and probing for the bundled set cost a few
+/// syscalls, and every directory stream, watcher, and revalidation paid them
+/// again. None of it changes while Marcel runs.
 #[derive(Debug)]
-pub struct IconProvider {
+struct IconSources {
     explicit_theme: Option<String>,
     ambient_theme: String,
     bundled_dir: Option<PathBuf>,
-    cache: HashMap<Vec<String>, Option<PathBuf>>,
+}
+
+impl IconSources {
+    fn get() -> &'static Self {
+        static SOURCES: OnceLock<IconSources> = OnceLock::new();
+        SOURCES.get_or_init(|| Self {
+            explicit_theme: explicit_theme(),
+            ambient_theme: discover_ambient_theme(),
+            bundled_dir: discover_bundled_icon_dir(),
+        })
+    }
+}
+
+/// What an icon is looked up for. Everything a lookup needs is derived from
+/// this, so it is also the cache key, and building one allocates nothing:
+/// the MIME type is a `&'static str` out of `mime_guess`'s table.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum IconKey {
+    Folder,
+    /// A file whose name suggests no type.
+    UnknownFile,
+    File(&'static str),
+    Place(&'static [&'static str]),
+}
+
+#[derive(Debug)]
+pub struct IconProvider {
+    sources: &'static IconSources,
+    cache: HashMap<IconKey, Option<PathBuf>>,
 }
 
 impl IconProvider {
     pub fn discover() -> Self {
-        Self {
-            explicit_theme: explicit_theme(),
-            ambient_theme: discover_ambient_theme(),
-            bundled_dir: discover_bundled_icon_dir(),
-            cache: HashMap::new(),
-        }
+        Self { sources: IconSources::get(), cache: HashMap::new() }
     }
 
     pub fn icon_for(&mut self, path: &Path, directory: bool) -> Option<PathBuf> {
-        let candidates = icon_candidates(path, directory);
-        self.lookup(&candidates)
+        self.lookup(file_icon_key(path, directory))
     }
 
     pub fn icon_for_place(&mut self, label: &str) -> Option<PathBuf> {
-        let candidates =
-            place_icon_candidates(label).iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
-        self.lookup(&candidates)
+        self.lookup(IconKey::Place(place_icon_candidates(label)))
     }
 
-    fn lookup(&mut self, candidates: &[String]) -> Option<PathBuf> {
-        if let Some(cached) = self.cache.get(candidates) {
+    fn lookup(&mut self, key: IconKey) -> Option<PathBuf> {
+        if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
         }
 
@@ -42,16 +68,18 @@ impl IconProvider {
             Bundled(&'a Path),
         }
 
+        let sources = self.sources;
         let mut layers = Vec::new();
-        if let Some(theme) = self.explicit_theme.as_deref() {
+        if let Some(theme) = sources.explicit_theme.as_deref() {
             layers.push(Layer::Theme(theme));
         }
-        if let Some(directory) = self.bundled_dir.as_deref() {
+        if let Some(directory) = sources.bundled_dir.as_deref() {
             layers.push(Layer::Bundled(directory));
         }
-        layers.push(Layer::Theme(&self.ambient_theme));
+        layers.push(Layer::Theme(&sources.ambient_theme));
 
-        let icon = resolve_layered(candidates, layers.len(), |layer, name| match layers[layer] {
+        let candidates = icon_candidates(key);
+        let icon = resolve_layered(&candidates, layers.len(), |layer, name| match layers[layer] {
             Layer::Theme(theme) => {
                 freedesktop_icons::lookup(name).with_theme(theme).with_size(32).with_cache().find()
             }
@@ -61,7 +89,7 @@ impl IconProvider {
             }
         });
 
-        self.cache.insert(candidates.to_vec(), icon.clone());
+        self.cache.insert(key, icon.clone());
         icon
     }
 }
@@ -110,15 +138,29 @@ fn place_icon_candidates(label: &str) -> &'static [&'static str] {
     }
 }
 
-fn icon_candidates(path: &Path, directory: bool) -> Vec<String> {
+fn file_icon_key(path: &Path, directory: bool) -> IconKey {
     if directory {
-        return vec!["folder".to_string()];
+        return IconKey::Folder;
     }
+    // `first_raw` hands back the table's own string and parses nothing; the
+    // table has no parameters, but the essence is taken defensively anyway.
+    match mime_guess::from_path(path).first_raw() {
+        Some(mime) => IconKey::File(mime.split(';').next().unwrap_or(mime).trim()),
+        None => IconKey::UnknownFile,
+    }
+}
 
-    let Some(mime) = mime_guess::from_path(path).first() else {
-        return vec!["application-x-generic".to_string(), "unknown".to_string()];
+/// The icon names to try for `key`, most specific first. Built only on a
+/// cache miss, so it may allocate.
+fn icon_candidates(key: IconKey) -> Vec<String> {
+    let essence = match key {
+        IconKey::Folder => return vec!["folder".to_string()],
+        IconKey::UnknownFile => {
+            return vec!["application-x-generic".to_string(), "unknown".to_string()];
+        }
+        IconKey::Place(names) => return names.iter().map(|name| (*name).to_string()).collect(),
+        IconKey::File(essence) => essence,
     };
-    let essence = mime.essence_str();
     let mut candidates = vec![essence.replace('/', "-")];
     let generic = match essence {
         "application/pdf" => "application-pdf",
@@ -177,27 +219,56 @@ fn read_gtk_icon_theme() -> Option<String> {
 mod tests {
     use super::*;
 
+    fn candidates_for(path: &str, directory: bool) -> Vec<String> {
+        icon_candidates(file_icon_key(Path::new(path), directory))
+    }
+
     #[test]
     fn directories_use_the_standard_folder_icon() {
-        assert_eq!(icon_candidates(Path::new("/tmp/photos"), true), ["folder"]);
+        assert_eq!(file_icon_key(Path::new("/tmp/photos"), true), IconKey::Folder);
+        assert_eq!(candidates_for("/tmp/photos", true), ["folder"]);
     }
 
     #[test]
     fn mime_candidates_fall_back_from_specific_to_generic() {
         assert_eq!(
-            icon_candidates(Path::new("notes.md"), false),
+            candidates_for("notes.md", false),
             ["text-markdown", "text-x-generic", "unknown"]
         );
+        assert_eq!(candidates_for("photo.png", false), ["image-png", "image-x-generic", "unknown"]);
         assert_eq!(
-            icon_candidates(Path::new("photo.png"), false),
-            ["image-png", "image-x-generic", "unknown"]
+            candidates_for("Makefile.nothing-known", false),
+            ["application-x-generic", "unknown"]
         );
     }
 
     #[test]
     fn archives_receive_package_fallbacks() {
-        let candidates = icon_candidates(Path::new("source.tar.gz"), false);
-        assert_eq!(candidates[1], "package-x-generic");
+        assert_eq!(candidates_for("source.tar.gz", false)[1], "package-x-generic");
+    }
+
+    /// Two files of one type share a key, so a 50,000-entry folder of photos
+    /// resolves its icon once and allocates nothing per entry for the rest.
+    #[test]
+    fn files_of_one_type_share_a_cache_key() {
+        assert_eq!(
+            file_icon_key(Path::new("a.png"), false),
+            file_icon_key(Path::new("deep/b.PNG"), false)
+        );
+        assert_ne!(
+            file_icon_key(Path::new("a.png"), false),
+            file_icon_key(Path::new("a.jpg"), false)
+        );
+        assert_eq!(file_icon_key(Path::new("README"), false), IconKey::UnknownFile);
+    }
+
+    /// The theme and bundle discovery is process-wide: two providers see the
+    /// same sources without probing the disk again.
+    #[test]
+    fn providers_share_one_discovery() {
+        let first = IconProvider::discover();
+        let second = IconProvider::discover();
+        assert!(std::ptr::eq(first.sources, second.sources));
     }
 
     #[test]

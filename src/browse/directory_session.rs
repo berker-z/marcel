@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::OsStr,
@@ -7,12 +8,65 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
-
-use gpui::Task;
 
 use crate::browse::entries::{FileEntry, SortKey, SortOrder, merge_sorted_entries, sort_entries};
 use crate::browse::selection::SelectionModel;
+
+/// Background work that stops when dropped.
+///
+/// The session ties its load and its watcher to its own lifetime without
+/// knowing what runs them. `app` hands in its executor's task handles; this
+/// module never names the UI toolkit, as the module doc promises.
+pub type WorkHandle = Box<dyn Any>;
+
+/// The least time between two rescans of one folder.
+///
+/// A rescan restreams the whole folder, and a folder that churns faster than
+/// it streams (a build tree, a log spray) asked for another before the first
+/// had finished, so the window reloaded in a loop. Waiting this long between
+/// them bounds the load to well under one a second, which is as fast as a
+/// listing needs to catch up with a folder nobody can read that quickly.
+pub const RESCAN_BACKOFF: Duration = Duration::from_millis(1500);
+
+/// Why a load starts, which decides what happens to the listing shown now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadKind {
+    /// A different folder: nothing on screen belongs to it, so the listing,
+    /// the selection, and the filter all go at once.
+    Navigate,
+    /// The same folder again. What is shown stays, selection included, until
+    /// the new listing has fully arrived and replaces it in one step. A
+    /// refresh that blanked the window and dropped the selection punished
+    /// the user for a change they did not make.
+    Refresh,
+}
+
+/// What a rescan request should do right now.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RescanDecision {
+    /// Start the reload immediately.
+    Now,
+    /// Wait this long, then start it, unless a newer load supersedes it.
+    After(Duration),
+    /// One is already waiting; this request adds nothing.
+    AlreadyScheduled,
+}
+
+/// How the listing on screen relates to the last rescan of it.
+struct RescanBackoff {
+    directory: PathBuf,
+    started: Instant,
+}
+
+/// The finished load's effect on what the window shows.
+pub struct LoadFinished {
+    pub reconcile: ReconcileSelection,
+    /// Entries a refresh found changed or gone, so cached renderings of them
+    /// (thumbnails) are stale. Empty for a fresh load, which had none.
+    pub changed: Vec<PathBuf>,
+}
 
 /// Lazily rebuilt path lookup over `entries`.
 ///
@@ -40,9 +94,16 @@ pub struct DirectorySession {
     pub(crate) error: Option<String>,
     pub(crate) warning: Option<String>,
     pub(crate) generation: u64,
-    pub(crate) load_task: Option<Task<()>>,
-    pub(crate) watch_task: Option<Task<()>>,
-    watch_cancel: Option<Arc<AtomicBool>>,
+    load_task: Option<WorkHandle>,
+    watch_task: Option<WorkHandle>,
+    /// Flipped when the load in flight is superseded, so the walker and the
+    /// watcher stop stat-ing a folder nobody is looking at any more.
+    cancel: Arc<AtomicBool>,
+    /// A refresh's listing as it streams in. It replaces `entries` in one
+    /// step at `finish_load`; until then the old listing stays on screen.
+    staged: Option<Vec<FileEntry>>,
+    last_rescan: Option<RescanBackoff>,
+    rescan_scheduled: bool,
     pub(crate) pending_reveal: Vec<PathBuf>,
     /// A revealed path whose scroll position is not final yet, because it was
     /// revealed out of a batch while the enumeration was still streaming.
@@ -90,7 +151,10 @@ impl DirectorySession {
             generation: 0,
             load_task: None,
             watch_task: None,
-            watch_cancel: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            staged: None,
+            last_rescan: None,
+            rescan_scheduled: false,
             pending_reveal: Vec::new(),
             reveal_scroll_target: None,
             pending_refresh: HashSet::new(),
@@ -214,26 +278,33 @@ impl DirectorySession {
         ApplyDirectoryEvents::Applied(reconcile)
     }
 
-    pub fn begin_load(&mut self, clear_filter: bool) -> (u64, PathBuf) {
-        let generation = self.begin_virtual_load(clear_filter);
+    pub fn begin_load(&mut self, kind: LoadKind) -> (u64, PathBuf) {
+        let generation = self.begin_virtual_load(kind);
         (generation, self.current_dir.clone())
     }
 
-    pub fn begin_virtual_load(&mut self, clear_filter: bool) -> u64 {
-        self.stop_watcher();
+    pub fn begin_virtual_load(&mut self, kind: LoadKind) -> u64 {
+        self.cancel_background_work();
         self.generation = self.generation.wrapping_add(1);
-        self.load_task.take();
         self.pending_refresh.clear();
         self.pending_rescan = false;
+        // A rescan waiting on the backoff belongs to the load this replaces;
+        // when its timer fires it will find the generation moved on.
+        self.rescan_scheduled = false;
         // A target from the load being replaced describes rows that no longer
         // exist. `navigate_to_revealing` sets the new one after this runs.
         self.reveal_scroll_target = None;
-        self.entries.clear();
-        self.mark_entries_changed();
-        self.visible_entries.clear();
-        self.projection_revision = self.projection_revision.wrapping_add(1);
-        if clear_filter {
-            self.filter_query.clear();
+        match kind {
+            LoadKind::Navigate => {
+                self.staged = None;
+                self.entries.clear();
+                self.mark_entries_changed();
+                self.visible_entries.clear();
+                self.projection_revision = self.projection_revision.wrapping_add(1);
+                self.filter_query.clear();
+                self.selection.clear();
+            }
+            LoadKind::Refresh => self.staged = Some(Vec::new()),
         }
         self.error = None;
         self.warning = None;
@@ -241,25 +312,75 @@ impl DirectorySession {
         self.generation
     }
 
-    pub fn set_watcher(&mut self, cancel: Arc<AtomicBool>, task: Task<()>) {
-        self.stop_watcher();
-        self.watch_cancel = Some(cancel);
+    /// Stop whatever the previous load left running and arm a fresh flag for
+    /// the next one. Dropping the handles ends the foreground pumps; the flag
+    /// is for the blocking walker and watcher, which a drop cannot reach.
+    fn cancel_background_work(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.load_task.take();
+        self.watch_task.take();
+    }
+
+    /// The flag the current load's background work should stop on.
+    pub fn cancellation(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
+    pub fn set_load_task(&mut self, task: WorkHandle) {
+        self.load_task = Some(task);
+    }
+
+    pub fn set_watcher(&mut self, task: WorkHandle) {
         self.watch_task = Some(task);
     }
 
-    fn stop_watcher(&mut self) {
-        if let Some(cancel) = self.watch_cancel.take() {
-            cancel.store(true, Ordering::Release);
+    /// Decide whether a rescan of the folder shown may start now.
+    ///
+    /// The first request for a folder starts at once; a second within
+    /// `RESCAN_BACKOFF` of it waits out the remainder, and requests that
+    /// arrive while one is waiting are absorbed by it.
+    pub fn schedule_rescan(&mut self, now: Instant) -> RescanDecision {
+        if self.rescan_scheduled {
+            return RescanDecision::AlreadyScheduled;
         }
-        self.watch_task.take();
+        let since_last = self
+            .last_rescan
+            .as_ref()
+            .filter(|last| last.directory == self.current_dir)
+            .map(|last| now.saturating_duration_since(last.started));
+        if let Some(since_last) = since_last
+            && since_last < RESCAN_BACKOFF
+        {
+            self.rescan_scheduled = true;
+            return RescanDecision::After(RESCAN_BACKOFF - since_last);
+        }
+        self.note_rescan(now);
+        RescanDecision::Now
+    }
+
+    /// A rescan the backoff held back is starting now.
+    pub fn begin_scheduled_rescan(&mut self, now: Instant) {
+        self.rescan_scheduled = false;
+        self.note_rescan(now);
+    }
+
+    fn note_rescan(&mut self, now: Instant) {
+        self.last_rescan =
+            Some(RescanBackoff { directory: self.current_dir.clone(), started: now });
     }
 
     /// Fold a streamed batch into the listing.
     ///
     /// The stream sorted the batch in the order it was started with; if the
     /// order changed meanwhile the batch is re-sorted here, which costs
-    /// nothing when it was right already.
+    /// nothing when it was right already. A refresh only collects: its
+    /// listing goes on screen whole, at `finish_load`.
     pub fn merge_batch(&mut self, mut batch: Vec<FileEntry>) -> ReconcileSelection {
+        if let Some(staged) = self.staged.as_mut() {
+            staged.append(&mut batch);
+            return ReconcileSelection::Unchanged;
+        }
         sort_entries(&mut batch, self.sort);
         self.entries = merge_sorted_entries(std::mem::take(&mut self.entries), batch, self.sort);
         self.mark_entries_changed();
@@ -267,14 +388,58 @@ impl DirectorySession {
         self.reconcile_selection()
     }
 
-    pub fn finish_load(&mut self) {
+    /// The stream is complete. A refresh swaps its collected listing in here,
+    /// and reports which entries it found different from the ones shown.
+    pub fn finish_load(&mut self) -> LoadFinished {
         self.loading = false;
-        self.pending_reveal.clear();
+        let Some(mut staged) = self.staged.take() else {
+            return LoadFinished { reconcile: ReconcileSelection::Unchanged, changed: Vec::new() };
+        };
+        sort_entries(&mut staged, self.sort);
+        let changed = {
+            let fresh =
+                staged.iter().map(|entry| (entry.path.as_path(), entry)).collect::<HashMap<_, _>>();
+            let mut changed = self
+                .entries
+                .iter()
+                .filter(|old| fresh.get(old.path.as_path()) != Some(old))
+                .map(|old| old.path.clone())
+                .collect::<Vec<_>>();
+            let shown =
+                self.entries.iter().map(|entry| entry.path.as_path()).collect::<HashSet<_>>();
+            changed.extend(
+                staged
+                    .iter()
+                    .filter(|new| !shown.contains(new.path.as_path()))
+                    .map(|new| new.path.clone()),
+            );
+            changed
+        };
+        self.entries = staged;
+        self.mark_entries_changed();
+        self.rebuild_visible_entries();
+        LoadFinished { reconcile: self.reconcile_selection(), changed }
     }
 
-    pub fn fail_load(&mut self, error: String) {
+    /// A load ended without a listing. A refresh drops the one it was keeping
+    /// on screen: the error is what the window has to show now, and a listing
+    /// the folder no longer backs would only mislead.
+    pub fn fail_load(&mut self, error: String) -> ReconcileSelection {
         self.loading = false;
         self.error = Some(error);
+        if self.staged.take().is_none() {
+            return ReconcileSelection::Unchanged;
+        }
+        self.entries.clear();
+        self.mark_entries_changed();
+        self.rebuild_visible_entries();
+        self.reconcile_selection()
+    }
+
+    /// Forget reveals the finished load could not satisfy, so a file that
+    /// appears later under one of those names is not selected out of the blue.
+    pub fn clear_pending_reveal(&mut self) {
+        self.pending_reveal.clear();
     }
 
     pub fn set_filter_query(&mut self, query: String) -> Option<ReconcileSelection> {
@@ -407,15 +572,24 @@ impl DirectorySession {
     }
 
     pub fn reconcile_selection(&mut self) -> ReconcileSelection {
+        // With nothing selected there is nothing to drop or promote, and no
+        // filter that would pick a first match. This is every batch of a
+        // load the user has not clicked into yet, so it must not pay for a
+        // set over the whole listing. (A pending reveal is not the
+        // selection's business: `take_pending_visible_entries` selects it.)
+        if self.selection.selected().is_empty() && self.filter_query.is_empty() {
+            return ReconcileSelection::ClearPreview;
+        }
         let previous_primary = self.selection.primary().cloned();
-        let visible = self
-            .visible_entries
-            .iter()
-            .filter_map(|index| self.entries.get(*index))
-            .map(|entry| entry.path.as_path())
-            .collect::<HashSet<_>>();
-        let ordered = self.visible_paths();
-        self.selection.retain(&ordered, |path| visible.contains(path));
+        let Self { entries, visible_entries, selection, .. } = self;
+        let visible_paths = || {
+            visible_entries
+                .iter()
+                .filter_map(|index| entries.get(*index))
+                .map(|entry| entry.path.as_path())
+        };
+        let visible = visible_paths().collect::<HashSet<_>>();
+        selection.retain(visible_paths(), |path| visible.contains(path));
         if let Some(primary) = self.selection.primary().cloned() {
             // `retain` silently promotes a surviving selected item to primary
             // when the old primary left the visible set. The preview must
@@ -450,6 +624,14 @@ impl DirectorySession {
             self.selection.clear();
             ReconcileSelection::ClearPreview
         }
+    }
+}
+
+impl Drop for DirectorySession {
+    /// A closed window's walker would otherwise stat on until its next batch
+    /// failed to send.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
     }
 }
 
@@ -680,7 +862,7 @@ mod tests {
     fn a_new_load_or_reveal_drops_a_stale_scroll_target() {
         let mut session = DirectorySession::new(PathBuf::from("/folder"));
         session.defer_reveal_scroll(path("target.txt"));
-        session.begin_load(true);
+        session.begin_load(LoadKind::Navigate);
         assert_eq!(session.take_reveal_scroll_target(), None);
 
         session.defer_reveal_scroll(path("old.txt"));
@@ -782,7 +964,7 @@ mod tests {
         session.apply_events(vec![DirectoryEvent::Added(file("b.txt"))]);
         assert!(session.entry(&path("b.txt")).is_some());
 
-        session.begin_virtual_load(true);
+        session.begin_virtual_load(LoadKind::Navigate);
         assert!(session.entry(&path("b.txt")).is_none());
     }
 
@@ -852,7 +1034,7 @@ mod tests {
 
         session.defer_refresh([path("stale.txt")]);
         session.defer_rescan();
-        session.begin_virtual_load(true);
+        session.begin_virtual_load(LoadKind::Navigate);
         assert!(!session.take_pending_rescan());
         assert!(session.take_pending_refresh().is_empty());
     }
@@ -865,6 +1047,151 @@ mod tests {
         session.set_filter_query("bet".to_string());
 
         assert_ne!(session.projection_revision(), before);
+    }
+
+    /// The walker only notices a dropped receiver at its next batch, so a
+    /// superseded load must be told to stop through the flag it was given.
+    #[test]
+    fn superseding_a_load_cancels_its_background_work() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        session.begin_load(LoadKind::Navigate);
+        let first = session.cancellation();
+        assert!(!first.load(Ordering::Acquire));
+
+        session.begin_load(LoadKind::Navigate);
+        let second = session.cancellation();
+        assert!(first.load(Ordering::Acquire), "the superseded load must stop");
+        assert!(!second.load(Ordering::Acquire), "the new load must not");
+
+        drop(session);
+        assert!(second.load(Ordering::Acquire), "a closed window stops its walker");
+    }
+
+    /// Nothing selected and no filter means every batch of a fresh load can
+    /// skip the reconcile entirely; the selection revision proves it did.
+    #[test]
+    fn reconcile_is_skipped_while_nothing_is_selected() {
+        let mut plain = DirectorySession::new(PathBuf::from("/folder"));
+        let before = plain.selection.revision();
+        plain.merge_batch(vec![file("a.txt"), file("b.txt")]);
+        assert_eq!(plain.selection.revision(), before, "no selection to touch");
+
+        plain.selection.select_only(path("a.txt"));
+        let before = plain.selection.revision();
+        plain.merge_batch(vec![file("c.txt")]);
+        assert_ne!(plain.selection.revision(), before, "a selection is reconciled");
+        assert!(plain.selection.is_selected(Path::new("/folder/a.txt")));
+
+        // A filter picks a first match even from nothing, so it cannot skip.
+        let mut filtered = session(vec![file("alpha.txt")]);
+        filtered.filter_query = "alp".to_string();
+        assert!(previews(&filtered.merge_batch(vec![file("beta.txt")]), "alpha.txt"));
+    }
+
+    /// A refresh keeps what is on screen — entries and selection — until the
+    /// new listing is complete, then swaps it in and drops only what is gone.
+    #[test]
+    fn a_refresh_keeps_the_listing_and_selection_until_the_stream_finishes() {
+        let mut session = session(vec![file("kept.txt"), file("gone.txt"), file("same.txt")]);
+        session.selection.add_all([path("kept.txt"), path("gone.txt")]);
+        session.selection.make_primary(Path::new("/folder/gone.txt"));
+
+        session.begin_load(LoadKind::Refresh);
+        assert!(session.loading);
+        assert_eq!(visible_names(&session), ["gone.txt", "kept.txt", "same.txt"]);
+        assert_eq!(session.selection.selected().len(), 2);
+
+        assert!(matches!(
+            session.merge_batch(vec![entry("kept.txt", false, Some(7)), file("same.txt")]),
+            ReconcileSelection::Unchanged
+        ));
+        assert!(matches!(
+            session.merge_batch(vec![file("new.txt")]),
+            ReconcileSelection::Unchanged
+        ));
+        assert_eq!(visible_names(&session), ["gone.txt", "kept.txt", "same.txt"], "not yet");
+
+        let finished = session.finish_load();
+        assert!(!session.loading);
+        assert_eq!(visible_names(&session), ["kept.txt", "new.txt", "same.txt"]);
+        assert!(previews(&finished.reconcile, "kept.txt"), "the survivor is promoted");
+        assert_eq!(session.selection.selected().len(), 1);
+        let mut changed = finished.changed;
+        changed.sort();
+        assert_eq!(changed, [path("gone.txt"), path("kept.txt"), path("new.txt")]);
+        assert_eq!(session.entry(&path("kept.txt")).unwrap().size, Some(7));
+    }
+
+    /// A refresh that fails has nothing to show but the error, so the listing
+    /// it was keeping goes; a fresh load that fails was empty already.
+    #[test]
+    fn a_failed_refresh_drops_the_stale_listing() {
+        let mut session = session(vec![file("a.txt")]);
+        session.selection.select_only(path("a.txt"));
+        session.begin_load(LoadKind::Refresh);
+
+        let reconcile = session.fail_load("gone".to_string());
+
+        assert!(matches!(reconcile, ReconcileSelection::ClearPreview));
+        assert!(session.entries.is_empty());
+        assert!(session.selection.selected().is_empty());
+        assert_eq!(session.error.as_deref(), Some("gone"));
+    }
+
+    /// A navigation clears everything the old folder owned; a refresh keeps
+    /// the filter, since the user is still looking at the same folder.
+    #[test]
+    fn a_navigation_clears_what_a_refresh_keeps() {
+        let mut session = session(vec![file("a.txt")]);
+        session.filter_query = "a".to_string();
+        session.begin_load(LoadKind::Refresh);
+        assert_eq!(session.filter_query, "a");
+        session.finish_load();
+
+        session.begin_load(LoadKind::Navigate);
+        assert!(session.filter_query.is_empty());
+        assert!(session.entries.is_empty());
+    }
+
+    /// The first rescan of a folder starts at once; another inside the
+    /// backoff waits out the remainder and absorbs any further requests.
+    #[test]
+    fn rescans_of_one_folder_are_spaced_by_the_backoff() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        let start = Instant::now();
+        assert_eq!(session.schedule_rescan(start), RescanDecision::Now);
+
+        let soon = start + Duration::from_millis(500);
+        assert_eq!(
+            session.schedule_rescan(soon),
+            RescanDecision::After(RESCAN_BACKOFF - Duration::from_millis(500))
+        );
+        assert_eq!(session.schedule_rescan(soon), RescanDecision::AlreadyScheduled);
+
+        session.begin_scheduled_rescan(start + RESCAN_BACKOFF);
+        assert_eq!(
+            session.schedule_rescan(start + RESCAN_BACKOFF + Duration::from_millis(1)),
+            RescanDecision::After(RESCAN_BACKOFF - Duration::from_millis(1))
+        );
+
+        // Well past the backoff the next one is immediate again.
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        assert_eq!(session.schedule_rescan(start), RescanDecision::Now);
+        assert_eq!(session.schedule_rescan(start + RESCAN_BACKOFF), RescanDecision::Now);
+    }
+
+    /// The backoff is per folder: leaving and arriving somewhere else starts
+    /// fresh, and a new load forgets a rescan that was waiting.
+    #[test]
+    fn the_rescan_backoff_belongs_to_one_folder() {
+        let mut session = DirectorySession::new(PathBuf::from("/folder"));
+        let start = Instant::now();
+        assert_eq!(session.schedule_rescan(start), RescanDecision::Now);
+        assert!(matches!(session.schedule_rescan(start), RescanDecision::After(_)));
+
+        session.current_dir = PathBuf::from("/elsewhere");
+        session.begin_load(LoadKind::Navigate);
+        assert_eq!(session.schedule_rescan(start), RescanDecision::Now);
     }
 
     #[test]

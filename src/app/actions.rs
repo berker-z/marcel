@@ -48,6 +48,14 @@ macro_rules! browser_commands {
             ]);
         }
 
+        impl BrowserCommand {
+            /// Every keystroke the table binds, and the command it reaches.
+            #[cfg(test)]
+            const BOUND_KEYS: &[(&str, BrowserCommand)] = &[
+                $( $( $( ($key, BrowserCommand::$name), )+ )? )*
+            ];
+        }
+
         /// Route every action to the shared dispatcher.
         pub(super) fn bind_actions(element: Stateful<Div>, cx: &mut Context<Marcel>) -> Stateful<Div> {
             element $( .on_action(cx.listener(|this: &mut Marcel, _: &$name, window, cx| {
@@ -209,12 +217,11 @@ impl Marcel {
             // With nothing selected, Properties describes the folder shown —
             // except the Trash, which is a listing rather than a place.
             ShowProperties => self.has_selection() || !trash,
-            OpenTerminal => {
-                !trash
-                    && !self.directory.loading
-                    && self.directory.error.is_none()
-                    && self.directory.current_dir.is_dir()
-            }
+            // A listing that loaded without error is proof enough that the
+            // folder is there; stat-ing it here ran on every frame the menu
+            // was open, and hung the window for a stalled mount's timeout.
+            // Should it be gone after all, opening reports the failure.
+            OpenTerminal => !trash && !self.directory.loading && self.directory.error.is_none(),
             // Folders only. A second window showing a file is not a thing
             // Marcel can do, and a Trash entry's backing path is not somewhere
             // the user should be browsing.
@@ -749,13 +756,37 @@ mod tests {
         );
     }
 
+    /// Two commands on one key would leave one of them unreachable, and GPUI
+    /// would not say so.
     #[test]
-    fn every_bound_key_is_a_command_with_a_motion_or_an_effect() {
-        assert_eq!(
-            BrowserCommand::ExtendPageDown.motion(),
-            Some((SelectionMotion::PageDown, true))
-        );
-        assert_eq!(BrowserCommand::MoveLeft.motion(), Some((SelectionMotion::Left, false)));
-        assert_eq!(BrowserCommand::PasteFiles.motion(), None);
+    fn no_key_is_bound_to_two_commands() {
+        let mut seen = std::collections::HashMap::new();
+        for (key, command) in BrowserCommand::BOUND_KEYS {
+            if let Some(other) = seen.insert(*key, *command) {
+                panic!("{key} is bound to both {other:?} and {command:?}");
+            }
+        }
+        assert!(seen.len() >= 30, "the table lost most of its bindings");
+    }
+
+    /// Every motion has a plain and a Shift-extended binding, and Shift is
+    /// the only thing that tells them apart.
+    #[test]
+    fn every_motion_has_a_move_and_an_extend_binding() {
+        let mut motions = Vec::new();
+        for (key, command) in BrowserCommand::BOUND_KEYS {
+            let Some((motion, extend)) = command.motion() else {
+                continue;
+            };
+            assert_eq!(
+                key.starts_with("shift-"),
+                extend,
+                "{key}: Shift is what makes a motion extend the selection"
+            );
+            motions.push((motion as u8, extend));
+        }
+        motions.sort_unstable();
+        motions.dedup();
+        assert_eq!(motions.len(), 16, "eight motions, each with and without Shift");
     }
 }

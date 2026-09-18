@@ -8,14 +8,23 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
     },
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use async_channel::Sender;
 
 use crate::desktop::icons::IconProvider;
 
+/// The fewest entries the walker hands over at once, and the size of the first
+/// batch, which goes out the moment it fills so the window is not blank.
 const DIRECTORY_BATCH_SIZE: usize = 512;
+/// The least time between batches after the first.
+///
+/// Every batch costs the foreground a merge and a re-projection over the whole
+/// listing so far, so a 50,000-entry folder in 98 batches of 512 did far more
+/// work than the same folder in ten batches of several thousand. A slow disk
+/// that takes longer than this to read 512 entries still sends every one.
+const DIRECTORY_BATCH_INTERVAL: Duration = Duration::from_millis(32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -157,6 +166,7 @@ pub fn stream_directory(
 
     let mut icons = IconProvider::discover();
     let mut batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
+    let mut last_sent = None;
     let mut skipped = 0usize;
     let mut examples = Vec::new();
     for entry in reader {
@@ -180,12 +190,17 @@ pub fn stream_directory(
         };
 
         batch.push(entry);
-        if batch.len() == DIRECTORY_BATCH_SIZE {
-            sort_entries(&mut batch, order);
-            if sender.send_blocking(DirectoryUpdate::Batch(std::mem::take(&mut batch))).is_err() {
-                return;
+        if batch.len() >= DIRECTORY_BATCH_SIZE {
+            let now = Instant::now();
+            if batch_due(batch.len(), last_sent, now) {
+                sort_entries(&mut batch, order);
+                if sender.send_blocking(DirectoryUpdate::Batch(std::mem::take(&mut batch))).is_err()
+                {
+                    return;
+                }
+                batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
+                last_sent = Some(now);
             }
-            batch = Vec::with_capacity(DIRECTORY_BATCH_SIZE);
         }
     }
 
@@ -200,6 +215,13 @@ pub fn stream_directory(
         return;
     }
     let _ = sender.send_blocking(DirectoryUpdate::Done);
+}
+
+/// Whether the walker should hand over what it holds: a full first batch at
+/// once, later ones only after `DIRECTORY_BATCH_INTERVAL` has passed.
+fn batch_due(pending: usize, last_sent: Option<Instant>, now: Instant) -> bool {
+    pending >= DIRECTORY_BATCH_SIZE
+        && last_sent.is_none_or(|last| now.duration_since(last) >= DIRECTORY_BATCH_INTERVAL)
 }
 
 fn record_degraded_entry(
@@ -535,6 +557,22 @@ mod tests {
         stream_directory(Path::new("."), sender, Some(&cancelled), SortOrder::default());
 
         assert!(receiver.try_recv().is_err());
+    }
+
+    /// The first full batch goes out at once so the window has something to
+    /// show; after that the walker coalesces until the interval has passed,
+    /// however many entries have piled up meanwhile.
+    #[test]
+    fn batches_after_the_first_are_coalesced_on_a_timer() {
+        let start = Instant::now();
+        assert!(!batch_due(DIRECTORY_BATCH_SIZE - 1, None, start), "not full yet");
+        assert!(batch_due(DIRECTORY_BATCH_SIZE, None, start), "the first batch waits for nothing");
+
+        let just_sent = Some(start);
+        let soon = start + DIRECTORY_BATCH_INTERVAL / 2;
+        assert!(!batch_due(DIRECTORY_BATCH_SIZE, just_sent, soon));
+        assert!(!batch_due(DIRECTORY_BATCH_SIZE * 20, just_sent, soon), "size does not force it");
+        assert!(batch_due(DIRECTORY_BATCH_SIZE, just_sent, start + DIRECTORY_BATCH_INTERVAL));
     }
 
     #[test]
