@@ -6,8 +6,8 @@ use std::ops::Range;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Stateful, canvas, div, img, px,
-    relative, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Stateful, canvas, div, image_cache,
+    img, px, relative, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, h_flex, input::Input, scroll::ScrollableElement as _, v_flex,
@@ -291,16 +291,18 @@ impl Marcel {
     fn render_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let selected_drag = self.shared_drag();
         let columns = self.grid_columns();
-        if columns != self.ui.grid_layout_columns {
-            self.ui.grid_layout_columns = columns;
-            self.drag.entry_content_bounds.borrow_mut().clear();
-        }
         let row_count = self.directory.visible_entries.len().div_ceil(columns);
 
         uniform_list(
             "directory-grid-rows",
             row_count,
             cx.processor(move |this, rows: Range<usize>, _window, cx| {
+                // The tiles record their bounds as they are laid out, after
+                // this callback, so a reflow clears the stale map first.
+                if columns != this.ui.grid_layout_columns {
+                    this.ui.grid_layout_columns = columns;
+                    this.drag.entry_content_bounds.borrow_mut().clear();
+                }
                 let total = this.directory.visible_entries.len();
                 let visible = rows.start * columns..(rows.end * columns).min(total);
                 let nearby =
@@ -521,7 +523,7 @@ impl Marcel {
         let current_dir = self.directory.current_dir.clone();
 
         let surface = div().relative().flex().flex_col().flex_1().min_h_0();
-        accept_file_drops(
+        let surface = accept_file_drops(
             surface,
             &current_dir,
             refuses_drops,
@@ -581,8 +583,16 @@ impl Marcel {
                 div().px_3().py_1().text_xs().text_color(colors.muted_foreground).child(status),
             )
         })
-        .vertical_scrollbar(&directory_scroll)
-        .into_any_element()
+        .vertical_scrollbar(&directory_scroll);
+        // Thumbnails and icons decode into the browser's budgeted cache, not
+        // GPUI's grow-only global one; see `image_cache`.
+        image_cache(self.preview.browser_images(cx))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(surface)
+            .into_any_element()
     }
 }
 

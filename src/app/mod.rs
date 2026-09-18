@@ -26,6 +26,7 @@ mod browser;
 mod chrome;
 mod dialogs;
 mod edits;
+mod image_cache;
 mod location;
 mod media_pane;
 mod menu;
