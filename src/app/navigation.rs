@@ -5,14 +5,16 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
 };
 
 use gpui::{Context, ScrollStrategy, Task, UniformListScrollHandle, Window};
 
 use crate::{
     browse::{
-        directory_session::{ApplyDirectoryEvents, DirectoryEvent, ReconcileSelection},
+        directory_session::{
+            ApplyDirectoryEvents, DirectoryEvent, LoadKind, ReconcileSelection, RescanDecision,
+        },
         entries::{DirectoryUpdate, FileEntry, sort_entries, stream_directory},
         watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     },
@@ -54,16 +56,22 @@ pub(super) fn pump<T: Send + 'static>(
     })
 }
 
+/// A load that keeps the filter is a reload of the folder already shown, and
+/// keeps the listing and selection with it until the new one has arrived.
+fn load_kind(clear_filter: bool) -> LoadKind {
+    if clear_filter { LoadKind::Navigate } else { LoadKind::Refresh }
+}
+
 impl Marcel {
     /// Reset everything a fresh listing invalidates.
-    fn begin_listing(&mut self, clear_filter: bool) {
+    fn begin_listing(&mut self, kind: LoadKind) {
         self.ui.rename = None;
         self.ui.entry_menu = None;
         self.sidebar.bookmark_menu = None;
-        self.preview.reset_thumbnails();
         self.drag.entry_content_bounds.borrow_mut().clear();
-        self.clear_selection();
-        if clear_filter {
+        if kind == LoadKind::Navigate {
+            self.preview.reset_thumbnails();
+            self.clear_selection();
             // A navigation shows a new folder from the top. Only a refresh of
             // the same folder — which never clears the filter — keeps the
             // user's place; the old pixel offset in a different folder landed
@@ -72,13 +80,25 @@ impl Marcel {
         }
     }
 
+    /// The stream is complete: swap in a refresh's listing, and drop cached
+    /// renderings of whatever it found changed.
+    fn finish_directory_load(&mut self, cx: &mut Context<Self>) {
+        let finished = self.directory.finish_load();
+        self.preview.invalidate_thumbnails(&finished.changed);
+        self.apply_selection_reconcile(finished.reconcile, cx);
+        // A refresh held its reveals until now, when the rows exist to show.
+        self.select_pending_loaded_entries(cx);
+        self.directory.clear_pending_reveal();
+    }
+
     pub(super) fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
         if self.sidebar.browsing_trash {
             self.start_trash_load(clear_filter, cx);
             return;
         }
-        self.begin_listing(clear_filter);
-        let (ticket, path) = self.directory.begin_load(clear_filter);
+        let kind = load_kind(clear_filter);
+        self.begin_listing(kind);
+        let (ticket, path) = self.directory.begin_load(kind);
         // Watch from the start of the enumeration, not its end: a change
         // arriving while a large directory streamed used to be lost for good.
         // Events that arrive while the stream owns the listing are deferred
@@ -88,9 +108,13 @@ impl Marcel {
         let (sender, receiver) = async_channel::unbounded();
         let stream_path = path.clone();
         let order = self.directory.sort;
-        unblock(cx, move || stream_directory(&stream_path, sender, None, order)).detach();
+        // The flag is what stops the walker when this load is superseded;
+        // dropping the receiver only reaches it at its next batch boundary.
+        let cancelled = self.directory.cancellation();
+        unblock(cx, move || stream_directory(&stream_path, sender, Some(&cancelled), order))
+            .detach();
 
-        self.directory.load_task = Some(pump(cx, receiver, move |this, update, cx| {
+        let load = pump(cx, receiver, move |this, update, cx| {
             if ticket != this.directory.generation {
                 return false;
             }
@@ -109,7 +133,7 @@ impl Marcel {
                     });
                 }
                 DirectoryUpdate::Done => {
-                    this.directory.finish_load();
+                    this.finish_directory_load(cx);
                     // A replacement quarantine owned by a process that is gone
                     // can never be restored, so it is unreachable garbage
                     // rather than data anyone might still want. Unlike an
@@ -129,8 +153,7 @@ impl Marcel {
                         );
                     }
                     // Settle whatever changed while the stream owned the listing.
-                    if this.directory.take_pending_rescan() {
-                        this.start_directory_load(false, cx);
+                    if this.directory.take_pending_rescan() && this.request_rescan(cx) {
                         return false;
                     }
                     let deferred = this.directory.take_pending_refresh();
@@ -145,46 +168,77 @@ impl Marcel {
                     // against a partial one gets its real row.
                     this.settle_revealed_scroll();
                 }
-                DirectoryUpdate::Error(error) => this.directory.fail_load(error),
+                DirectoryUpdate::Error(error) => {
+                    let reconcile = this.directory.fail_load(error);
+                    this.apply_selection_reconcile(reconcile, cx);
+                }
             }
             cx.notify();
             true
-        }));
+        });
+        self.directory.set_load_task(Box::new(load));
         cx.notify();
+    }
+
+    /// Reload the folder shown because the watcher lost track of it.
+    ///
+    /// Returns whether the reload began now. When the last one was too
+    /// recent it is scheduled instead, and a folder still churning when the
+    /// timer fires gets one reload for the whole burst rather than one per
+    /// event.
+    fn request_rescan(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.directory.schedule_rescan(Instant::now()) {
+            RescanDecision::Now => {
+                self.start_directory_load(false, cx);
+                true
+            }
+            RescanDecision::After(delay) => {
+                let generation = self.directory.generation;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |this, cx| {
+                        // A navigation meanwhile made this reload moot, and
+                        // began a load of its own with a watcher of its own.
+                        if generation != this.directory.generation || this.sidebar.browsing_trash {
+                            return;
+                        }
+                        this.directory.begin_scheduled_rescan(Instant::now());
+                        this.start_directory_load(false, cx);
+                    });
+                })
+                .detach();
+                false
+            }
+            RescanDecision::AlreadyScheduled => false,
+        }
     }
 
     pub(super) fn start_trash_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
         self.sidebar.browsing_trash = true;
-        self.begin_listing(clear_filter);
-        let ticket = self.directory.begin_virtual_load(clear_filter);
-        self.sidebar.trash_records.clear();
+        let kind = load_kind(clear_filter);
+        self.begin_listing(kind);
+        let ticket = self.directory.begin_virtual_load(kind);
+        if kind == LoadKind::Navigate {
+            self.sidebar.trash_records.clear();
+        }
         let order = self.directory.sort;
 
         let load = unblock(cx, move || {
             let listing = list_trash_records()?;
-            let mut icons = IconProvider::discover();
-            let mut entries = Vec::with_capacity(listing.records.len());
-            let mut by_backing = HashMap::with_capacity(listing.records.len());
+            let (presented, unpresentable) = trash_entries(listing.records);
             let mut unreadable = listing.unreadable;
-            for record in listing.records {
-                // A record Marcel parsed but cannot present is as absent from
-                // the listing as one it could not parse, and is missing from
-                // Empty Trash for the same reason.
-                match trash_entry(&record, &mut icons) {
-                    Ok(entry) => {
-                        by_backing.insert(entry.path.clone(), record);
-                        entries.push(entry);
-                    }
-                    Err(error) => {
-                        unreadable.push(format!("“{}”: {error}", record.original_path().display()));
-                    }
-                }
+            unreadable.extend(unpresentable);
+            let mut entries = Vec::with_capacity(presented.len());
+            let mut by_backing = HashMap::with_capacity(presented.len());
+            for (entry, record) in presented {
+                by_backing.insert(entry.path.clone(), record);
+                entries.push(entry);
             }
             sort_entries(&mut entries, order);
             anyhow::Ok((entries, by_backing, unreadable))
         });
 
-        self.directory.load_task = Some(cx.spawn(async move |this, cx| {
+        let load = cx.spawn(async move |this, cx| {
             let result = load.await;
             let _ = this.update(cx, |this, cx| {
                 if ticket != this.directory.generation || !this.sidebar.browsing_trash {
@@ -195,24 +249,28 @@ impl Marcel {
                         this.sidebar.trash_records = records;
                         let reconcile = this.directory.merge_batch(entries);
                         this.apply_selection_reconcile(reconcile, cx);
-                        this.directory.finish_load();
+                        this.finish_directory_load(cx);
                         // Say what is missing rather than presenting a partial
                         // enumeration as the whole Trash.
                         this.directory.warning = unreadable_trash_warning(&unreadable);
                         this.sidebar.unreadable_trash_entries = unreadable.len();
                     }
-                    Err(error) => this.directory.fail_load(error.to_string()),
+                    Err(error) => {
+                        this.sidebar.trash_records.clear();
+                        let reconcile = this.directory.fail_load(error.to_string());
+                        this.apply_selection_reconcile(reconcile, cx);
+                    }
                 }
                 cx.notify();
             });
-        }));
+        });
+        self.directory.set_load_task(Box::new(load));
         cx.notify();
     }
 
     fn start_directory_watcher(&mut self, ticket: u64, path: PathBuf, cx: &mut Context<Self>) {
         let (sender, receiver) = async_channel::unbounded();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let watcher_cancelled = cancelled.clone();
+        let watcher_cancelled = self.directory.cancellation();
         let watched_path = path.clone();
         unblock(cx, move || watch_directory(&watched_path, sender, watcher_cancelled)).detach();
 
@@ -239,14 +297,17 @@ impl Marcel {
                     }
                 }
                 DirectoryWatcherUpdate::RescanRequired => {
-                    this.start_directory_load(false, cx);
-                    return false;
+                    // The watcher keeps running through a scheduled rescan's
+                    // wait; only a reload that starts now replaces it.
+                    if this.request_rescan(cx) {
+                        return false;
+                    }
                 }
             }
             cx.notify();
             true
         });
-        self.directory.set_watcher(cancelled, task);
+        self.directory.set_watcher(Box::new(task));
     }
 
     /// Fold validated events into the listing. Returns `false` when the
@@ -260,10 +321,7 @@ impl Marcel {
                 self.select_pending_loaded_entries(cx);
                 true
             }
-            ApplyDirectoryEvents::RescanRequired => {
-                self.start_directory_load(false, cx);
-                false
-            }
+            ApplyDirectoryEvents::RescanRequired => !self.request_rescan(cx),
         }
     }
 
@@ -521,18 +579,24 @@ impl Marcel {
             return;
         }
         let generation = self.directory.generation;
-        let task = unblock(cx, move || {
-            let mut icons = IconProvider::discover();
-            records
-                .into_iter()
-                .filter_map(|record| Some((trash_entry(&record, &mut icons).ok()?, record)))
-                .collect::<Vec<_>>()
-        });
+        let task = unblock(cx, move || trash_entries(records));
         cx.spawn(async move |this, cx| {
-            let entries = task.await;
+            let (entries, unreadable) = task.await;
             let _ = this.update(cx, |this, cx| {
                 if !this.sidebar.browsing_trash || generation != this.directory.generation {
                     return;
+                }
+                // A record that cannot be shown is missing from Empty Trash
+                // too, and its wording depends on knowing how many are. The
+                // count is what the load left plus what arrived since; a
+                // record that became readable again is only reconciled by the
+                // next full load, so it errs towards reporting.
+                if let Some(notice) = unreadable_trash_warning(&unreadable) {
+                    this.sidebar.unreadable_trash_entries += unreadable.len();
+                    this.directory.warning = Some(match this.directory.warning.take() {
+                        Some(warning) => format!("{warning}. {notice}"),
+                        None => notice,
+                    });
                 }
                 let mut events = Vec::with_capacity(entries.len());
                 for (entry, record) in entries {
@@ -556,6 +620,27 @@ impl Marcel {
             ApplyDirectoryEvents::RescanRequired => self.start_trash_load(false, cx),
         }
     }
+}
+
+/// The Trash entries `records` can be shown as, and a line for each record
+/// that cannot be.
+///
+/// A record Marcel parsed but cannot present is as absent from the listing as
+/// one it could not parse, and is missing from Empty Trash for the same
+/// reason, so it is reported the same way rather than dropped.
+fn trash_entries(records: Vec<TrashRecord>) -> (Vec<(FileEntry, TrashRecord)>, Vec<String>) {
+    let mut icons = IconProvider::discover();
+    let mut presented = Vec::with_capacity(records.len());
+    let mut unreadable = Vec::new();
+    for record in records {
+        match trash_entry(&record, &mut icons) {
+            Ok(entry) => presented.push((entry, record)),
+            Err(error) => {
+                unreadable.push(format!("“{}”: {error}", record.original_path().display()));
+            }
+        }
+    }
+    (presented, unreadable)
 }
 
 /// A Trash entry as the listing shows it: the backing file's metadata under
