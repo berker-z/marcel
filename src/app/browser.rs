@@ -36,7 +36,6 @@ const GRID_LABEL_COLUMNS: usize = 30;
 /// row is content-sized in the sense that it ends where the last column
 /// does, and the space beyond stays a marquee start target.
 const LIST_ICON_WIDTH: f32 = 20.0;
-const LIST_NAME_WIDTH: f32 = 340.0;
 const LIST_SIZE_WIDTH: f32 = 72.0;
 const LIST_MODIFIED_WIDTH: f32 = 132.0;
 pub(super) const LIST_HEADER_HEIGHT: f32 = 26.0;
@@ -189,11 +188,13 @@ impl Marcel {
                         let entry = this.directory.visible_entry(index)?.clone();
                         let name = match this.ui.rename_input_for(&entry.path) {
                             Some(input) => div()
-                                .w(px(LIST_NAME_WIDTH))
+                                .flex_1()
+                                .min_w_0()
                                 .child(Input::new(&input).small())
                                 .into_any_element(),
                             None => div()
-                                .w(px(LIST_NAME_WIDTH))
+                                .flex_1()
+                                .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
@@ -213,6 +214,7 @@ impl Marcel {
                         let row = this
                             .entry_surface(("entry", index), &entry, &selected_drag, cx)
                             .h(px(32.0))
+                            .w_full()
                             .px_3()
                             .gap_2()
                             .flex()
@@ -247,7 +249,7 @@ impl Marcel {
     fn render_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let order = self.directory.sort;
-        let heading = |id: &'static str, key: SortKey, width: f32, right: bool| {
+        let heading = |id: &'static str, key: SortKey, width: Option<f32>, right: bool| {
             let active = order.key == key;
             let label = if active {
                 format!("{} {}", key.label(), if order.descending { "▾" } else { "▴" })
@@ -256,8 +258,10 @@ impl Marcel {
             };
             div()
                 .id(id)
-                .w(px(width))
-                .flex_none()
+                .map(|this| match width {
+                    Some(width) => this.w(px(width)).flex_none(),
+                    None => this.flex_1().min_w_0().overflow_hidden(),
+                })
                 .px_1()
                 .rounded(cx.theme().radius)
                 .cursor_pointer()
@@ -282,9 +286,9 @@ impl Marcel {
             .border_b_1()
             .border_color(colors.border)
             .child(div().w(px(LIST_ICON_WIDTH)).flex_none())
-            .child(heading("sort-by-name", SortKey::Name, LIST_NAME_WIDTH, false))
-            .child(heading("sort-by-size", SortKey::Size, LIST_SIZE_WIDTH, true))
-            .child(heading("sort-by-modified", SortKey::Modified, LIST_MODIFIED_WIDTH, true))
+            .child(heading("sort-by-name", SortKey::Name, None, false))
+            .child(heading("sort-by-size", SortKey::Size, Some(LIST_SIZE_WIDTH), true))
+            .child(heading("sort-by-modified", SortKey::Modified, Some(LIST_MODIFIED_WIDTH), true))
             .into_any_element()
     }
 
