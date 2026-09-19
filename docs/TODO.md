@@ -7,15 +7,17 @@ work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
 
 ## Before `v0.1.0`
 
-- Hand-run the open checks in
-  [Sprint 26](sprints/026-tag-readiness.md#acceptance-checks): redo of a
-  permission change, a root-owned file, a symbolic link in Properties, Sort
-  by Kind and Reverse Order, filter and marquee with the list header, the
-  `.marcel-` rename refusal, copying `~/.ssh`, Copy Path on two items.
+- Hand-run what is left of the open checks in
+  [Sprint 26](sprints/026-tag-readiness.md#acceptance-checks): marquee
+  selection with the list header, and copying `~/.ssh`. The rest (redo of a
+  permission change, a root-owned file, a symlink in Properties, Sort by Kind
+  and Reverse Order, the `.marcel-` rename refusal, Copy Path on two items)
+  passed on 2026-09-19, driven through hyprhands.
 - One clean restart cycle of the release build to confirm `state.conf` keeps
-  view, sort, hidden files, and theme. Sprint 26 saw one unexplained reset
-  during a hand run that did not reproduce; Sprint 28 made an unreadable file
-  a reported, read-only condition, which is the likeliest cause.
+  the theme too (view, sort, and hidden files survived a restart of the dev
+  build on 2026-09-19). Sprint 26 saw one unexplained reset during a hand run
+  that did not reproduce; Sprint 28 made an unreadable file a reported,
+  read-only condition, which is the likeliest cause.
 - `nix build .#marcel-rs` and `nix flake check` on the release commit, and a
   `ci.yml` dispatch on it so both architectures have built the tree before
   the immutable tag exists.
