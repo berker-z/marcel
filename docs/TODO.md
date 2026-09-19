@@ -52,7 +52,9 @@ Small, and none of them blocks the tag.
 ## `0.2.0`
 
 - **Location.** `browsing_trash: bool` becomes a location: a local folder,
-  the Trash, a volume, or search results. Everything below needs it.
+  the Trash, a volume, or search results. Everything below needs it. The
+  whole line of work, volumes and network and search included, is specified
+  in [`sprints/0xx-every-place-a-file-lives.md`](sprints/0xx-every-place-a-file-lives.md).
 - **Removable volumes** through UDisks2 in the sidebar, and cross-filesystem
   move as a verified copy plus a trash of the source, journalled as one
   operation. Together they are the "Downloads to a USB stick" workflow that
