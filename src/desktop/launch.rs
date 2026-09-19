@@ -325,45 +325,75 @@ mod tests {
     }
 }
 
-/// Whether this process was started by the session bus to answer a request.
+/// Why the session bus started this process, when it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BusActivation {
+    /// For `io.github.berker_z.Marcel`: an `Activate` or `Open` is coming.
+    Application,
+    /// For `org.freedesktop.FileManager1`: a `ShowFolders` or `ShowItems` is
+    /// coming.
+    FileManager,
+    /// For the file-chooser portal backend. xdg-desktop-portal starts every
+    /// backend it is configured with at login, reads its `version`, and keeps
+    /// it resident; no request follows until an application asks for a
+    /// dialog, which may be never.
+    FileChooser,
+    /// `dbus-daemon` said so through the environment but not for which name.
+    Unknown,
+}
+
+impl BusActivation {
+    /// Whether a request is owed to this process, so that its absence after
+    /// a grace period means something went wrong. A portal backend is owed
+    /// nothing, and an activation of unknown purpose is not second-guessed:
+    /// opening a window to a start that was legitimately silent was how
+    /// Marcel appeared at every login.
+    pub fn expects_request(self) -> bool {
+        matches!(self, Self::Application | Self::FileManager)
+    }
+}
+
+/// How this process was started by the session bus, if it was.
 ///
 /// `dbus-daemon` says so by setting `DBUS_STARTER_BUS_TYPE` or
 /// `DBUS_STARTER_ADDRESS` in the child. `dbus-broker` starts services through
 /// systemd instead and sets neither; what it leaves behind is the transient
 /// unit it asked for, `dbus-:1.4-<bus name>@0.service`, which is this
-/// process's cgroup. Missing that meant every portal- or FileManager1-started
-/// Marcel on a dbus-broker system opened a browsing window at the daemon's
-/// working directory before the real request arrived.
-pub fn started_by_bus_activation() -> bool {
-    if std::env::var_os("DBUS_STARTER_BUS_TYPE").is_some()
-        || std::env::var_os("DBUS_STARTER_ADDRESS").is_some()
+/// process's cgroup and names the purpose. Missing that meant every portal-
+/// or FileManager1-started Marcel on a dbus-broker system opened a browsing
+/// window at the daemon's working directory before the real request arrived.
+pub fn bus_activation() -> Option<BusActivation> {
+    if let Some(activation) = fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroup| cgroup_bus_activation(&cgroup))
     {
-        return true;
+        return Some(activation);
     }
-    fs::read_to_string("/proc/self/cgroup")
-        .map(|cgroup| cgroup_is_bus_activation(&cgroup))
-        .unwrap_or(false)
+    (std::env::var_os("DBUS_STARTER_BUS_TYPE").is_some()
+        || std::env::var_os("DBUS_STARTER_ADDRESS").is_some())
+    .then_some(BusActivation::Unknown)
 }
 
-/// The bus names whose activation starts this program. A transient unit for
-/// any other name is somebody else's activation.
-const ACTIVATABLE_NAMES: [&str; 3] =
-    [bus::APPLICATION_ID, bus::FILE_MANAGER_BUS_NAME, file_chooser::FILE_CHOOSER_BUS_NAME];
+/// The bus names whose activation starts this program, and what each means.
+/// A transient unit for any other name is somebody else's activation.
+const ACTIVATABLE_NAMES: [(&str, BusActivation); 3] = [
+    (bus::APPLICATION_ID, BusActivation::Application),
+    (bus::FILE_MANAGER_BUS_NAME, BusActivation::FileManager),
+    (file_chooser::FILE_CHOOSER_BUS_NAME, BusActivation::FileChooser),
+];
 
-/// Whether the cgroup is a dbus-broker activation unit for one of Marcel's
-/// own names.
+/// The activation a dbus-broker transient unit in the cgroup stands for, if
+/// it is one of Marcel's own.
 ///
 /// Any `dbus-*.service` used to count. Under dbus-broker every child of an
 /// activated service shares its unit, and gnome-terminal-server, kgx, and
 /// ptyxis are all bus-activated, so `marcel-rs` typed into one of those
 /// terminals saw itself as bus-started, opened no window, and waited for a
 /// request that never came.
-fn cgroup_is_bus_activation(cgroup: &str) -> bool {
-    cgroup.lines().any(|line| {
-        line.rsplit('/')
-            .next()
-            .and_then(activated_bus_name)
-            .is_some_and(|name| ACTIVATABLE_NAMES.contains(&name))
+fn cgroup_bus_activation(cgroup: &str) -> Option<BusActivation> {
+    cgroup.lines().find_map(|line| {
+        let name = line.rsplit('/').next().and_then(activated_bus_name)?;
+        ACTIVATABLE_NAMES.iter().find(|(own, _)| *own == name).map(|(_, activation)| *activation)
     })
 }
 
@@ -377,7 +407,11 @@ fn activated_bus_name(unit: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod activation_tests {
-    use super::cgroup_is_bus_activation;
+    use super::{BusActivation, cgroup_bus_activation};
+
+    fn cgroup_is_bus_activation(cgroup: &str) -> bool {
+        cgroup_bus_activation(cgroup).is_some()
+    }
 
     fn cgroup(unit: &str) -> String {
         format!("0::/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}\n")
@@ -392,6 +426,24 @@ mod activation_tests {
         assert!(cgroup_is_bus_activation(&cgroup(
             "dbus-:1.12-org.freedesktop.FileManager1@3.service"
         )));
+    }
+
+    #[test]
+    fn only_the_names_that_owe_a_request_get_the_fallback_window() {
+        assert_eq!(
+            cgroup_bus_activation(&cgroup("dbus-:1.4-io.github.berker_z.Marcel@0.service")),
+            Some(BusActivation::Application)
+        );
+        assert_eq!(
+            cgroup_bus_activation(&cgroup(
+                "dbus-:1.4-org.freedesktop.impl.portal.desktop.marcel@0.service"
+            )),
+            Some(BusActivation::FileChooser)
+        );
+        assert!(BusActivation::Application.expects_request());
+        assert!(BusActivation::FileManager.expects_request());
+        assert!(!BusActivation::FileChooser.expects_request());
+        assert!(!BusActivation::Unknown.expects_request());
     }
 
     #[test]

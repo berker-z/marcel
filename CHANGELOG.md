@@ -84,8 +84,10 @@ process per graphical session, with each `marcel-rs` invocation opening its own
 window rather than taking over one you were already using.
 
 `marcel-rs --help` lists the command line; an unknown option is an error rather
-than a folder. A bus-activated start that hears no request within three
-seconds opens a window anyway, and a second `marcel-rs` that cannot reach the
+than a folder. A start the bus made for an `Activate` or a `ShowFolders` that
+never arrives opens a window after three seconds rather than sitting
+invisible; a start made for the file-chooser portal, which asks nothing of
+its backend until a dialog is wanted, stays quiet. A second `marcel-rs` that cannot reach the
 running one within ten seconds opens its own window. Requests over
 `FileManager1` and the application interface are rate-limited per sender.
 

@@ -45,7 +45,8 @@ fn main() {
     // is the daemon's. Should another Marcel already be primary (it was
     // started for a portal or FileManager1 name that one does not hold), the
     // forwarded request is "show me Marcel", not "open the daemon's cwd".
-    let bus_activated = !explicit_launch && launch::started_by_bus_activation();
+    let activation = if explicit_launch { None } else { launch::bus_activation() };
+    let bus_activated = activation.is_some();
     let initial_uris = if bus_activated { None } else { launch::launch_uris(&start_path) };
     // ...and when such a start does have to show a folder — an `Activate`
     // with no window to raise, or no request at all — it shows home.
@@ -113,11 +114,14 @@ fn main() {
                 Ok::<_, anyhow::Error>(())
             })
             .detach();
-            // The bus-started detection is a heuristic, and a request that
-            // was routed elsewhere or lost leaves a Marcel with no window and
-            // no way to get one. Past the grace period, "nothing arrived"
-            // means "show the folder we have" rather than "keep waiting".
-            if wait_for_bus_request {
+            // A request that was routed elsewhere or lost leaves a Marcel with
+            // no window and no way to get one. Past the grace period, "nothing
+            // arrived" means "show the folder we have" rather than "keep
+            // waiting". Only when one is owed, though: the portal starts its
+            // backend at login and asks nothing of it, and a window there put
+            // Marcel on screen at every login.
+            if wait_for_bus_request && activation.is_some_and(|activation| activation.expects_request())
+            {
                 let fallback_path = start_path.clone();
                 cx.spawn(async move |cx| {
                     cx.background_executor().timer(BUS_REQUEST_GRACE).await;

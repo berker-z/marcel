@@ -90,9 +90,13 @@ older builds, which has no owner in its name, is shown so it can be deleted.
 ### Desktop
 
 The portal title is bounded at 1 KiB. Bus activation is recognised from
-Marcel's own three transient unit names, not any `dbus-*.service` cgroup, and
-a bus-activated start that hears nothing within three seconds opens a window
-at the working directory. The forwarding connection has a ten-second method
+Marcel's own three transient unit names, not any `dbus-*.service` cgroup. A
+start made for the application or `FileManager1` name that hears nothing
+within three seconds opens a window at the working directory; a start made
+for the portal backend does not, since xdg-desktop-portal activates every
+backend at login to read its `version` and asks nothing more. (The first cut
+of this sprint armed the timer for all three names, and Marcel opened a
+window at every login; fixed the day after.) The forwarding connection has a ten-second method
 timeout and falls back to a standalone window. A duplicate request handle is
 `InvalidArgs` rather than a stale dialog. `SaveFiles` rejects a request whose
 URIs and names would misalign. `--help`, `--version`, and `--` work; an
