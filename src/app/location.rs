@@ -11,7 +11,7 @@ use gpui::{AnyElement, App, Context, Div, Entity, IntoElement, Stateful, Window,
 use gpui_component::{
     ActiveTheme as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    input::{Input, InputEvent, InputState, SelectAll as InputSelectAll},
+    input::{Input, InputEvent, InputState},
     notification::Notification,
 };
 
@@ -215,8 +215,14 @@ impl Marcel {
         input.update(cx, |input, cx| input.set_value(value, window, cx));
         cx.notify();
         cx.defer_in(window, move |_, window, cx| {
-            input.update(cx, |input, cx| input.focus(window, cx));
-            window.dispatch_action(Box::new(InputSelectAll), cx);
+            // Selected in full, so typing replaces the path. Set on the state
+            // directly: dispatching the input's SelectAll action here did not
+            // reach it, and the caret stayed at the end of the old path.
+            input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                let end = input.value().len();
+                input.set_selected_range(0..end, cx);
+            });
         });
     }
 
