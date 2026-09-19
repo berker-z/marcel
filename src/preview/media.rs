@@ -222,15 +222,21 @@ pub fn poster_frame(
             .stderr(Stdio::from(stderr_writer));
         let status =
             tool::run_child(&mut command, cancelled, FRAME_TIMEOUT, "Video preview", ABSENT)?;
-        if !status.success() {
-            return Err(tool_failure("ffmpeg", status, read_bounded(stderr)?));
-        }
-        if output.metadata().is_ok_and(|metadata| metadata.len() > 0) {
+        if status.success() && output.metadata().is_ok_and(|metadata| metadata.len() > 0) {
             fs::rename(&output, &rendered)?;
             prune_cache(&cache);
             return Ok(rendered);
         }
+        // A seek past the end is not an error worth reporting: the offset is
+        // a guess (a tenth of the duration, or a flat three seconds for a
+        // thumbnail), so a clip shorter than that gets its first frame
+        // instead. Older ffmpeg exited 0 with an empty file here; from 8 on,
+        // the encoder never sees a frame, refuses to open, and exits 234, so
+        // the status alone cannot tell "too short" from "broken".
         if seek == 0.0 {
+            if !status.success() {
+                return Err(tool_failure("ffmpeg", status, read_bounded(stderr)?));
+            }
             break;
         }
     }
@@ -268,6 +274,30 @@ pub fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thumbnail seeks three seconds in without asking how long the clip
+    /// is. A clip shorter than that has to yield its first frame rather than
+    /// the encoder-init failure ffmpeg 8 and later exit with on a seek past
+    /// the end.
+    #[test]
+    fn a_clip_shorter_than_the_guessed_offset_still_gets_a_frame() {
+        if !available() {
+            eprintln!("skipping: ffmpeg is not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("short.mp4");
+        let encoded = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=64x48:rate=10:duration=1")
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(encoded.success());
+
+        let frame = thumbnail_frame(&clip, &Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(frame.metadata().unwrap().len() > 0);
+    }
 
     #[test]
     fn reads_the_first_video_and_audio_streams_from_flat_probe_output() {
