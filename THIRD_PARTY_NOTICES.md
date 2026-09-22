@@ -230,8 +230,8 @@ The Yazi MIT license notice applies to the adaptations identified above:
 - Project: <https://github.com/alvatip/Nordzy-icon>
 - Bundled version: 1.8.7
 - License: GPL-3.0-only
-- Use in Marcel: `assets/icons/nordzy` contains twenty unmodified scalable
-  Places and MIME icons selected by semantic name. The files are a private
+- Use in Marcel: `assets/icons/nordzy` contains twenty-three unmodified scalable
+  Places, Devices, and MIME icons selected by semantic name. The files are a private
   in-application fallback, not a registered or system-installed icon theme.
   They are not compiled into the binary: the package installs them under
   `share/marcel/icons/nordzy` and Marcel reads the SVGs from there at runtime

@@ -68,6 +68,8 @@ impl Marcel {
         self.ui.rename = None;
         self.ui.entry_menu = None;
         self.sidebar.bookmark_menu = None;
+        self.sidebar.volume_menu = None;
+        self.sidebar.network_menu = None;
         self.drag.entry_content_bounds.borrow_mut().clear();
         if kind == LoadKind::Navigate {
             self.preview.reset_thumbnails();

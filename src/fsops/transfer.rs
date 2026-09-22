@@ -8,6 +8,7 @@
 //! https://github.com/sxyazi/yazi/blob/319f90e0eab185a231eef5562215ba322e320286/yazi-scheduler/src/file/file.rs
 
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -16,14 +17,18 @@ use std::{
     },
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 
 use super::{
     DirectoryChanges, PathFailure, TransferProgress,
     conflict::{
         ConflictPolicy, ConflictRequest, ConflictResponse, describe_occupant, unique_name_in,
     },
-    copy::{MergeStop, copy_one, ensure_not_self_containing, merge_directories},
+    copy::{
+        MergeStop, MetadataLoss, copy_one, describe_losses, ensure_not_self_containing,
+        merge_directories,
+    },
+    delete::delete_paths,
     journal::{
         MoveRecord, OperationRecord, PathSnapshot, UNDO_SNAPSHOT_LIMIT, rebase_snapshots,
         refresh_snapshot_identities, snapshot_tree_within,
@@ -85,6 +90,8 @@ pub struct TransferOutcome {
     /// Sources never attempted, because the operation was cancelled first.
     pub cancelled: Vec<PathBuf>,
     pub undo_unavailable: bool,
+    /// What the destination filesystem could not hold, across every item.
+    pub losses: BTreeSet<MetadataLoss>,
 }
 
 impl TransferOutcome {
@@ -122,6 +129,11 @@ impl TransferOutcome {
                 format!("{} items failed; first error: {}", failures.len(), failures[0].message)
             }
         }
+    }
+
+    /// One sentence about what the destination could not hold, if anything.
+    pub fn describe_losses(&self) -> Option<String> {
+        describe_losses(&self.losses)
     }
 }
 
@@ -414,6 +426,7 @@ impl<'a> Transfer<'a> {
         let mut replaced: Vec<ReplacedItem> = Vec::new();
         let mut replaced_bytes: u64 = 0;
         let mut replacement_undo_unavailable = false;
+        let mut losses: BTreeSet<MetadataLoss> = BTreeSet::new();
         let fail = |failures: &mut Vec<PathFailure>, source: &Path, message: String| {
             failures.push(PathFailure::new(source, message));
         };
@@ -484,6 +497,7 @@ impl<'a> Transfer<'a> {
                     // Those additions are on disk whatever comes next, so they
                     // belong in the record rather than in a return value the
                     // caller reads as "nothing happened".
+                    losses.extend(outcome.losses);
                     if outcome.undoable {
                         merged_created.extend(outcome.created);
                     } else {
@@ -541,6 +555,7 @@ impl<'a> Transfer<'a> {
                         copy_remaining(&copied_sources, &copied_created, &merged_created)
                     };
                     copy_one(source, &target, &cancelled, progress, remaining / 2).map(|copied| {
+                        losses.extend(copied.losses);
                         if copied.overflowed || !copied.undoable {
                             copied_sources.give_up();
                             copied_created.give_up();
@@ -564,7 +579,9 @@ impl<'a> Transfer<'a> {
                     } else {
                         budget.undo_snapshot_limit.saturating_sub(moved_snapshots)
                     };
-                    move_one(source, &target, remaining).map(|record| {
+                    move_one(source, &target, remaining, &cancelled, progress).map(|item| {
+                        losses.extend(item.losses);
+                        let record = item.record;
                         let reversible = record.is_some();
                         match record {
                             Some(record) => {
@@ -663,6 +680,7 @@ impl<'a> Transfer<'a> {
             already_in_place,
             cancelled: cancelled_sources,
             undo_unavailable,
+            losses,
         }
     }
 }
@@ -686,15 +704,29 @@ fn measure_entry(path: &Path, cancelled: &AtomicBool, progress: &TransferProgres
     }
 }
 
-/// Move one entry, returning `Ok(None)` when the rename committed but its undo
-/// record could not be captured. A committed move must never be reported as a
-/// failure: the caller would leave a vanished source in the browser, keep a
-/// dangling cut clipboard, and tell the user nothing happened.
+/// What one moved entry left behind.
+pub(super) struct MovedItem {
+    /// `None` when the move committed but its undo record could not be
+    /// captured.
+    pub(super) record: Option<MoveRecord>,
+    pub(super) losses: BTreeSet<MetadataLoss>,
+}
+
+/// Move one entry: a rename when the filesystem allows one, otherwise a copy
+/// followed by removal of the source.
+///
+/// A committed move must never be reported as a failure: the caller would
+/// leave a vanished source in the browser, keep a dangling cut clipboard, and
+/// tell the user nothing happened. So a rename that commits without an undo
+/// record returns `record: None`, and the cross-device path only returns
+/// `Err` while the source is still whole.
 fn move_one(
     source: &Path,
     destination: &Path,
     snapshot_limit: usize,
-) -> Result<Option<MoveRecord>> {
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+) -> Result<MovedItem> {
     ensure_unoccupied(destination)?;
     ensure_not_self_containing(source, destination, "move")?;
     // Prepare: walk the tree before the rename, not after, and treat the walk
@@ -704,35 +736,153 @@ fn move_one(
     // same way: the move happens, and it is reported as not undoable.
     let prepared = snapshot_tree_within(source, snapshot_limit).ok();
     // Commit.
-    rename_no_replace(source, destination)
-        .map_err(|error| move_error(&error, source, destination))?;
+    match rename_no_replace(source, destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            return move_across_devices(source, destination, snapshot_limit, cancelled, progress);
+        }
+        Err(error) => return Err(move_error(&error, source, destination)),
+    }
     // Finalize: a same-filesystem rename preserves every descendant's identity
     // but bumps the renamed root's ctime, so refresh before recording.
-    let Some(mut expected_state) = prepared else {
-        return Ok(None);
-    };
-    rebase_snapshots(&mut expected_state, source, destination);
-    if !refresh_snapshot_identities(&mut expected_state) {
-        return Ok(None);
+    let record = prepared.and_then(|mut expected_state| {
+        rebase_snapshots(&mut expected_state, source, destination);
+        refresh_snapshot_identities(&mut expected_state).then_some(MoveRecord {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            expected_state,
+            crossed_devices: false,
+        })
+    });
+    Ok(MovedItem { record, losses: BTreeSet::new() })
+}
+
+/// The move a rename cannot do: onto a USB stick, a second disk, or the
+/// Windows partition.
+///
+/// Both Yazi and GIO do this as a copy and then a delete, per item, with no
+/// read-back (`yazi-scheduler/src/file/file.rs`; `g_file_move` falling back to
+/// `g_file_copy` and `g_file_delete`). Marcel's copy already fsyncs every file
+/// and publishes the tree with one rename, so the copy half is `copy_one`
+/// unchanged. The published tree is then checked against the source by kind
+/// and size before the source goes, because the source is the only copy until
+/// that check passes. Removal is the permanent-delete path, one rename into
+/// quarantine and then an erase, so the source disappears at once rather than
+/// leaf by leaf.
+///
+/// The record describes the *destination* tree, which is what undo has to
+/// validate and copy back; a rename's record describes the same tree by the
+/// same paths, so the journal does not care which way it was made.
+pub(super) fn move_across_devices(
+    source: &Path,
+    destination: &Path,
+    snapshot_limit: usize,
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+) -> Result<MovedItem> {
+    // The move was budgeted as one item; it is about to be a tree of them.
+    // The one item stays on the books and is completed by the caller.
+    if let Some(progress) = progress {
+        measure_entry(source, cancelled, progress);
     }
-    Ok(Some(MoveRecord {
+    let copied = copy_one(source, destination, cancelled, progress, snapshot_limit)?;
+    // From here the destination is published. Anything that goes wrong now
+    // has to say which copy survived.
+    if let Err(error) = verify_copied_tree(source, destination) {
+        let removal =
+            delete_paths(&[destination.to_path_buf()], Arc::new(TransferProgress::default()));
+        let kept = if removal.failures.is_empty() {
+            "the original is untouched and the copy was removed"
+        } else {
+            "the original is untouched and the copy was left in place"
+        };
+        bail!("Could not verify the copy of “{}”: {error}; {kept}", source.display());
+    }
+    // A cancel that arrives between the copy and the removal is honoured by
+    // stopping, not by deleting: both copies stand, and the report says so.
+    if cancelled.load(Ordering::Acquire) {
+        bail!(
+            "Operation cancelled after “{}” was copied to “{}”; both copies were kept",
+            source.display(),
+            destination.display()
+        );
+    }
+    let removal = delete_paths(&[source.to_path_buf()], Arc::new(TransferProgress::default()));
+    if let Some(failure) = removal.failures.into_iter().next() {
+        bail!(
+            "Copied “{}” to “{}” but could not remove the original: {}",
+            source.display(),
+            destination.display(),
+            failure.message
+        );
+    }
+    let record = (!copied.overflowed && copied.undoable).then(|| MoveRecord {
         source: source.to_path_buf(),
         destination: destination.to_path_buf(),
-        expected_state,
-    }))
+        expected_state: copied.created,
+        crossed_devices: true,
+    });
+    Ok(MovedItem { record, losses: copied.losses })
+}
+
+/// Check a published copy against its source: every entry present, of the
+/// same kind, and regular files of the same length.
+///
+/// This is what `mv` promises (a write that returned and an fsync that
+/// returned), stated once more from the other side, and it is what stands
+/// between the user and a source deleted on the strength of a copy that
+/// lost a file. A link the destination could not hold appears as the file it
+/// pointed at, or not at all, and both are accepted here because the copier
+/// reported them.
+pub(super) fn verify_copied_tree(source: &Path, destination: &Path) -> Result<()> {
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((source, destination)) = pending.pop() {
+        let expected = fs::symlink_metadata(&source)
+            .with_context(|| format!("Could not inspect “{}”", source.display()))?;
+        let found = match fs::symlink_metadata(&destination) {
+            Ok(found) => found,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && expected.is_symlink() => {
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("“{}” is missing", destination.display()));
+            }
+        };
+        let expected_kind = expected.file_type();
+        let found_kind = found.file_type();
+        if expected_kind.is_symlink() {
+            if !(found_kind.is_symlink() || found_kind.is_file()) {
+                bail!("“{}” is not the link that was copied", destination.display());
+            }
+            continue;
+        }
+        if expected_kind.is_dir() != found_kind.is_dir()
+            || expected_kind.is_file() != found_kind.is_file()
+        {
+            bail!("“{}” is not the same kind of entry as its source", destination.display());
+        }
+        if expected_kind.is_file() && expected.len() != found.len() {
+            bail!(
+                "“{}” is {} bytes where the source is {}",
+                destination.display(),
+                found.len(),
+                expected.len()
+            );
+        }
+        if expected_kind.is_dir() {
+            for entry in fs::read_dir(&source)
+                .with_context(|| format!("Could not read “{}”", source.display()))?
+            {
+                let entry =
+                    entry.with_context(|| format!("Could not read “{}”", source.display()))?;
+                pending.push((entry.path(), destination.join(entry.file_name())));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn move_error(error: &io::Error, source: &Path, destination: &Path) -> anyhow::Error {
-    // Only report the parked cross-filesystem limitation when that is actually
-    // what happened; attaching it to every rename error hid the real cause.
-    let detail = if error.kind() == io::ErrorKind::CrossesDevices {
-        "; cross-filesystem moves are not supported yet"
-    } else {
-        ""
-    };
-    anyhow::anyhow!(
-        "Could not move “{}” to “{}”: {error}{detail}",
-        source.display(),
-        destination.display()
-    )
+    anyhow::anyhow!("Could not move “{}” to “{}”: {error}", source.display(), destination.display())
 }

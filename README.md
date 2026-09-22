@@ -36,6 +36,12 @@ Copy and move with progress and cancellation. When a destination is taken, Marce
 
 Properties (`Ctrl+I`, or `Alt+Enter` if your hands know KDE) shows what an item is, where it lives, who owns it, and its permissions and timestamps, plus what the preview loaders know: image dimensions, PDF page count, text line count, archive contents. Folders are measured in the background while the dialog is open. The permission bits are checkboxes, and ticking one is a `chmod` that undoes like everything else.
 
+### Drives and network
+
+The sidebar lists the drives UDisks2 knows about, using the same rules Nautilus uses for what is worth showing: a USB stick, an SD card, the Windows partition of a dual-boot machine, but not the EFI partition or `/boot`. Click an unmounted drive to mount it and go there; a stick gets an eject button that unmounts it and powers it off. Moving a folder to a drive on another filesystem copies it, checks the copy, and removes the original, as one operation that undoes as one. What FAT or NTFS cannot keep (permissions, extended attributes, symbolic links) is dropped and reported once. A Windows partition that asks for a password on mount wants an fstab entry with `x-gvfs-show` in its options; Marcel then lists it by its `x-gvfs-name`.
+
+Network shares go through GVfs, so Marcel has no SFTP or SMB client of its own and the desktop's keyring, host-key prompts, and backends are the ones you already have. Add… under Network opens Connect to Server, which takes `sftp://`, `smb://`, `ftp://`, or `dav://` addresses (a bare hostname means SFTP, and an `ssh` config alias works there), and the location bar takes the same. A connected share is a folder under `/run/user/<uid>/gvfs/`, so everything else, copying, moving, previewing, works on it unchanged. There is no Trash on a share, so deleting there asks whether to delete permanently instead. Right-click a connected share and choose Add to Network to keep it; saved servers live in `~/.config/marcel/servers`, one URI per line with an optional name after it, and stay in the sidebar whether or not they are connected. This needs `services.gvfs.enable = true` on NixOS (any GNOME-adjacent desktop has it already); without GVfs on the session bus the Network section is absent. Folders on a share do not update on their own, since inotify does not reach through FUSE; Refresh does.
+
 ### Desktop integration
 
 On Wayland, files drag to and from other applications. Marcel registers as a file manager over D-Bus, so "show in folder" from other applications works. One process per session; each `marcel-rs` invocation opens a new window rather than taking over one you were using. Enter opens a file with its default application; Open With… in the item menu asks the desktop's application chooser instead. Open in Terminal, in the empty-space menu, starts a terminal in the current folder, trying `xdg-terminal-exec`, then `$TERMINAL`, then the usual emulators.
@@ -78,14 +84,14 @@ Escape has a stack of meanings and takes the topmost one: it closes an open cont
 Known gaps, roughly in the order they are likely to be addressed:
 
 * No search. You can filter the folder you are in, but there is no recursive search by name or content.
-* Moving between filesystems is refused rather than quietly turned into a copy and a delete. Copying across drives works.
-* No removable volumes, network shares, or remote locations. Local paths only.
+* A share does not update as files change on it; Refresh reloads. Neither does an `ntfs-3g` mount, since both are FUSE.
+* No LUKS, MTP, or optical drives in the sidebar, and no SMB browsing of the local network; connect to a share by address.
 * The file clipboard is Marcel's own. Ctrl+C in Marcel and Ctrl+V in Nautilus, a terminal, or a chat client does nothing, and the other way round does nothing either. Drag and drop is how files cross into other applications. Copy Path puts the paths on the real clipboard as text.
 * Undo history lives in the running process. Close Marcel and the operations it could have undone are just history.
 * No dual pane. Open a second window (Open in New Window on a folder, or run `marcel-rs` again) and drag between the two.
 * No video playback; the preview pane shows a frame and a play button for your player.
 * Create Link is in the menu, greyed out, until it exists.
-* Some conventional shortcuts are not bound: `Ctrl+H` for hidden files (it is a toggle in the sidebar footer and the empty-space menu), `F5` for refresh, `Alt+Up` and `Alt+Left` for parent and back (Marcel uses `Ctrl+Up` and `Ctrl+Left`), and `Ctrl+Shift+Z` for redo (`Ctrl+Y`).
+* Some conventional shortcuts are not bound: `Ctrl+H` for hidden files (it is the `.*` button next to the view toggle, and in the empty-space menu), `F5` for refresh, `Alt+Up` and `Alt+Left` for parent and back (Marcel uses `Ctrl+Up` and `Ctrl+Left`), and `Ctrl+Shift+Z` for redo (`Ctrl+Y`).
 * The window needs to be at least 900 pixels wide; below that the preview pane runs off the edge. Marcel asks the desktop not to shrink it further, and a tiling compositor can insist anyway.
 * Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer, and screen readers see nothing.
 * RAR extraction needs a separate build. The default package ships only free components.

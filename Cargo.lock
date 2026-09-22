@@ -3857,6 +3857,7 @@ dependencies = [
  "md-5",
  "mime_guess",
  "notify",
+ "percent-encoding",
  "png 0.18.1",
  "realfft",
  "rustix 1.1.4",

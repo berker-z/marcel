@@ -49,8 +49,8 @@ use super::{
     },
     local::{
         CWD, ensure_unoccupied, hold_directory, hold_entry, inspect, open_directory_at,
-        open_regular_file_at, read_link_target, rename_no_replace, sorted_child_names,
-        sorted_children,
+        open_regular_file, open_regular_file_at, read_link_target, rename_no_replace,
+        sorted_child_names, sorted_children,
     },
     quarantine::{WorkingKind, staging_prefix},
 };
@@ -60,6 +60,62 @@ pub(super) struct CopiedItem {
     pub(super) created: Vec<PathSnapshot>,
     pub(super) overflowed: bool,
     pub(super) undoable: bool,
+    /// What the destination filesystem could not hold.
+    pub(super) losses: BTreeSet<MetadataLoss>,
+}
+
+/// Something a copy could not carry across because the destination filesystem
+/// has nowhere to put it.
+///
+/// FAT and exFAT (most sticks) have no modes, no ownership, no extended
+/// attributes, and no symbolic links; NTFS through `ntfs3` accepts a `chmod`
+/// and ignores it. GIO asks the destination what it can set and copies only
+/// that ("Failure to copy metadata is not a hard error", as Nautilus puts it);
+/// Yazi applies everything with `.ok()`. Marcel does what GIO does and says
+/// so once per operation, because a user who just moved a tree of scripts to
+/// a stick should hear that the execute bits stayed behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MetadataLoss {
+    Permissions,
+    Attributes,
+    Timestamps,
+    /// Links were replaced by copies of the files they pointed at.
+    LinksCopied,
+    /// Links pointing at anything but a regular file were left out.
+    LinksSkipped,
+}
+
+impl MetadataLoss {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Permissions => "permissions were not kept",
+            Self::Attributes => "extended attributes were not kept",
+            Self::Timestamps => "timestamps were not kept",
+            Self::LinksCopied => "symbolic links were replaced by copies of their targets",
+            Self::LinksSkipped => "symbolic links to folders or missing targets were left out",
+        }
+    }
+}
+
+/// One sentence for the report, or nothing when nothing was lost.
+pub fn describe_losses(losses: &BTreeSet<MetadataLoss>) -> Option<String> {
+    if losses.is_empty() {
+        return None;
+    }
+    let described = losses.iter().map(|loss| loss.describe()).collect::<Vec<_>>().join(", ");
+    Some(format!("{described}: the destination filesystem does not support them"))
+}
+
+/// Whether an error means the filesystem has no room for the attribute rather
+/// than that something went wrong applying it.
+///
+/// `EPERM` is what vfat and exfat answer to a `chmod` or a `symlink`, and
+/// `ENOTSUP`/`EOPNOTSUPP` what any filesystem without extended attributes
+/// answers to `setxattr`. Marcel owns every object it applies metadata to (it
+/// just created them, in its own staging directory), so `EPERM` on one of
+/// those calls can only be the filesystem refusing the concept.
+fn filesystem_cannot_hold(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied || xattrs_unsupported(error)
 }
 
 pub(super) fn copy_one(
@@ -99,6 +155,7 @@ fn copy_one_unsynced(
         sources: SnapshotCollector::new(snapshot_limit),
         created: SnapshotCollector::new(snapshot_limit),
         staged_directories: Vec::new(),
+        losses: BTreeSet::new(),
     };
     copier.copy_tree(source, &staged)?;
     // Commit. The staging directory is removed when `staging` drops, taking
@@ -108,7 +165,7 @@ fn copy_one_unsynced(
     })?;
     // Finalize: the copy is published. Re-reading identities can only cost
     // undo, because publication renames the staged root and bumps its ctime.
-    let Copier { sources, created, .. } = copier;
+    let Copier { sources, created, losses, .. } = copier;
     let mut created_snapshots = created.snapshots;
     rebase_snapshots(&mut created_snapshots, &staged, destination);
     let undoable = refresh_snapshot_identities(&mut created_snapshots);
@@ -117,6 +174,7 @@ fn copy_one_unsynced(
         created: created_snapshots,
         overflowed: sources.overflowed || created.overflowed,
         undoable,
+        losses,
     })
 }
 
@@ -228,6 +286,8 @@ struct Copier<'a> {
     created: SnapshotCollector,
     /// Every directory created so far, synced together before publication.
     staged_directories: Vec<PathBuf>,
+    /// What the destination could not hold, reported once for the tree.
+    losses: BTreeSet<MetadataLoss>,
 }
 
 impl Copier<'_> {
@@ -261,7 +321,13 @@ impl Copier<'_> {
                     metadata,
                     created_index,
                 } => {
-                    preserve_metadata(&source, &source_path, &destination, &metadata)?;
+                    preserve_metadata(
+                        &source,
+                        &source_path,
+                        &destination,
+                        &metadata,
+                        &mut self.losses,
+                    )?;
                     self.created.refresh(created_index, &destination, &inspect(&destination)?);
                     self.complete_item();
                 }
@@ -354,12 +420,47 @@ impl Copier<'_> {
             let mut opened = open_regular_file_at(dir, name).at("Could not open", &source)?;
             ensure_same_object(&metadata, &opened, &source)?;
             self.copy_regular_file(&mut opened, &source, &destination, &metadata)?;
-            preserve_metadata(&opened, &source, &destination, &metadata)?;
+            preserve_metadata(&opened, &source, &destination, &metadata, &mut self.losses)?;
         } else if kind.is_symlink() {
             // Linux keeps user and ACL attributes off symbolic links, so the
             // target is all there is to preserve.
             let target = read_link_target(&held).at("Could not read link", &source)?;
-            std::os::unix::fs::symlink(target, &destination).at("Could not copy link", &source)?;
+            match symlink_or_refusal(&target, &destination) {
+                Ok(()) => {}
+                // The destination has no links (FAT, exFAT). What a user
+                // dragging a folder to a stick wants is the file the link
+                // stood for, so a link to a regular file becomes a copy of
+                // it. A link to a folder could recurse without bound and a
+                // dangling one has nothing to copy, so those are left out;
+                // both are said once in the report.
+                Err(error) if filesystem_cannot_hold(&error) => {
+                    let resolved = source.parent().unwrap_or(Path::new("/")).join(&target);
+                    let target_file = open_regular_file(&resolved)
+                        .ok()
+                        .zip(fs::metadata(&resolved).ok().filter(fs::Metadata::is_file));
+                    let Some((mut opened, target_metadata)) = target_file else {
+                        self.losses.insert(MetadataLoss::LinksSkipped);
+                        self.complete_item();
+                        return Ok(());
+                    };
+                    copy_file_cancellable(
+                        &mut opened,
+                        &resolved,
+                        &destination,
+                        self.cancelled,
+                        self.progress,
+                    )?;
+                    preserve_metadata(
+                        &opened,
+                        &resolved,
+                        &destination,
+                        &target_metadata,
+                        &mut self.losses,
+                    )?;
+                    self.losses.insert(MetadataLoss::LinksCopied);
+                }
+                Err(error) => return Err(error).at("Could not copy link", &source),
+            }
         } else {
             bail!("Special files are not supported yet: “{}”", source.display());
         }
@@ -414,12 +515,40 @@ impl Copier<'_> {
 /// cannot interfere with one another.
 #[cfg(test)]
 pub(super) mod fault {
-    use std::{cell::RefCell, path::Path};
+    use std::{
+        cell::{Cell, RefCell},
+        path::Path,
+    };
 
     type Hook = Box<dyn FnMut(&Path)>;
 
     thread_local! {
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static REFUSES_METADATA: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make every destination behave like FAT until the guard drops: `chmod`,
+    /// `setxattr`, and `symlink` answer `EPERM`.
+    ///
+    /// A real vfat image needs root to mount, so the tests that care about
+    /// what a stick can hold run on the ordinary temp directory with the
+    /// refusals injected at the three calls that would meet them.
+    #[must_use = "the fault is removed when the guard drops"]
+    pub fn destination_refuses_metadata_do() -> MetadataGuard {
+        REFUSES_METADATA.with(|flag| flag.set(true));
+        MetadataGuard
+    }
+
+    pub struct MetadataGuard;
+
+    impl Drop for MetadataGuard {
+        fn drop(&mut self) {
+            REFUSES_METADATA.with(|flag| flag.set(false));
+        }
+    }
+
+    pub(super) fn destination_refuses_metadata() -> bool {
+        REFUSES_METADATA.with(Cell::get)
     }
 
     /// Run `hook` with every source path after it is inspected and before it
@@ -613,13 +742,19 @@ fn try_copy_sparse(
 /// `source` is the open descriptor the content was read through, so the
 /// attributes come from the object that was copied rather than from whatever
 /// `source_path` names by the time they are read.
+///
+/// An attribute the destination filesystem cannot hold is recorded in
+/// `losses` rather than failing the copy; see [`MetadataLoss`]. Any other
+/// failure is still an error, because the filesystem said it could hold the
+/// attribute and then did not.
 pub(super) fn preserve_metadata(
     source: &fs::File,
     source_path: &Path,
     destination: &Path,
     metadata: &fs::Metadata,
+    losses: &mut BTreeSet<MetadataLoss>,
 ) -> Result<()> {
-    preserve_supported_xattrs(source, source_path, destination)?;
+    preserve_supported_xattrs(source, source_path, destination, losses)?;
 
     let mut times = fs::FileTimes::new();
     let mut has_times = false;
@@ -632,18 +767,45 @@ pub(super) fn preserve_metadata(
         has_times = true;
     }
     if has_times {
-        fs::File::open(destination)
-            .and_then(|file| file.set_times(times))
-            .at("Could not preserve timestamps on", destination)?;
+        match fs::File::open(destination).and_then(|file| file.set_times(times)) {
+            Ok(()) => {}
+            Err(error) if filesystem_cannot_hold(&error) => {
+                losses.insert(MetadataLoss::Timestamps);
+            }
+            Err(error) => return Err(error).at("Could not preserve timestamps on", destination),
+        }
     }
-    fs::set_permissions(destination, metadata.permissions())
-        .at("Could not preserve permissions on", destination)
+    match set_permissions_or_refusal(destination, metadata.permissions()) {
+        Ok(()) => Ok(()),
+        Err(error) if filesystem_cannot_hold(&error) => {
+            losses.insert(MetadataLoss::Permissions);
+            Ok(())
+        }
+        Err(error) => Err(error).at("Could not preserve permissions on", destination),
+    }
+}
+
+fn set_permissions_or_refusal(destination: &Path, permissions: fs::Permissions) -> io::Result<()> {
+    #[cfg(test)]
+    if fault::destination_refuses_metadata() {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    fs::set_permissions(destination, permissions)
+}
+
+fn symlink_or_refusal(target: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if fault::destination_refuses_metadata() {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    std::os::unix::fs::symlink(target, destination)
 }
 
 fn preserve_supported_xattrs(
     source: &fs::File,
     source_path: &Path,
     destination: &Path,
+    losses: &mut BTreeSet<MetadataLoss>,
 ) -> Result<()> {
     use xattr::FileExt as _;
 
@@ -666,13 +828,28 @@ fn preserve_supported_xattrs(
         else {
             continue;
         };
-        xattr::set(destination, &name, &value).with_context(|| {
-            format!(
-                "Could not preserve attribute “{}” on “{}”",
-                name.to_string_lossy(),
-                destination.display()
-            )
-        })?;
+        #[cfg(test)]
+        if fault::destination_refuses_metadata() {
+            losses.insert(MetadataLoss::Attributes);
+            return Ok(());
+        }
+        match xattr::set(destination, &name, &value) {
+            Ok(()) => {}
+            // One refusal says it all: the destination has no attributes.
+            Err(error) if filesystem_cannot_hold(&error) => {
+                losses.insert(MetadataLoss::Attributes);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Could not preserve attribute “{}” on “{}”",
+                        name.to_string_lossy(),
+                        destination.display()
+                    )
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -774,6 +951,7 @@ pub(super) struct MergeOutcome {
     /// either way, they simply cannot be taken back.
     pub(super) undoable: bool,
     pub(super) stopped: Option<MergeStop>,
+    pub(super) losses: BTreeSet<MetadataLoss>,
 }
 
 /// Perform a planned merge, reporting what it added whether or not it finished.
@@ -788,7 +966,7 @@ pub(super) fn merge_directories(
     progress: Option<&TransferProgress>,
     snapshot_limit: usize,
 ) -> MergeOutcome {
-    let not_undoable = |stopped| MergeOutcome { created: Vec::new(), undoable: false, stopped };
+    let mut losses = BTreeSet::new();
     // Prepare: decide the whole merge before writing any of it. Nothing has
     // been created yet, so a plan that cannot be made is an ordinary failure.
     let plan = match plan_merge(source, destination) {
@@ -798,6 +976,7 @@ pub(super) fn merge_directories(
                 created: Vec::new(),
                 undoable: true,
                 stopped: Some(MergeStop::Failed(error)),
+                losses,
             };
         }
     };
@@ -843,6 +1022,7 @@ pub(super) fn merge_directories(
             match copy_one_unsynced(from, to, cancelled, progress, remaining / 2) {
                 Ok(copied) => {
                     touched.extend(to.parent());
+                    losses.extend(copied.losses);
                     if copied.overflowed || !copied.undoable {
                         undoable = false;
                     } else if undoable {
@@ -862,8 +1042,10 @@ pub(super) fn merge_directories(
         sync_directory(directory);
     }
 
+    let not_undoable =
+        |stopped, losses| MergeOutcome { created: Vec::new(), undoable: false, stopped, losses };
     if !undoable {
-        return not_undoable(stopped);
+        return not_undoable(stopped, losses);
     }
 
     // Snapshot the new directories only now, and only once nothing further will
@@ -875,11 +1057,11 @@ pub(super) fn merge_directories(
     for directory in directories {
         match PathSnapshot::read(directory) {
             Ok(snapshot) => created.push(snapshot),
-            Err(_) => return not_undoable(stopped),
+            Err(_) => return not_undoable(stopped, losses),
         }
     }
     created.extend(files);
-    MergeOutcome { created, undoable: true, stopped }
+    MergeOutcome { created, undoable: true, stopped, losses }
 }
 
 /// Remove exactly what a merge added.

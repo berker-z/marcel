@@ -58,6 +58,25 @@ impl IconProvider {
         self.lookup(IconKey::Place(place_icon_candidates(label)))
     }
 
+    /// A drive in the sidebar: a stick or card when removable, a disk otherwise.
+    pub fn icon_for_volume(&mut self, removable: bool) -> Option<PathBuf> {
+        self.lookup(IconKey::Place(if removable {
+            &[
+                "drive-removable-media-usb",
+                "drive-removable-media",
+                "media-removable",
+                "drive-harddisk",
+            ]
+        } else {
+            &["drive-harddisk", "drive-removable-media"]
+        }))
+    }
+
+    /// A server in the sidebar, connected or not.
+    pub fn icon_for_network(&mut self) -> Option<PathBuf> {
+        self.lookup(IconKey::Place(&["folder-remote", "network-server", "folder"]))
+    }
+
     fn lookup(&mut self, key: IconKey) -> Option<PathBuf> {
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();

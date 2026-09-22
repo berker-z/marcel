@@ -225,6 +225,10 @@ pub fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     if fault::should_fail(destination) {
         return Err(io::Error::other("injected rename failure"));
     }
+    #[cfg(test)]
+    if fault::take_crossing(destination) {
+        return Err(io::Error::from(rustix::io::Errno::XDEV));
+    }
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         source,
@@ -311,6 +315,30 @@ pub mod fault {
 
     thread_local! {
         static FAILING_DESTINATIONS: RefCell<Vec<OsString>> = const { RefCell::new(Vec::new()) };
+        static CROSSING_DESTINATIONS: RefCell<Vec<OsString>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Make the next rename that would publish something under this file
+    /// name fail with `EXDEV`, as a rename onto another filesystem does.
+    ///
+    /// One-shot, because the copy that a cross-device move falls back to
+    /// publishes under the same name, and that rename has to succeed. A test
+    /// that needs a real second filesystem uses `/dev/shm`; this is for the
+    /// logic around the boundary, which does not care where it is.
+    pub fn cross_devices_once(name: impl AsRef<OsStr>) {
+        let name = name.as_ref().to_os_string();
+        CROSSING_DESTINATIONS.with_borrow_mut(|names| names.push(name));
+    }
+
+    pub(super) fn take_crossing(destination: &Path) -> bool {
+        let Some(name) = destination.file_name() else {
+            return false;
+        };
+        CROSSING_DESTINATIONS
+            .with_borrow_mut(|names| {
+                names.iter().rposition(|crossing| crossing == name).map(|index| names.remove(index))
+            })
+            .is_some()
     }
 
     /// Fail every rename that would publish something under this file name.

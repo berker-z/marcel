@@ -29,7 +29,7 @@ use super::{
         reverse_rename, reverse_set_mode,
     },
     quarantine::{preserve_unrestored, restore_replaced_items},
-    transfer::{TransferMode, transfer_paths},
+    transfer::{TransferMode, move_across_devices, transfer_paths},
     trash::{TrashMutationFailure, restore_trash_records, retrash_records},
 };
 
@@ -180,43 +180,101 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
             let mut undone = Vec::with_capacity(transfers.len());
             let mut undoable = true;
             for (attempted, transfer) in transfers.iter().rev().enumerate() {
-                // Commit.
-                if let Err(error) = rename_no_replace(&transfer.destination, &transfer.source) {
-                    let message = format!(
-                        "Could not move “{}” back to “{}”: {error}",
-                        transfer.destination.display(),
-                        transfer.source.display()
-                    );
-                    if attempted == 0 {
-                        // The first rename failed, so nothing moved and the
-                        // record still describes the disk exactly.
-                        return MutationOutcome::unchanged(anyhow::anyhow!("{message}"));
-                    }
-                    // Earlier renames committed. Whether or not compensation
-                    // restores the paths, those roots have been renamed twice
-                    // and their recorded ctimes are stale, so the record can
-                    // never validate again.
-                    return match rollback_undone_moves(&undone) {
-                        Ok(()) => MutationOutcome::discarded(
-                            DirectoryChanges::default(),
-                            anyhow::anyhow!("{message}; earlier moves were rolled back"),
-                        ),
-                        Err(rollback_error) => MutationOutcome::discarded(
-                            partial_undo_changes(&undone),
-                            anyhow::anyhow!("{message}; rollback also failed: {rollback_error}"),
-                        ),
-                    };
-                }
-                // Finalize: rebasing the already-validated snapshots cannot
-                // fail, and only the renamed root's identity needs re-reading.
-                let mut expected_state = transfer.expected_state.clone();
-                rebase_snapshots(&mut expected_state, &transfer.destination, &transfer.source);
-                undoable &= refresh_snapshot_identities(&mut expected_state);
-                undone.push(MoveRecord {
-                    source: transfer.source.clone(),
-                    destination: transfer.destination.clone(),
-                    expected_state,
+                // Commit. A move that crossed devices goes back the way it
+                // came, and its failures name which copy survived.
+                let reversed_across = transfer.crossed_devices.then(|| {
+                    move_across_devices(
+                        &transfer.destination,
+                        &transfer.source,
+                        transfer.expected_state.len(),
+                        &AtomicBool::new(false),
+                        None,
+                    )
                 });
+                let result = match reversed_across {
+                    // The copy back describes itself as a move from the
+                    // destination to the source; the journal wants it the
+                    // way the original was recorded, so redo can repeat it.
+                    Some(Ok(moved)) => Ok(moved.record.map(|record| MoveRecord {
+                        source: record.destination,
+                        destination: record.source,
+                        ..record
+                    })),
+                    Some(Err(error)) => Err(error.to_string()),
+                    None => rename_no_replace(&transfer.destination, &transfer.source)
+                        .map(|()| {
+                            let mut expected_state = transfer.expected_state.clone();
+                            rebase_snapshots(
+                                &mut expected_state,
+                                &transfer.destination,
+                                &transfer.source,
+                            );
+                            refresh_snapshot_identities(&mut expected_state).then_some(MoveRecord {
+                                source: transfer.source.clone(),
+                                destination: transfer.destination.clone(),
+                                expected_state,
+                                crossed_devices: false,
+                            })
+                        })
+                        .map_err(|error| {
+                            format!(
+                                "Could not move “{}” back to “{}”: {error}",
+                                transfer.destination.display(),
+                                transfer.source.display()
+                            )
+                        }),
+                };
+                let record = match result {
+                    Ok(record) => record,
+                    Err(message) => {
+                        if attempted == 0 {
+                            // The first step failed before its commit, so
+                            // nothing moved and the record still describes
+                            // the disk exactly.
+                            return MutationOutcome::unchanged(anyhow::anyhow!("{message}"));
+                        }
+                        // Earlier steps committed. Whether or not compensation
+                        // restores the paths, those roots have been renamed
+                        // twice and their recorded ctimes are stale, so the
+                        // record can never validate again. A step that crossed
+                        // devices cannot be rolled back with a rename either,
+                        // so it is reported as it stands.
+                        if undone.iter().any(|record: &MoveRecord| record.crossed_devices) {
+                            return MutationOutcome::discarded(
+                                partial_undo_changes(&undone),
+                                anyhow::anyhow!("{message}; earlier moves were not rolled back"),
+                            );
+                        }
+                        return match rollback_undone_moves(&undone) {
+                            Ok(()) => MutationOutcome::discarded(
+                                DirectoryChanges::default(),
+                                anyhow::anyhow!("{message}; earlier moves were rolled back"),
+                            ),
+                            Err(rollback_error) => MutationOutcome::discarded(
+                                partial_undo_changes(&undone),
+                                anyhow::anyhow!(
+                                    "{message}; rollback also failed: {rollback_error}"
+                                ),
+                            ),
+                        };
+                    }
+                };
+                // Finalize: the step committed. A rename leaves the tree it
+                // moved describable by the already-validated snapshots; a
+                // copy back describes its own output. Either way a missing
+                // record only costs redo.
+                match record {
+                    Some(record) => undone.push(record),
+                    None => {
+                        undoable = false;
+                        undone.push(MoveRecord {
+                            source: transfer.source.clone(),
+                            destination: transfer.destination.clone(),
+                            expected_state: Vec::new(),
+                            crossed_devices: transfer.crossed_devices,
+                        });
+                    }
+                }
             }
             undone.reverse();
             // Every source is back, so the destinations are free again and

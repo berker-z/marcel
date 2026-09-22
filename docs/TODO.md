@@ -54,13 +54,21 @@ Small, and none of them blocks the tag.
 ## `0.2.0`
 
 - **Location.** `browsing_trash: bool` becomes a location: a local folder,
-  the Trash, a volume, or search results. Everything below needs it. The
-  whole line of work, volumes and network and search included, is specified
-  in [`sprints/0xx-every-place-a-file-lives.md`](sprints/0xx-every-place-a-file-lives.md).
+  the Trash, or search results. Volumes and network shares turned out not
+  to need it (a mount is a folder), so search is what forces it. The whole
+  line of work is specified in
+  [`sprints/0xx-every-place-a-file-lives.md`](sprints/0xx-every-place-a-file-lives.md).
 - **Removable volumes** through UDisks2 in the sidebar, and cross-filesystem
-  move as a verified copy plus a trash of the source, journalled as one
-  operation. Together they are the "Downloads to a USB stick" workflow that
-  Marcel refuses today.
+  move as a verified copy plus removal of the source, journalled as one
+  operation: done in Sprint 29 ([`sprints/029-drives.md`](sprints/029-drives.md)).
+  Left from it: a Windows partition that needs a password (an fstab line
+  with `x-gvfs-show` is the answer for now) and polling for FUSE mounts; the
+  "delete immediately?" fallback for a filesystem with no Trash landed in
+  Sprint 30.
+- **Network shares** through GVfs, with a Network section and a saved
+  `servers` file: done in Sprint 30 ([`sprints/030-network.md`](sprints/030-network.md)).
+  Left from it: polling for FUSE mounts (shared with `ntfs-3g` above),
+  browsing `smb://` and `network://`, and a password prompt seen live.
 - **Search.** Recursive find by name, riding `stream_directory`'s ticketed
   cancellation, shown as a location.
 - Create Link, the last greyed context-menu item.

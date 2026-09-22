@@ -248,6 +248,17 @@ fn ensure_trash_dir(trash_dir: &Path) {
     let _ = create_private_dir_all(trash_dir);
 }
 
+/// Why these paths cannot go to any Trash, if they cannot: the sentence
+/// `trash_paths` would fail them with, found before an operation starts so
+/// the window can offer a permanent delete instead. `None` when there is a
+/// Trash for every one of them, or when that cannot be told yet, in which
+/// case the operation itself reports.
+pub fn trash_unavailable_for(paths: &[PathBuf]) -> Option<String> {
+    ensure_home_trash();
+    let sites = home_trash_dir().and_then(|home_trash| TrashSites::discover(&home_trash).ok())?;
+    paths.iter().find_map(|path| sites.no_trash_reason(path))
+}
+
 pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
     ensure_home_trash();
     let trash_roots = match trash::os_limited::trash_folders() {
@@ -303,6 +314,13 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         };
         if let Some(refusal) = sites.crossing_refusal(path, &source) {
             failures.push(PathFailure::new(path, refusal));
+            continue;
+        }
+        if let Some(reason) = sites.no_trash_reason(path) {
+            failures.push(PathFailure::new(
+                path,
+                format!("Could not move “{}” to Trash: {reason}", path.display()),
+            ));
             continue;
         }
         let source_object = ObjectKey::of(&source);
@@ -449,6 +467,26 @@ impl TrashSites {
         topdir.join(format!(".Trash-{}", self.uid))
     }
 
+    /// Why `path` has no Trash to go to, if it has none: the directory the
+    /// crate would rename it into does not exist and cannot be made.
+    ///
+    /// Every GVfs share is one FUSE filesystem rooted at `/run/user/<uid>/gvfs`,
+    /// and that root is a listing of mounts that refuses a `mkdir`, so a file
+    /// on a share can never be trashed; a read-only stick is the other case.
+    /// Making the directory here is what the crate would do a moment later,
+    /// so a successful attempt changes nothing about what follows.
+    fn no_trash_reason(&self, path: &Path) -> Option<String> {
+        let trash = self.trash_for(path);
+        if trash.is_dir() {
+            return None;
+        }
+        // The OS error adds nothing a person can act on: ENOENT at a FUSE
+        // root and EROFS on a stick both mean the same thing here.
+        create_private_dir_all(&trash)
+            .err()
+            .map(|_| "no Trash exists on this filesystem and one cannot be created".to_string())
+    }
+
     /// Why `path` must not be handed to the crate, if its rename would cross
     /// a filesystem boundary. Worded the way a move refuses the same thing.
     fn crossing_refusal(&self, path: &Path, source: &fs::Metadata) -> Option<String> {
@@ -457,7 +495,7 @@ impl TrashSites {
         let trash_device = device_of_nearest_existing(&trash)?;
         (source.dev() != trash_device).then(|| {
             format!(
-                "Could not move “{}” to Trash: it is on a different filesystem from “{}”; cross-filesystem moves are not supported yet",
+                "Could not move “{}” to Trash: it is on a different filesystem from “{}”, and the Trash keeps the file itself, not a copy",
                 path.display(),
                 trash.display()
             )
@@ -1034,6 +1072,28 @@ mod tests {
         assert_eq!(sites.trash_for(&sandbox.path("disk/a.txt")), disk.join(".Trash/4242"));
     }
 
+    /// A mount whose top refuses a new directory has no Trash and cannot
+    /// get one; a GVfs share is the everyday case, and a read-only root
+    /// stands in for it here.
+    #[test]
+    fn a_mount_that_cannot_hold_a_trash_is_named_before_the_crate_is_called() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let sandbox = Sandbox::new();
+        let sites = sites(&sandbox, &["share"]);
+        let share = sandbox.path("share").canonicalize().unwrap();
+        fs::set_permissions(&share, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let reason = sites.no_trash_reason(&share.join("photo.jpg")).expect("must refuse");
+        assert!(reason.contains("cannot be created"), "{reason}");
+        assert!(!share.join(".Trash-4242").exists());
+
+        fs::set_permissions(&share, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(sites.no_trash_reason(&share.join("photo.jpg")), None);
+        assert!(share.join(".Trash-4242").is_dir(), "a Trash the mount allows is made on the spot");
+        assert_eq!(sites.no_trash_reason(&sandbox.path("home/report.pdf")), None);
+    }
+
     /// The deciding comparison is between devices, because a mount table
     /// cannot see every boundary a rename fails to cross. `/proc` is the one
     /// filesystem guaranteed to be another device than any writable one.
@@ -1054,7 +1114,6 @@ mod tests {
             TrashSites::new(PathBuf::from("/proc/marcel-test/Trash"), Vec::new(), 4242);
         let refusal = other_device.crossing_refusal(&source, &metadata).expect("must refuse");
         assert!(refusal.contains("different filesystem"), "{refusal}");
-        assert!(refusal.contains("cross-filesystem moves are not supported yet"), "{refusal}");
         assert_eq!(read(&source), b"payload", "a refusal touches nothing");
     }
 

@@ -13,6 +13,7 @@ use gpui_component::{
     input::Input,
     progress::Progress,
     resizable::{h_resizable, resizable_panel},
+    tooltip::Tooltip,
 };
 
 use crate::{browse::entries::format_size, names::display_path_name};
@@ -144,8 +145,20 @@ impl Marcel {
             cx,
         )
         .on_click(cx.listener(move |this, _, _, cx| this.set_view_mode(other_view, cx)));
+        // Hidden files: `.*`, the shell's name for them, lit while they show.
+        // Muted would say "disabled" in this row, where Back goes grey when
+        // there is nowhere to go, so the off state is the plain glyph and the
+        // on state keeps the fill a hover shows.
+        let show_hidden = self.directory.show_hidden;
+        let hidden_button = icon_button("show-hidden-button", ".*", true, cx)
+            .when(show_hidden, |button| button.bg(colors.sidebar_accent))
+            .tooltip(move |window, cx| {
+                Tooltip::new(if show_hidden { "Hide hidden files" } else { "Show hidden files" })
+                    .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.set_show_hidden(!show_hidden, cx)));
         let location_width =
-            (f32::from(window.bounds().size.width) - f32::from(sidebar_width) - 368.0).max(180.0);
+            (f32::from(window.bounds().size.width) - f32::from(sidebar_width) - 400.0).max(180.0);
         let max_breadcrumbs = ((location_width / 96.0).floor() as usize).clamp(3, 8);
         h_flex()
             .flex_none()
@@ -190,6 +203,7 @@ impl Marcel {
                     .child(self.render_location_bar(max_breadcrumbs, cx))
                     .child(sort_button)
                     .child(view_button)
+                    .child(hidden_button)
                     .child(
                         Input::new(&self.ui.search_input)
                             .small()
@@ -394,6 +408,8 @@ impl Render for Marcel {
         let pane_view = cx.entity();
         let entry_menu = self.render_entry_menu(window, cx);
         let bookmark_menu = self.render_bookmark_menu(window, cx);
+        let volume_menu = self.render_volume_menu(window, cx);
+        let network_menu = self.render_network_menu(window, cx);
         let picker_bar = self.render_picker_bar(cx);
         // gpui-component's Root stores dialog and notification state but
         // does not attach those layers in Root::render. Mount its public layer
@@ -462,6 +478,8 @@ impl Render for Marcel {
             .children(picker_bar)
             .children(entry_menu)
             .children(bookmark_menu)
+            .children(volume_menu)
+            .children(network_menu)
             .children(dialog_layer)
             .children(status_layer)
     }

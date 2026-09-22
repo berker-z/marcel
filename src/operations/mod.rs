@@ -948,22 +948,33 @@ impl OperationCoordinator {
                 {
                     return None;
                 }
+                // What a stick or a Windows partition could not hold is said
+                // once, whichever way the rest went; it is neither a failure
+                // nor something to hide in one.
+                let losses = outcome.describe_losses().map(|note| format!("; {note}"));
+                let losses = losses.as_deref().unwrap_or_default();
                 Some(if outcome.failures.is_empty() {
                     let skipped = match outcome.skipped.len() {
                         0 => String::new(),
                         count => format!(", skipped {count}"),
                     };
-                    Report::Success(format!(
-                        "{} {} item(s){skipped}{}",
+                    let summary = format!(
+                        "{} {} item(s){skipped}{}{losses}",
                         mode.done(),
                         outcome.completed.len(),
                         history_note(HistoryDirection::Undo, !outcome.undo_unavailable)
-                    ))
+                    );
+                    if outcome.losses.is_empty() {
+                        Report::Success(summary)
+                    } else {
+                        Report::Warning(summary)
+                    }
                 } else {
                     let mut message = outcome.summarize_failures();
                     if outcome.undo_unavailable {
                         message.push_str("; some completed items are not available to Undo");
                     }
+                    message.push_str(losses);
                     Report::Error(message)
                 })
             },

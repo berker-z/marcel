@@ -76,6 +76,31 @@ the folder is opened.
 If `~/.config/marcel/state.conf` cannot be read, Marcel says so when a window
 opens, runs on defaults, and never writes the unreadable file back.
 
+### Drives and network
+
+A Devices section in the sidebar lists what UDisks2 reports and Nautilus would
+show: sticks, cards, the Windows partition of a dual-boot machine. Clicking an
+unmounted drive mounts it and goes there; a removable one gets an eject button
+that unmounts it and powers it off. A move to another filesystem is a copy,
+a check of the copy, and a removal of the original, journalled as one
+operation, so it undoes as one. Metadata a FAT or NTFS destination cannot
+hold is dropped and reported once, and a symbolic link to a file arrives as
+the file. Trashing something on a drive uses that drive's own Trash; where
+no Trash can exist (a network share, a read-only stick) Marcel offers to
+delete permanently instead.
+
+A Network section connects shares through GVfs: Add… under it and the
+location bar take `sftp://`, `smb://`, `ftp://`, and `dav://` addresses, or
+a bare hostname for SFTP. Passwords and "trust this host?" are asked in
+Marcel's dialogs and answered to GVfs, which keeps them in the keyring if
+asked. A connected share is a folder under `/run/user/<uid>/gvfs/` and
+behaves like any other. Add to Network on a connected share saves it to
+`~/.config/marcel/servers`, one URI per line with an optional name, and saved
+servers stay in the sidebar whether or not they are connected. Without GVfs on
+the session bus there is no Network section; without UDisks2 on the system
+bus, no Devices section.
+
+
 ### Desktop integration
 
 Bilateral file drag and drop with other applications on Wayland. Registration
@@ -143,10 +168,9 @@ Marcel needs a window at least 900 pixels wide. Narrower than that its panes are
 wider than the window and the preview pane runs off the edge, so the window
 refuses to shrink below it on desktops that honour a minimum size.
 
-No search. Moves between filesystems are refused rather than silently turned
-into a copy and a delete, and so is moving an item to a Trash on another
-filesystem, since the copy would lose its extended attributes and its undo. No removable volumes or remote locations. The file
-clipboard is Marcel's own, so Ctrl+C here followed by Ctrl+V in another
-application does nothing; drag and drop is the way across. Undo history lasts
-for the session. Dragging files out of Marcel is not implemented on X11. The
+No search. A folder on a network share, or on an `ntfs-3g` mount, does not
+update as it changes, since inotify does not reach through FUSE; Refresh does.
+The file clipboard is Marcel's own, so Ctrl+C here followed by Ctrl+V in
+another application does nothing; drag and drop is the way across. Undo
+history lasts for the session. Dragging files out of Marcel is not implemented on X11. The
 full list is in the README.

@@ -11,8 +11,8 @@
 //! - [`desktop`] is everything outside the process: the bus, the portal,
 //!   launches, other applications, icon themes.
 //! - [`window`], [`surface`], [`theme`], [`fonts`], [`config`], [`names`]
-//!   and [`bookmarks`] are the small application-wide services the rest lean
-//!   on.
+//!   [`bookmarks`], [`volumes`], and [`network`] are the small
+//!   application-wide services the rest lean on.
 //!
 //! Only what `main.rs` starts up or drives from the bus is `pub`; the rest is
 //! crate-private so that an item nothing uses any more is a warning, not a
@@ -32,10 +32,12 @@ pub mod desktop;
 pub mod fonts;
 pub(crate) mod fsops;
 pub(crate) mod names;
+pub(crate) mod network;
 pub mod operations;
 pub(crate) mod preview;
 pub mod surface;
 pub mod theme;
+pub(crate) mod volumes;
 pub mod window;
 
 #[cfg(test)]

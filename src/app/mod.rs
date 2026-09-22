@@ -31,6 +31,7 @@ mod location;
 mod media_pane;
 mod menu;
 mod navigation;
+mod network;
 mod picker;
 mod pointer;
 mod preview;
@@ -52,8 +53,10 @@ use crate::{
     bookmarks::BookmarkStore,
     browse::{directory_session::DirectorySession, entries::FileEntry, history::NavigationHistory},
     config::{self, BrowserState},
+    network::NetworkStore,
     operations::{OperationCoordinator, OperationEvent},
     surface::{self, Report},
+    volumes::VolumeStore,
 };
 
 pub use actions::init_key_bindings;
@@ -84,7 +87,11 @@ pub struct Marcel {
     /// The user's bookmarks, shared so that two windows cannot write stale
     /// lists over each other.
     pub(crate) bookmarks: Entity<BookmarkStore>,
-    _shared: [Subscription; 3],
+    /// The drives UDisks2 reports, one list for every window.
+    pub(crate) volumes: Entity<VolumeStore>,
+    /// Saved servers and the shares GVfs has connected, likewise shared.
+    pub(crate) network: Entity<NetworkStore>,
+    _shared: [Subscription; 5],
     pub(crate) drag: DragState,
     pub(crate) preview: PreviewState,
     pub(crate) ui: UiState,
@@ -151,9 +158,13 @@ impl Marcel {
         // redraws here.
         let operations = crate::operations::global(cx);
         let bookmarks = crate::bookmarks::global(&home_dir, cx);
+        let volumes = crate::volumes::global(&home_dir, cx);
+        let network = crate::network::global(&home_dir, cx);
         let shared = [
             cx.observe(&operations, |_, _, cx| cx.notify()),
             cx.observe(&bookmarks, |_, _, cx| cx.notify()),
+            cx.observe(&volumes, |_, _, cx| cx.notify()),
+            cx.observe(&network, |_, _, cx| cx.notify()),
             cx.subscribe_in(&operations, window, |this, _, event: &OperationEvent, window, cx| {
                 this.on_operation_event(event, window, cx);
             }),
@@ -165,6 +176,8 @@ impl Marcel {
             directory,
             operations,
             bookmarks,
+            volumes,
+            network,
             _shared: shared,
             drag: DragState::default(),
             preview: PreviewState::new(mono_font_size),

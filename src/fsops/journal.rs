@@ -263,7 +263,12 @@ impl SnapshotKind {
 pub struct MoveRecord {
     pub(super) source: PathBuf,
     pub(super) destination: PathBuf,
+    /// The tree at `destination`, which is what undo validates and takes back.
     pub(super) expected_state: Vec<PathSnapshot>,
+    /// Whether the move was a copy and a removal rather than a rename. Undo
+    /// then has to copy back rather than rename back, which costs what the
+    /// move cost and cannot be rolled back with a rename either.
+    pub(super) crossed_devices: bool,
 }
 
 /// The outcome of a mutation that has already committed to the filesystem.

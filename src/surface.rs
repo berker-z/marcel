@@ -15,6 +15,8 @@ use gpui_component::{WindowExt as _, notification::Notification};
 /// What background work has to say, for whichever window ends up saying it.
 pub enum Report {
     Success(String),
+    /// The work was done, and something about it deserves a second look.
+    Warning(String),
     Error(String),
 }
 
@@ -22,6 +24,7 @@ impl Report {
     pub fn show(self, window: &mut Window, cx: &mut App) {
         match self {
             Self::Success(message) => window.push_notification(Notification::success(message), cx),
+            Self::Warning(message) => window.push_notification(Notification::warning(message), cx),
             Self::Error(message) => window.push_notification(Notification::error(message), cx),
         }
     }

@@ -86,13 +86,69 @@ impl Marcel {
         );
     }
 
+    /// Move the selection to the Trash, or, where there is no Trash to move
+    /// it to (a network share, a read-only stick), offer to delete it for
+    /// good instead, which is what Nautilus asks in the same spot.
+    ///
+    /// The check reads the mount table and touches the filesystem, and on a
+    /// stalled share that can hang, so it runs off the foreground like the
+    /// operation it precedes.
     pub(super) fn start_trash_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
         }
         self.ui.entry_menu = None;
-        self.with_operations(window, cx, |ops, origin, cx| ops.start_trash(paths, origin, cx));
+        let checked = paths.clone();
+        let check = unblock(cx, move || crate::fsops::trash::trash_unavailable_for(&checked));
+        cx.spawn_in(window, async move |this, window| {
+            let unavailable = check.await;
+            let _ = this.update_in(window, |this, window, cx| match unavailable {
+                None => this.with_operations(window, cx, |ops, origin, cx| {
+                    ops.start_trash(paths, origin, cx);
+                }),
+                Some(reason) => this.offer_permanent_delete_instead(paths, reason, window, cx),
+            });
+        })
+        .detach();
+    }
+
+    fn offer_permanent_delete_instead(
+        &mut self,
+        paths: Vec<PathBuf>,
+        reason: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let subject = match paths.as_slice() {
+            [only] => format!("“{}” cannot", display_path_name(only)),
+            _ => format!("These {} items cannot", paths.len()),
+        };
+        self.confirm(
+            window,
+            cx,
+            Confirm {
+                title: "No Trash Here",
+                description: format!(
+                    "{subject} be moved to the Trash: {reason}. Delete permanently instead?"
+                ),
+                note: Some("This action cannot be undone.".to_string()),
+                action: "Delete Permanently",
+                danger: true,
+            },
+            move |this, window, cx| {
+                let paths = paths.clone();
+                this.with_operations(window, cx, |ops, origin, cx| {
+                    ops.start_permanent_delete(
+                        paths,
+                        None,
+                        OperationProgressKind::Delete,
+                        origin,
+                        cx,
+                    );
+                });
+            },
+        );
     }
 
     /// The Trash records behind the selection, in visible order.

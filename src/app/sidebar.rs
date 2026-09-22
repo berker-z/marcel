@@ -1,4 +1,5 @@
-//! The places and bookmarks column, and what lands on it.
+//! The places, devices, and bookmarks column, and what lands on it. The
+//! Network section between them is in `network.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -7,16 +8,14 @@ use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, Div, Hsla, IntoElement, MouseButton,
     MouseDownEvent, ObjectFit, Pixels, Stateful, TextRun, Window, div, font, img, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, notification::Notification,
-    switch::Switch,
-};
+use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, notification::Notification};
 
 use crate::{
     bookmarks::Bookmark,
     desktop::{
         icons::IconProvider,
         places::{Place, discover as discover_places},
+        volumes::Volume,
     },
 };
 
@@ -25,16 +24,16 @@ use super::{
     menu::{clamp_to_window, menu_row, popover},
     navigation::unblock,
     pointer::{BookmarkDrag, FileDrag, accept_file_drops, painted_bounds},
-    state::BookmarkMenu,
+    state::{BookmarkMenu, VolumeMenu},
 };
 
 const MIN_PLACES_WIDTH: f32 = 176.0;
 const MAX_PLACES_WIDTH: f32 = 320.0;
-const BOOKMARK_MENU_WIDTH: f32 = 152.0;
-const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
+pub(super) const BOOKMARK_MENU_WIDTH: f32 = 152.0;
+pub(super) const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
 
 /// A sidebar entry's icon: the themed image, or a marker.
-fn sidebar_icon(icon: Option<PathBuf>, fallback_color: Hsla) -> AnyElement {
+pub(super) fn sidebar_icon(icon: Option<PathBuf>, fallback_color: Hsla) -> AnyElement {
     match icon {
         Some(path) => img(path).size(px(20.0)).object_fit(ObjectFit::Contain).into_any_element(),
         None => div().w(px(20.0)).text_color(fallback_color).child("▸").into_any_element(),
@@ -184,7 +183,7 @@ impl Marcel {
 
     /// The shared row: a place or a bookmark, highlighted when it is where
     /// the window is, and accepting dropped files.
-    fn sidebar_row(
+    pub(super) fn sidebar_row(
         &self,
         id: (&'static str, usize),
         path: &Path,
@@ -286,6 +285,8 @@ impl Marcel {
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             this.ui.entry_menu = None;
+                            this.sidebar.volume_menu = None;
+                            this.sidebar.network_menu = None;
                             this.sidebar.bookmark_menu = Some(BookmarkMenu {
                                 index,
                                 path: menu_path.clone(),
@@ -310,6 +311,171 @@ impl Marcel {
                     })),
             )
             .into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // Devices: the drives UDisks2 reports.
+
+    /// Open a volume: navigate to it if it is mounted, otherwise mount it
+    /// and navigate when the mount returns.
+    fn open_volume(&mut self, volume: Volume, window: &Window, cx: &mut Context<Self>) {
+        let origin = Self::origin(window);
+        let view = cx.entity();
+        self.volumes.update(cx, |store, cx| {
+            store.mount(
+                volume,
+                origin,
+                move |mount_point, cx| {
+                    view.update(cx, |this, cx| this.navigate_to(mount_point, true, cx));
+                },
+                cx,
+            );
+        });
+    }
+
+    /// Leave a volume before it goes away: a window standing on the mount
+    /// point would otherwise be left in a directory that no longer exists.
+    fn leave_volume(&mut self, volume: &Volume, cx: &mut Context<Self>) {
+        if let Some(mount_point) = &volume.mount_point
+            && self.directory.current_dir.starts_with(mount_point)
+        {
+            self.navigate_to(self.home_dir.clone(), true, cx);
+        }
+    }
+
+    fn unmount_volume(&mut self, volume: Volume, window: &Window, cx: &mut Context<Self>) {
+        self.leave_volume(&volume, cx);
+        let origin = Self::origin(window);
+        self.volumes.update(cx, |store, cx| store.unmount(volume, origin, cx));
+    }
+
+    fn eject_volume(&mut self, volume: Volume, window: &Window, cx: &mut Context<Self>) {
+        self.leave_volume(&volume, cx);
+        let origin = Self::origin(window);
+        self.volumes.update(cx, |store, cx| store.eject(volume, origin, cx));
+    }
+
+    fn render_volume(&self, index: usize, volume: Volume, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors;
+        let store = self.volumes.read(cx);
+        let active = !self.sidebar.browsing_trash
+            && store.volume_containing(&self.directory.current_dir).map(|v| &v.device)
+                == Some(&volume.device);
+        let busy = store.is_busy(&volume);
+        let icon = sidebar_icon(store.icon(&volume).map(Path::to_path_buf), colors.primary);
+        let mount_point = volume.mount_point.clone();
+        let device = volume.device.clone();
+        let eject_volume = volume.clone();
+        let open_volume = volume.clone();
+        let place_drop_bounds = self.sidebar.place_drop_bounds.clone();
+        // A mounted volume is a folder, so it takes drops like a place. An
+        // unmounted one has nowhere to put them.
+        let row = match &mount_point {
+            Some(point) => self.sidebar_row(("volume", index), point, active, true, cx),
+            None => self
+                .sidebar_row(("volume", index), &volume.device, active, false, cx)
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if !event.is_right_click() {
+                        this.open_volume(open_volume.clone(), window, cx);
+                    }
+                })),
+        };
+        row.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.ui.entry_menu = None;
+                this.sidebar.bookmark_menu = None;
+                this.sidebar.network_menu = None;
+                this.sidebar.volume_menu =
+                    Some(VolumeMenu { device: device.clone(), position: event.position });
+                cx.notify();
+            }),
+        )
+        .child(icon)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_base()
+                .when(!volume.is_mounted(), |this| this.text_color(colors.muted_foreground))
+                .child(volume.name.clone()),
+        )
+        .when(busy, |this| {
+            this.child(div().text_xs().text_color(colors.muted_foreground).child("…"))
+        })
+        .when(!busy && volume.is_mounted() && volume.can_eject(), |this| {
+            this.child(
+                div()
+                    .id(("volume-eject", index))
+                    .flex_none()
+                    .px_1()
+                    .rounded(cx.theme().radius)
+                    .text_color(colors.muted_foreground)
+                    .hover(|this| this.text_color(colors.sidebar_accent_foreground))
+                    .cursor_pointer()
+                    .child("⏏")
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if !event.is_right_click() {
+                            this.eject_volume(eject_volume.clone(), window, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+        })
+        .when(mount_point.is_some(), |this| {
+            let point = mount_point.clone().unwrap_or_default();
+            this.child(painted_bounds(move |bounds| {
+                place_drop_bounds.borrow_mut().insert(point.clone(), bounds);
+            }))
+        })
+        .into_any_element()
+    }
+
+    pub(super) fn render_volume_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.sidebar.volume_menu.clone()?;
+        // UDisks2 re-reads the list on every change, so the menu names a
+        // device and looks it up again rather than trusting an index.
+        let volume =
+            self.volumes.read(cx).volumes().iter().find(|v| v.device == menu.device)?.clone();
+        if !volume.is_mounted() && !volume.can_eject() {
+            return None;
+        }
+        let rows = usize::from(volume.is_mounted()) + usize::from(volume.can_eject());
+        let height = BOOKMARK_MENU_HEIGHT + 30.0 * (rows as f32 - 1.0);
+        let (left, top) = clamp_to_window(menu.position, (BOOKMARK_MENU_WIDTH, height), window);
+        let unmount = volume.clone();
+        let eject = volume.clone();
+        Some(
+            popover("volume-context-menu", left, top, BOOKMARK_MENU_WIDTH, cx)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.sidebar.volume_menu = None;
+                    cx.notify();
+                }))
+                .when(volume.is_mounted(), |this| {
+                    this.child(menu_row(("volume-menu-unmount", 0), "Unmount", true, cx).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.sidebar.volume_menu = None;
+                            this.unmount_volume(unmount.clone(), window, cx);
+                        }),
+                    ))
+                })
+                .when(volume.can_eject(), |this| {
+                    this.child(menu_row(("volume-menu-eject", 1), "Eject", true, cx).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.sidebar.volume_menu = None;
+                            this.eject_volume(eject.clone(), window, cx);
+                        }),
+                    ))
+                })
+                .into_any_element(),
+        )
     }
 
     /// Wide enough for the widest place label in the current font.
@@ -342,9 +508,11 @@ impl Marcel {
             })
             .map(f32::from)
             .fold(0.0, f32::max);
-        // Outer padding + row padding + themed icon + gap. Footer controls need
-        // approximately the same remaining width as a place icon.
-        px((max_text_width + 76.0).clamp(MIN_PLACES_WIDTH, MAX_PLACES_WIDTH))
+        // Outer padding + row padding + themed icon + gap, and a few pixels
+        // over because rows draw at `text_base`, which the measure above may
+        // round under. Footer controls need approximately the same remaining
+        // width as a place icon.
+        px((max_text_width + 84.0).clamp(MIN_PLACES_WIDTH, MAX_PLACES_WIDTH))
     }
 
     pub(super) fn render_sidebar(&mut self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
@@ -375,33 +543,51 @@ impl Marcel {
             .enumerate()
             .map(|(index, bookmark)| self.render_bookmark(index, bookmark, cx))
             .collect::<Vec<_>>();
+        // No UDisks2, no section: the sidebar says nothing about drives it
+        // cannot see rather than showing an empty heading.
+        let devices = self.volumes.read(cx).available().then(|| {
+            self.volumes
+                .read(cx)
+                .volumes()
+                .to_vec()
+                .into_iter()
+                .enumerate()
+                .map(|(index, volume)| self.render_volume(index, volume, cx))
+                .collect::<Vec<_>>()
+        });
+        // Likewise no GVfs, no Network section.
+        let network = self.render_network_rows(cx);
         let final_insertion = self.sidebar.bookmark_insertion == Some(bookmarks.len());
         let bookmark_region_bounds = self.sidebar.bookmark_region_bounds.clone();
 
-        let hidden_switch = Switch::new("show-hidden-files")
-            .small()
-            .label("Show Hidden")
-            .checked(self.directory.show_hidden)
-            .tooltip("Show files whose names begin with a dot")
-            .on_click(cx.listener(|this, checked, _, cx| this.set_show_hidden(*checked, cx)));
         let settings_button = super::chrome::icon_button("open-settings", "⚙", true, cx)
             .on_click(cx.listener(|this, _, window, cx| this.open_settings_dialog(window, cx)));
 
-        div()
+        // Everything above the footer scrolls as one column: in a short
+        // window the sections used to run on under the footer, and the gear
+        // painted over whichever bookmark was unlucky enough to be there.
+        let sections = div()
+            .id("sidebar-sections")
             .flex()
             .flex_col()
-            .flex_none()
-            .w(width)
-            .h_full()
-            .p_4()
+            .flex_1()
+            .min_h_0()
             .gap_2()
-            .bg(colors.sidebar)
-            .border_r_1()
-            .border_color(colors.sidebar_border)
-            .text_color(colors.sidebar_foreground)
+            .overflow_y_scroll()
             .child(div().text_sm().text_color(colors.muted_foreground).child("Places"))
             .children(places)
             .when(self.sidebar.places_loading, |this| this.child(muted("Finding places…")))
+            .when_some(devices, |this, devices| {
+                this.child(div().h(px(1.0)).my_1().bg(colors.sidebar_border))
+                    .child(div().text_sm().text_color(colors.muted_foreground).child("Devices"))
+                    .when(devices.is_empty(), |this| this.child(muted("No drives")))
+                    .children(devices)
+            })
+            .when_some(network, |this, rows| {
+                this.child(div().h(px(1.0)).my_1().bg(colors.sidebar_border))
+                    .child(div().text_sm().text_color(colors.muted_foreground).child("Network"))
+                    .children(rows)
+            })
             .child(div().h(px(1.0)).my_1().bg(colors.sidebar_border))
             .child(
                 div()
@@ -465,8 +651,22 @@ impl Marcel {
                     .child(insertion_marker(final_insertion, &colors))
                     .child(div().flex_1())
                     .child(painted_bounds(move |bounds| bookmark_region_bounds.set(Some(bounds)))),
-            )
-            .child(h_flex().w_full().justify_between().child(hidden_switch).child(settings_button))
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(width)
+            .h_full()
+            .p_4()
+            .gap_2()
+            .bg(colors.sidebar)
+            .border_r_1()
+            .border_color(colors.sidebar_border)
+            .text_color(colors.sidebar_foreground)
+            .child(sections)
+            .child(h_flex().w_full().justify_end().child(settings_button))
             .into_any_element()
     }
 }

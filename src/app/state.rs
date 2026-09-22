@@ -18,6 +18,7 @@ use gpui_component::{input::InputState, select::SelectState};
 use crate::{
     config::{BrowserState, BrowserView},
     desktop::{
+        gvfs::{Location, MountSpec},
         picker::{FileFilter, PickerMode, PickerRequest, PickerResponse},
         places::Place,
     },
@@ -219,6 +220,31 @@ impl DragState {
     }
 }
 
+/// The context menu on a drive: Unmount, and Eject for a removable one.
+#[derive(Clone, Debug)]
+pub struct VolumeMenu {
+    /// The device node, which is the stable name for a drive across the
+    /// re-reads that follow every UDisks2 change.
+    pub device: PathBuf,
+    pub position: Point<Pixels>,
+}
+
+/// What a Network row stands for, which is what its context menu acts on.
+#[derive(Clone, Debug)]
+pub enum NetworkTarget {
+    /// A saved server, by slot and by identity, re-verified on a click the
+    /// way bookmarks are.
+    Server { index: usize, location: Location },
+    /// A share connected by hand or by another application.
+    Mount(MountSpec),
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkMenu {
+    pub target: NetworkTarget,
+    pub position: Point<Pixels>,
+}
+
 #[derive(Clone)]
 pub struct BookmarkMenu {
     pub index: usize,
@@ -242,6 +268,8 @@ pub struct SidebarState {
     /// The slot a dragged bookmark would land in, while one is over the list.
     pub bookmark_insertion: Option<usize>,
     pub bookmark_menu: Option<BookmarkMenu>,
+    pub volume_menu: Option<VolumeMenu>,
+    pub network_menu: Option<NetworkMenu>,
     pub bookmark_region_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub bookmark_row_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     pub place_drop_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
@@ -259,6 +287,8 @@ impl SidebarState {
             unreadable_trash_entries: 0,
             bookmark_insertion: None,
             bookmark_menu: None,
+            volume_menu: None,
+            network_menu: None,
             bookmark_region_bounds: Rc::new(Cell::new(None)),
             bookmark_row_bounds: Rc::new(RefCell::new(HashMap::new())),
             place_drop_bounds: Rc::new(RefCell::new(HashMap::new())),

@@ -45,6 +45,36 @@ pub(super) fn breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
     crumbs
 }
 
+/// Whether typed text is a URI for something GVfs mounts rather than a path
+/// or a `file:` URI: a scheme, then `://`, and not `file`.
+pub(super) fn is_network_uri(value: &str) -> bool {
+    let value = value.trim();
+    value.split_once("://").is_some_and(|(scheme, _)| {
+        !scheme.is_empty()
+            && !scheme.eq_ignore_ascii_case("file")
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// Crumbs that start at `root`, labelled `label`, and continue with the
+/// segments of `path` below it.
+pub(super) fn breadcrumbs_from(root: &Path, label: String, path: &Path) -> Vec<Breadcrumb> {
+    let mut crumbs = vec![Breadcrumb { label, path: Some(root.to_path_buf()) }];
+    let mut current = root.to_path_buf();
+    if let Ok(rest) = path.strip_prefix(root) {
+        for component in rest.components() {
+            if let std::path::Component::Normal(name) = component {
+                current.push(name);
+                crumbs.push(Breadcrumb {
+                    label: name.to_string_lossy().into_owned(),
+                    path: Some(current.clone()),
+                });
+            }
+        }
+    }
+    crumbs
+}
+
 /// Keep the root and the deepest segments, eliding the middle.
 pub(super) fn compact(crumbs: Vec<Breadcrumb>, max_items: usize) -> Vec<Breadcrumb> {
     if crumbs.len() <= max_items || max_items < 3 {
@@ -158,7 +188,7 @@ impl Marcel {
         let crumbs = if self.sidebar.browsing_trash {
             vec![Breadcrumb { label: "Trash".to_string(), path: None }]
         } else {
-            compact(breadcrumbs(&self.directory.current_dir), max_breadcrumbs)
+            compact(self.mounted_breadcrumbs(cx), max_breadcrumbs)
         };
         let (go_to, edit) = (cx.weak_entity(), cx.weak_entity());
         crumb_bar(
@@ -175,6 +205,28 @@ impl Marcel {
         .flex_1()
         .px_3()
         .into_any_element()
+    }
+
+    /// The crumbs for the current directory, starting at the drive or share
+    /// it is on when it is on one: "wired / home / me" rather than the eight
+    /// segments of the FUSE path, which is a place nobody chose.
+    fn mounted_breadcrumbs(&self, cx: &Context<Self>) -> Vec<Breadcrumb> {
+        let current = &self.directory.current_dir;
+        let root = self
+            .network
+            .read(cx)
+            .mount_containing(current)
+            .and_then(|mount| Some((mount.name.clone(), mount.fuse_root.clone()?)))
+            .or_else(|| {
+                self.volumes
+                    .read(cx)
+                    .volume_containing(current)
+                    .and_then(|volume| Some((volume.name.clone(), volume.mount_point.clone()?)))
+            });
+        match root {
+            Some((label, root)) => breadcrumbs_from(&root, label, current),
+            None => breadcrumbs(current),
+        }
     }
 
     pub(super) fn on_location_input_event(
@@ -242,6 +294,23 @@ impl Marcel {
             return;
         }
         let value = input.read(cx).value().to_string();
+        // A server address connects rather than resolves: `sftp://wired/` is
+        // not a path until GVfs has mounted it. Only a URI counts; a bare
+        // word here is a folder name, not a host.
+        if is_network_uri(&value) {
+            match self.connect_to_address(&value, window, cx) {
+                Ok(()) => {
+                    self.ui.location.end();
+                    self.focus_browser(window, cx);
+                }
+                Err(error) => {
+                    self.ui.location.error = Some(error.clone());
+                    window.push_notification(Notification::error(error), cx);
+                }
+            }
+            cx.notify();
+            return;
+        }
         let current_dir = self.directory.current_dir.clone();
         let home_dir = self.home_dir.clone();
         let ticket = self.ui.location.bump();
@@ -300,6 +369,34 @@ mod tests {
                 crumb("marcel", "/home/test/Projects/marcel"),
             ]
         );
+    }
+
+    #[test]
+    fn mounted_breadcrumbs_start_at_the_mount() {
+        let root = Path::new("/run/user/1000/gvfs/sftp:host=wired");
+        assert_eq!(
+            breadcrumbs_from(root, "wired".into(), &root.join("home/me")),
+            vec![
+                crumb("wired", "/run/user/1000/gvfs/sftp:host=wired"),
+                crumb("home", "/run/user/1000/gvfs/sftp:host=wired/home"),
+                crumb("me", "/run/user/1000/gvfs/sftp:host=wired/home/me"),
+            ]
+        );
+        assert_eq!(
+            breadcrumbs_from(root, "wired".into(), root),
+            vec![crumb("wired", root.to_str().unwrap())]
+        );
+    }
+
+    #[test]
+    fn only_non_file_uris_are_server_addresses() {
+        assert!(is_network_uri("sftp://wired/"));
+        assert!(is_network_uri("  smb://nas/media "));
+        assert!(is_network_uri("davs+sd://x/"));
+        assert!(!is_network_uri("file:///tmp"));
+        assert!(!is_network_uri("wired"), "a bare word is a folder name here");
+        assert!(!is_network_uri("/home/me/notes://odd"), "a path with a colon is still a path");
+        assert!(!is_network_uri("://x"));
     }
 
     #[test]

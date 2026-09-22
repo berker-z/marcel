@@ -1551,17 +1551,20 @@ fn copy_applies_modes_that_forbid_reading_the_copy_back_after_its_times() {
     dropbox_handle.set_times(times).unwrap();
     fs::set_permissions(&dropbox, fs::Permissions::from_mode(0o300)).unwrap();
 
+    let mut losses = std::collections::BTreeSet::new();
     let lock_result = preserve_metadata(
         &locked_handle,
         &locked,
         &copied_lock,
         &fs::symlink_metadata(&locked).unwrap(),
+        &mut losses,
     );
     let dropbox_result = preserve_metadata(
         &dropbox_handle,
         &dropbox,
         &copied_dropbox,
         &fs::symlink_metadata(&dropbox).unwrap(),
+        &mut losses,
     );
 
     // An unlistable folder cannot be torn down with the sandbox, so record
@@ -1574,6 +1577,7 @@ fn copy_applies_modes_that_forbid_reading_the_copy_back_after_its_times() {
 
     lock_result.unwrap();
     dropbox_result.unwrap();
+    assert!(losses.is_empty(), "{losses:?}");
     assert_eq!(lock_metadata.permissions().mode() & 0o7777, 0o000);
     assert_eq!(lock_metadata.modified().unwrap(), modified);
     assert_eq!(dropbox_metadata.permissions().mode() & 0o7777, 0o300);
@@ -2101,4 +2105,282 @@ fn a_replacement_whose_move_lost_its_undo_is_released_rather_than_recorded() {
     assert_eq!(read(&note), b"note", "the recorded move is taken back");
     assert!(replaced.is_dir(), "the unrecorded move stands");
     assert!(no_working_names(&destination), "undo must leave no remnants");
+}
+
+// ---------------------------------------------------------------------------
+// Moves that cross a filesystem boundary: a copy, a check, then the source
+// goes. The boundary itself is injected at the rename, because a second
+// filesystem needs root to mount; `/dev/shm` is used for the real thing when
+// it is writable.
+
+/// A small tree with a file, a nested file, and an empty folder.
+fn sample_tree(sandbox: &Sandbox, root: &str) -> PathBuf {
+    sandbox.file(&format!("{root}/notes.txt"), b"notes");
+    sandbox.file(&format!("{root}/deep/inner.bin"), b"inner bytes");
+    sandbox.dir(&format!("{root}/empty"));
+    sandbox.path(root)
+}
+
+fn assert_sample_tree(root: &Path) {
+    assert_eq!(read(root.join("notes.txt")), b"notes");
+    assert_eq!(read(root.join("deep/inner.bin")), b"inner bytes");
+    assert!(root.join("empty").is_dir());
+}
+
+#[test]
+fn a_move_across_devices_copies_the_tree_then_removes_the_source() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let destination = sandbox.dir("stick");
+    fault::cross_devices_once("project");
+
+    let outcome = mv(std::slice::from_ref(&source), &destination);
+    assert_clean(&outcome);
+    assert_eq!(outcome.completed.len(), 1);
+    assert!(!source.exists(), "the source is removed once the copy is verified");
+    assert_sample_tree(&destination.join("project"));
+    assert!(sandbox.names("home").is_empty(), "no quarantine remnant is left beside the source");
+    assert!(!outcome.undo_unavailable);
+    assert_eq!(
+        outcome.operation.as_ref().unwrap().forward_directory_changes(),
+        DirectoryChanges { removed: vec![source], upserted: vec![destination.join("project")] }
+    );
+}
+
+#[test]
+fn undo_of_a_move_across_devices_copies_it_back_and_redo_moves_it_again() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let destination = sandbox.dir("stick");
+    fault::cross_devices_once("project");
+    let operation = mv(std::slice::from_ref(&source), &destination).operation.unwrap();
+
+    let redo_record = recorded(undo_operation(&operation).unwrap());
+    assert_sample_tree(&source);
+    assert!(!destination.join("project").exists(), "undo removes the copy it took back");
+
+    // The tree at the source is new objects, so the redo record has to
+    // describe them, not the ones the first move left behind.
+    let redone = recorded(redo_operation(&redo_record).unwrap());
+    assert_sample_tree(redone.path());
+    assert!(!source.exists());
+}
+
+#[test]
+fn undo_of_a_move_across_devices_refuses_a_changed_destination_without_touching_it() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let destination = sandbox.dir("stick");
+    fault::cross_devices_once("project");
+    let operation = mv(std::slice::from_ref(&source), &destination).operation.unwrap();
+    fs::write(destination.join("project/notes.txt"), b"edited on the stick").unwrap();
+
+    let outcome = undo_operation(&operation);
+    assert!(outcome.keeps_history(), "nothing was committed, so the record survives");
+    assert!(!source.exists());
+    assert_eq!(read(destination.join("project/notes.txt")), b"edited on the stick");
+}
+
+#[test]
+fn cancelling_after_the_copy_keeps_both_copies_and_says_so() {
+    let sandbox = Sandbox::new();
+    // An empty folder: the walk visits one entry, so a cancel raised while it
+    // is inspected lands after the copy is published and before the source
+    // is removed, which is the only window this test is about.
+    let source = sandbox.dir("home/empty");
+    let destination = sandbox.dir("stick");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let raise = Arc::clone(&cancelled);
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |_| {
+        raise.store(true, std::sync::atomic::Ordering::Release);
+    });
+    fault::cross_devices_once("empty");
+
+    let outcome =
+        transfer_paths(std::slice::from_ref(&source), &destination, TransferMode::Move, cancelled);
+    assert_eq!(outcome.completed.len(), 0);
+    assert_eq!(outcome.failures.len(), 1, "{:?}", outcome.failures);
+    assert!(
+        outcome.failures[0].message.contains("both copies were kept"),
+        "{:?}",
+        outcome.failures
+    );
+    assert!(source.is_dir());
+    assert!(destination.join("empty").is_dir());
+}
+
+#[test]
+fn a_copy_that_does_not_match_its_source_is_refused_by_the_check() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "source");
+    let copy = sample_tree(&sandbox, "copy");
+    verify_copied_tree(&source, &copy).unwrap();
+
+    fs::write(copy.join("notes.txt"), b"not").unwrap();
+    let short = verify_copied_tree(&source, &copy).unwrap_err().to_string();
+    assert!(short.contains("3 bytes where the source is 5"), "{short}");
+
+    fs::write(copy.join("notes.txt"), b"notes").unwrap();
+    fs::remove_file(copy.join("deep/inner.bin")).unwrap();
+    let missing = verify_copied_tree(&source, &copy).unwrap_err().to_string();
+    assert!(missing.contains("is missing"), "{missing}");
+
+    // A link the destination could not hold is either the file it pointed
+    // at or absent; both are what the copier said it would do.
+    fs::write(copy.join("deep/inner.bin"), b"inner bytes").unwrap();
+    std::os::unix::fs::symlink("notes.txt", source.join("alias")).unwrap();
+    verify_copied_tree(&source, &copy).unwrap();
+    fs::write(copy.join("alias"), b"notes").unwrap();
+    verify_copied_tree(&source, &copy).unwrap();
+}
+
+/// The same move against a real second filesystem, when there is one to use.
+/// `/dev/shm` is tmpfs on every Linux desktop; a sandbox that cannot write
+/// there skips this, and the injected boundary above covers the logic.
+/// `MARCEL_TEST_OTHER_FS=/run/media/me/STICK` points it at a real stick
+/// instead, which is how the FAT behaviour was checked by hand.
+#[test]
+fn a_move_onto_a_real_second_filesystem_crosses_devices() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let sandbox = Sandbox::new();
+    let root = std::env::var_os("MARCEL_TEST_OTHER_FS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/dev/shm"));
+    let other = root.join(format!("marcel-test-{}", std::process::id()));
+    if fs::create_dir(&other).is_err() {
+        eprintln!("skipping: {} is not writable here", root.display());
+        return;
+    }
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(other.clone());
+    if fs::metadata(&other).unwrap().dev() == fs::metadata(sandbox.root()).unwrap().dev() {
+        eprintln!("skipping: {} is on the same device as the sandbox", root.display());
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let source = sample_tree(&sandbox, "home/project");
+    let script = sandbox.file("home/project/run.sh", b"#!/bin/sh\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink("notes.txt", source.join("alias")).unwrap();
+
+    let outcome = mv(std::slice::from_ref(&source), &other);
+    assert_clean(&outcome);
+    assert!(!source.exists());
+    let moved = other.join("project");
+    assert_sample_tree(&moved);
+    // tmpfs keeps everything; FAT keeps neither the mode nor the link, and
+    // the outcome says so. Either way the file the link named is there.
+    let alias = fs::symlink_metadata(moved.join("alias")).unwrap();
+    match outcome.describe_losses() {
+        Some(note) => {
+            eprintln!("note: {note}");
+            assert!(note.contains("permissions") || note.contains("links"), "{note}");
+            assert!(alias.is_file() || alias.is_symlink());
+        }
+        None => {
+            assert!(alias.is_symlink());
+            let mode = fs::metadata(moved.join("run.sh")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+    assert_eq!(read(moved.join("alias")), b"notes");
+
+    let redo_record = recorded(undo_operation(&outcome.operation.unwrap()).unwrap());
+    assert_sample_tree(&source);
+    assert!(!other.join("project").exists());
+    recorded(redo_operation(&redo_record).unwrap());
+    assert_sample_tree(&other.join("project"));
+}
+
+// ---------------------------------------------------------------------------
+// What a destination cannot hold is applied where it fits and said once.
+
+#[test]
+fn a_destination_without_modes_links_or_attributes_gets_what_fits_and_a_note() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new();
+    let script = sandbox.file("source/run.sh", b"#!/bin/sh\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let has_xattrs = xattr::set(&script, "user.marcel-test", b"tag").is_ok();
+    std::os::unix::fs::symlink("run.sh", sandbox.path("source/run-alias")).unwrap();
+    std::os::unix::fs::symlink("nowhere", sandbox.path("source/dangling")).unwrap();
+    sandbox.dir("source/folder");
+    std::os::unix::fs::symlink("folder", sandbox.path("source/folder-alias")).unwrap();
+    let destination = sandbox.dir("stick");
+    let _fat = super::copy::fault::destination_refuses_metadata_do();
+
+    let outcome = copy(&[sandbox.path("source")], &destination);
+    assert_clean(&outcome);
+    let copied = destination.join("source");
+    assert_eq!(read(copied.join("run.sh")), b"#!/bin/sh\n");
+    assert_eq!(
+        read(copied.join("run-alias")),
+        b"#!/bin/sh\n",
+        "a link to a file arrives as the file"
+    );
+    assert!(fs::symlink_metadata(copied.join("run-alias")).unwrap().is_file());
+    assert!(!copied.join("dangling").exists(), "a dangling link is left out");
+    assert!(!copied.join("folder-alias").exists(), "a link to a folder is left out");
+    assert!(copied.join("folder").is_dir());
+
+    let note = outcome.describe_losses().expect("the report says what was dropped");
+    assert!(note.contains("permissions were not kept"), "{note}");
+    assert!(note.contains("replaced by copies of their targets"), "{note}");
+    assert!(note.contains("left out"), "{note}");
+    assert!(note.ends_with("the destination filesystem does not support them"), "{note}");
+    assert_eq!(note.contains("extended attributes"), has_xattrs, "{note}");
+    // A copy that lost nothing carries no note.
+    drop(_fat);
+    let plain = copy(&[script], &sandbox.dir("plain"));
+    assert_clean(&plain);
+    assert_eq!(plain.describe_losses(), None);
+}
+
+/// Trash on another filesystem lands in `.Trash-<uid>` at its root and comes
+/// back from there. Opt in with `MARCEL_TEST_OTHER_FS=/run/media/me/STICK`;
+/// the home Trash is what every other test covers, and this one is not run
+/// against `/dev/shm` by default because it would leave a Trash there.
+#[test]
+fn trash_on_another_filesystem_uses_its_own_trash_directory() {
+    let Some(root) = std::env::var_os("MARCEL_TEST_OTHER_FS").map(PathBuf::from) else {
+        return;
+    };
+    let folder = root.join(format!("marcel-trash-test-{}", std::process::id()));
+    fs::create_dir(&folder).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(folder.clone());
+    let file = folder.join("doomed.txt");
+    fs::write(&file, b"bye").unwrap();
+
+    let outcome = super::trash::trash_paths(std::slice::from_ref(&file));
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert!(!file.exists());
+    let uid = rustix::process::getuid().as_raw();
+    let backing = outcome.records[0].backing_path().to_path_buf();
+    assert!(backing.starts_with(root.join(format!(".Trash-{uid}"))), "{}", backing.display());
+    assert!(
+        super::trash::list_trash_records()
+            .unwrap()
+            .records
+            .iter()
+            .any(|record| record.original_path() == file),
+        "the Trash view lists every Trash, this one included"
+    );
+
+    let restored = super::trash::restore_trash_records(&outcome.records).unwrap();
+    assert_eq!(restored.records.len(), 1);
+    assert_eq!(read(&file), b"bye");
+    assert!(!backing.exists());
 }
