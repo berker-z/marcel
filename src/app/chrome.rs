@@ -22,7 +22,6 @@ use super::{
     MAX_PREVIEW_WIDTH, MIN_BROWSER_WIDTH, MIN_PREVIEW_WIDTH, Marcel,
     actions::{BROWSER_KEY_CONTEXT, BrowserCommand, bind_actions},
     pointer::{BookmarkDrag, FileDrag},
-    sidebar::MIN_PLACES_WIDTH,
     state::{ContextMenuTarget, ViewMode},
 };
 
@@ -131,12 +130,14 @@ fn sidebar_mark(shown: bool, color: Hsla) -> AnyElement {
 }
 
 impl Marcel {
-    /// `sidebar_width` is the unfolded sidebar's width, which the navigation
-    /// cluster matches so the two columns line up; `None` while folded, when
-    /// the cluster is just as wide as its buttons.
+    /// `sidebar_width` is what the sidebar takes, or would take: the
+    /// navigation cluster is that wide in both states, so the divider and the
+    /// location bar stay put when the sidebar folds. Folded, the few pixels
+    /// past the buttons are the price of nothing else moving.
     fn render_topbar(
         &self,
-        sidebar_width: Option<Pixels>,
+        sidebar_width: Pixels,
+        sidebar_shown: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -187,7 +188,6 @@ impl Marcel {
                     .build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| this.set_show_hidden(!show_hidden, cx)));
-        let sidebar_shown = sidebar_width.is_some();
         let sidebar_button = mark_button(
             "toggle-sidebar",
             sidebar_mark(sidebar_shown, colors.sidebar_foreground),
@@ -203,10 +203,7 @@ impl Marcel {
             .build(window, cx)
         })
         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
-        // Folded, the cluster keeps the sidebar's minimum width, which is what
-        // the sidebar is unless a place label forces it wider, so toggling
-        // moves nothing on the right.
-        let cluster_width = sidebar_width.map_or(MIN_PLACES_WIDTH, f32::from);
+        let cluster_width = f32::from(sidebar_width);
         let location_width =
             (f32::from(window.bounds().size.width) - cluster_width - 400.0).max(180.0);
         let max_breadcrumbs = ((location_width / 96.0).floor() as usize).clamp(3, 8);
@@ -448,18 +445,19 @@ impl Render for Marcel {
             !self.ui.sidebar_hidden
         };
         self.ui.sidebar_shown = sidebar_shown;
-        let sidebar_width = if sidebar_shown { self.sidebar_width(window, cx) } else { px(0.0) };
+        let sidebar_width = self.sidebar_width(window, cx);
+        let sidebar_taken = if sidebar_shown { sidebar_width } else { px(0.0) };
         // The preview is next: with less than the two panes' minimums left,
         // the browser takes the whole width rather than pushing the preview
         // off the edge. It keeps its width for when the room returns.
-        let workspace_width = window_width - f32::from(sidebar_width);
+        let workspace_width = window_width - f32::from(sidebar_taken);
         let preview_shown = workspace_width >= MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH;
         let workspace_width = workspace_width.max(MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH);
         if self.preview.width.get() == px(0.0) {
             self.preview.width.set(px(workspace_width * 0.4));
         }
 
-        let topbar = self.render_topbar(sidebar_shown.then_some(sidebar_width), window, cx);
+        let topbar = self.render_topbar(sidebar_width, sidebar_shown, window, cx);
         let sidebar = sidebar_shown.then(|| self.render_sidebar(sidebar_width, cx));
         let browser = bind_actions(div().id("browser-pane"), cx)
             .key_context(BROWSER_KEY_CONTEXT)

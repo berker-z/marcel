@@ -134,8 +134,8 @@ remembered as a choice; the preview pane goes below 640 px of workspace and
 keeps its width for when the room returns. The floor drops to 640 px, which
 is the browser pane and a top bar whose fields have minimums. The toggle
 lives in the navigation cluster rather than the sidebar so it is reachable
-in both states from the same spot; folded, the cluster keeps the sidebar's
-minimum width so nothing on the right moves.
+in both states from the same spot; folded, the cluster keeps the width the
+sidebar would have, so nothing on the right moves by a pixel.
 
 **The sidebar footer.** In a short window the Show Hidden switch and the
 settings gear painted over the last bookmarks, because the sections above

@@ -31,7 +31,7 @@ use super::{
 
 /// Wide enough for the six buttons of the top bar's navigation cluster,
 /// which is aligned to the sidebar.
-pub(super) const MIN_PLACES_WIDTH: f32 = 208.0;
+const MIN_PLACES_WIDTH: f32 = 208.0;
 const MAX_PLACES_WIDTH: f32 = 320.0;
 pub(super) const BOOKMARK_MENU_WIDTH: f32 = 152.0;
 pub(super) const BOOKMARK_MENU_HEIGHT: f32 = 38.0;
