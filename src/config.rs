@@ -107,6 +107,10 @@ pub(crate) struct BrowserState {
     pub view: BrowserView,
     pub show_hidden: bool,
     pub sort: SortOrder,
+    /// The sidebar folded away by the user. A window too narrow for it
+    /// folds it on its own without writing this, so a drag to half the
+    /// screen does not become a preference.
+    pub sidebar_hidden: bool,
     /// The theme chosen in Settings. `None` until one has been: the
     /// environment's default (the Nix module's `settings.theme`) stays in
     /// force, and changing it there keeps working, until the user picks one
@@ -116,7 +120,13 @@ pub(crate) struct BrowserState {
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: BrowserView::Grid, show_hidden: true, sort: SortOrder::default(), theme: None }
+        Self {
+            view: BrowserView::Grid,
+            show_hidden: true,
+            sort: SortOrder::default(),
+            sidebar_hidden: false,
+            theme: None,
+        }
     }
 }
 
@@ -204,6 +214,7 @@ pub(crate) fn save(path: &Path, state: BrowserState) -> Result<()> {
             "sort_direction={}",
             if state.sort.descending { "descending" } else { "ascending" }
         )?;
+        writeln!(file, "sidebar={}", if state.sidebar_hidden { "hidden" } else { "shown" })?;
         if let Some(theme) = state.theme {
             writeln!(file, "theme={}", theme.name())?;
         }
@@ -220,6 +231,7 @@ fn parse(contents: &str) -> Result<BrowserState> {
     let mut view = None;
     let mut show_hidden = None;
     let mut sort = SortOrder::default();
+    let mut sidebar_hidden = false;
     let mut theme = None;
     for line in contents.lines() {
         let line = line.trim();
@@ -241,6 +253,7 @@ fn parse(contents: &str) -> Result<BrowserState> {
             "show_hidden" => show_hidden = value.parse::<bool>().ok(),
             "sort" => sort.key = SortKey::from_name(value).unwrap_or_default(),
             "sort_direction" => sort.descending = value == "descending",
+            "sidebar" => sidebar_hidden = value == "hidden",
             "theme" => theme = Palette::from_name(value),
             _ => {}
         }
@@ -253,6 +266,7 @@ fn parse(contents: &str) -> Result<BrowserState> {
         view: view.context("Missing or invalid view")?,
         show_hidden: show_hidden.context("Missing or invalid show_hidden")?,
         sort,
+        sidebar_hidden,
         theme,
     })
 }
@@ -276,13 +290,14 @@ mod tests {
             view: BrowserView::List,
             show_hidden: false,
             sort: SortOrder { key: SortKey::Modified, descending: true },
+            sidebar_hidden: true,
             theme: Some(Palette::TokyoNight),
         };
         save(&path, state).unwrap();
         assert_eq!(load(&path).unwrap(), state);
         assert_eq!(
             fs::read_to_string(path).unwrap(),
-            "version=1\nview=list\nshow_hidden=false\nsort=modified\nsort_direction=descending\ntheme=tokyo-night\n"
+            "version=1\nview=list\nshow_hidden=false\nsort=modified\nsort_direction=descending\nsidebar=hidden\ntheme=tokyo-night\n"
         );
     }
 
@@ -304,6 +319,7 @@ mod tests {
     fn a_version_one_file_without_the_newer_keys_still_loads() {
         let state = parse("version=1\nview=grid\nshow_hidden=true\n").unwrap();
         assert_eq!(state.sort, SortOrder::default());
+        assert!(!state.sidebar_hidden);
         assert_eq!(state.theme, None);
 
         let state =

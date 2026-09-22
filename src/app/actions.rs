@@ -108,6 +108,8 @@ browser_commands! {
     ShowProperties = "ctrl-i" | "alt-enter",
     UndoFileOperation = "ctrl-z",
     RedoFileOperation = "ctrl-y",
+    // Every editor folds its sidebar on Ctrl+B.
+    ToggleSidebar = "ctrl-b",
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,6 +241,7 @@ impl Marcel {
             EmptyTrash => trash && !busy && !self.sidebar.trash_records.is_empty(),
             UndoFileOperation => operations.can_undo(),
             RedoFileOperation => operations.can_redo(),
+            ToggleSidebar => true,
             // Every keyboard motion, and Select All.
             _ => !self.directory.visible_entries.is_empty(),
         }
@@ -334,6 +337,7 @@ impl Marcel {
             RedoFileOperation => {
                 self.with_operations(window, cx, |ops, origin, cx| ops.start_redo(origin, cx))
             }
+            ToggleSidebar => self.toggle_sidebar(cx),
             _ => {}
         }
     }
@@ -601,6 +605,20 @@ impl Marcel {
         if let Some(reconcile) = self.directory.set_filter_query(query) {
             self.reprojected(reconcile, cx);
         }
+    }
+
+    /// Fold or unfold the sidebar. In a window wide enough for it this is
+    /// the remembered preference; in one too narrow it is an answer for this
+    /// window at this width, forgotten at the next resize across the line.
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let shown = self.ui.sidebar_shown;
+        if self.ui.narrow {
+            self.ui.sidebar_override_while_narrow = Some(!shown);
+        } else {
+            self.ui.sidebar_hidden = shown;
+            self.persist_browser_state();
+        }
+        cx.notify();
     }
 
     pub(super) fn set_show_hidden(&mut self, show_hidden: bool, cx: &mut Context<Self>) {

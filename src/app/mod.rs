@@ -290,6 +290,7 @@ impl Marcel {
             view: self.ui.view_mode.to_state(),
             show_hidden: self.directory.show_hidden,
             sort: self.directory.sort,
+            sidebar_hidden: self.ui.sidebar_hidden,
             theme: crate::theme::chosen(),
         });
     }

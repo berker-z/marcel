@@ -117,6 +117,17 @@ pub struct UiState {
     pub directory_scroll: UniformListScrollHandle,
     pub view_mode: ViewMode,
     pub grid_layout_columns: usize,
+    /// The user's choice, persisted: the sidebar folded away.
+    pub sidebar_hidden: bool,
+    /// Whether the window is too narrow for the sidebar, as of the last
+    /// frame. Crossing that line in either direction clears the override.
+    pub narrow: bool,
+    /// The user's answer while narrow: `Some(true)` unfolds the sidebar over
+    /// a window that folded it, `Some(false)` folds it after that. Neither
+    /// is remembered past the next resize across the line.
+    pub sidebar_override_while_narrow: Option<bool>,
+    /// What the last frame showed, so a toggle knows what it is flipping.
+    pub sidebar_shown: bool,
     pub state_save_sender: Sender<BrowserState>,
     pub _state_save_task: Task<()>,
 }
@@ -141,6 +152,10 @@ impl UiState {
             directory_scroll: UniformListScrollHandle::new(),
             view_mode: ViewMode::from_state(browser_state.view),
             grid_layout_columns: 1,
+            sidebar_hidden: browser_state.sidebar_hidden,
+            narrow: false,
+            sidebar_override_while_narrow: None,
+            sidebar_shown: !browser_state.sidebar_hidden,
             state_save_sender,
             _state_save_task: state_save_task,
         }

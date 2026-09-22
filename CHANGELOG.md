@@ -24,6 +24,13 @@ put until the new one has arrived, and a folder that churns is reread at most
 every 1.5 seconds. Leaving a large folder stops its enumeration. Comfortable
 at 50,000 entries.
 
+The sidebar folds to a strip with `Ctrl+B` or the button beside the gear,
+and folds on its own below 900 px so the panes keep fitting; the preview
+pane goes too when less than 640 px is left for it and the browser. Both
+come back as the window grows, and a fold the window forced is not
+remembered as a choice. Hidden files toggle from a `.*` button beside the
+view toggle.
+
 ### Preview
 
 A preview pane that stays open while you browse: text and code, images,
@@ -163,10 +170,6 @@ archives. RAR and CBR extraction are off by default because the decoder is
 not free.
 
 ### Known gaps
-
-Marcel needs a window at least 900 pixels wide. Narrower than that its panes are
-wider than the window and the preview pane runs off the edge, so the window
-refuses to shrink below it on desktops that honour a minimum size.
 
 No search. A folder on a network share, or on an `ntfs-3g` mount, does not
 update as it changes, since inotify does not reach through FUSE; Refresh does.

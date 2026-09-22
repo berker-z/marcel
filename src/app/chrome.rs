@@ -25,6 +25,14 @@ use super::{
     state::{ContextMenuTarget, ViewMode},
 };
 
+/// Narrower than this, the sidebar folds on its own: the browser and preview
+/// minimums plus a sidebar at its widest is where the panes stop fitting.
+const AUTO_FOLD_SIDEBAR_WIDTH: f32 = 900.0;
+/// The folded sidebar: a strip wide enough for one button column.
+pub(super) const FOLDED_SIDEBAR_WIDTH: f32 = 44.0;
+/// Five 28 px buttons, their gaps, and the padding either side.
+const NAV_CLUSTER_WIDTH: f32 = 5.0 * 28.0 + 4.0 * 4.0 + 16.0;
+
 /// A glyph button on the chrome. gpui-component's icon-only Button loses its
 /// SVG tint on Marcel's themed surfaces, so these few controls draw a glyph
 /// in the semantic foreground the theme supplies.
@@ -104,9 +112,12 @@ pub(super) fn view_mark(mode: ViewMode, color: Hsla) -> AnyElement {
 }
 
 impl Marcel {
+    /// `sidebar_width` is the unfolded sidebar's width, which the navigation
+    /// cluster matches so the two columns line up; `None` while folded, when
+    /// the cluster is just as wide as its buttons.
     fn render_topbar(
         &self,
-        sidebar_width: Pixels,
+        sidebar_width: Option<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -157,8 +168,9 @@ impl Marcel {
                     .build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| this.set_show_hidden(!show_hidden, cx)));
+        let cluster_width = sidebar_width.map_or(NAV_CLUSTER_WIDTH, f32::from);
         let location_width =
-            (f32::from(window.bounds().size.width) - f32::from(sidebar_width) - 400.0).max(180.0);
+            (f32::from(window.bounds().size.width) - cluster_width - 400.0).max(180.0);
         let max_breadcrumbs = ((location_width / 96.0).floor() as usize).clamp(3, 8);
         h_flex()
             .flex_none()
@@ -171,7 +183,7 @@ impl Marcel {
             .child(
                 h_flex()
                     .flex_none()
-                    .w(sidebar_width)
+                    .w(px(cluster_width))
                     .h_full()
                     .px_2()
                     .gap_1()
@@ -209,7 +221,10 @@ impl Marcel {
                             .small()
                             .cleanable(true)
                             .h_7()
-                            .w(px(240.0)),
+                            // Gives way in a narrow window so the location bar keeps
+                            // its minimum, rather than pushing the row off the edge.
+                            .w(px(240.0))
+                            .min_w(px(120.0)),
                     ),
             )
             .into_any_element()
@@ -377,15 +392,37 @@ impl Render for Marcel {
             self.drag.file_scroll_task.take();
         }
 
-        let sidebar_width = self.sidebar_width(window, cx);
-        let workspace_width = (f32::from(window.bounds().size.width) - f32::from(sidebar_width))
-            .max(MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH);
+        // Below a certain width the panes no longer fit side by side, and the
+        // sidebar is the first to go: it folds to a strip on its own, without
+        // touching the saved preference, and comes back when there is room.
+        // The user can still unfold it over a narrow window, or fold it
+        // again, until the next resize across the line.
+        let window_width = f32::from(window.bounds().size.width);
+        let narrow = window_width < AUTO_FOLD_SIDEBAR_WIDTH;
+        if narrow != self.ui.narrow {
+            self.ui.narrow = narrow;
+            self.ui.sidebar_override_while_narrow = None;
+        }
+        let sidebar_shown = if narrow {
+            self.ui.sidebar_override_while_narrow.unwrap_or(false)
+        } else {
+            !self.ui.sidebar_hidden
+        };
+        self.ui.sidebar_shown = sidebar_shown;
+        let sidebar_width =
+            if sidebar_shown { self.sidebar_width(window, cx) } else { px(FOLDED_SIDEBAR_WIDTH) };
+        // The preview is next: with less than the two panes' minimums left,
+        // the browser takes the whole width rather than pushing the preview
+        // off the edge. It keeps its width for when the room returns.
+        let workspace_width = window_width - f32::from(sidebar_width);
+        let preview_shown = workspace_width >= MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH;
+        let workspace_width = workspace_width.max(MIN_BROWSER_WIDTH + MIN_PREVIEW_WIDTH);
         if self.preview.width.get() == px(0.0) {
             self.preview.width.set(px(workspace_width * 0.4));
         }
 
-        let topbar = self.render_topbar(sidebar_width, window, cx);
-        let sidebar = self.render_sidebar(sidebar_width, cx);
+        let topbar = self.render_topbar(sidebar_shown.then_some(sidebar_width), window, cx);
+        let sidebar = self.render_sidebar(sidebar_shown.then_some(sidebar_width), cx);
         let browser = bind_actions(div().id("browser-pane"), cx)
             .key_context(BROWSER_KEY_CONTEXT)
             .track_focus(&self.browser_focus)
@@ -403,7 +440,7 @@ impl Render for Marcel {
             .border_r_1()
             .border_color(colors.border)
             .child(self.render_browser(cx));
-        let preview = self.render_preview_pane(window, cx);
+        let preview = preview_shown.then(|| self.render_preview_pane(window, cx));
 
         let pane_view = cx.entity();
         let entry_menu = self.render_entry_menu(window, cx);
@@ -450,31 +487,34 @@ impl Render for Marcel {
             })
             .on_key_down(cx.listener(Self::on_window_key_down))
             .child(topbar)
-            .child(
-                h_flex().flex_1().min_h_0().w_full().child(sidebar).child(
-                    div().flex_1().min_w_0().h_full().child(
-                        h_resizable("workspace-panes")
-                            .on_resize(move |_, _, cx| {
-                                pane_view.update(cx, |this, cx| {
-                                    this.start_preview_wrap(cx);
-                                    cx.notify();
-                                });
-                            })
-                            .child(
-                                resizable_panel()
-                                    .size(px(workspace_width * 0.6))
-                                    .size_range(px(MIN_BROWSER_WIDTH)..Pixels::MAX)
-                                    .child(browser),
-                            )
-                            .child(
-                                resizable_panel()
-                                    .size(px(workspace_width * 0.4))
-                                    .size_range(px(MIN_PREVIEW_WIDTH)..px(MAX_PREVIEW_WIDTH))
-                                    .child(preview),
-                            ),
-                    ),
-                ),
-            )
+            .child(h_flex().flex_1().min_h_0().w_full().child(sidebar).child(
+                div().flex_1().min_w_0().h_full().map(|workspace| {
+                    match preview {
+                        Some(preview) => workspace.child(
+                            h_resizable("workspace-panes")
+                                .on_resize(move |_, _, cx| {
+                                    pane_view.update(cx, |this, cx| {
+                                        this.start_preview_wrap(cx);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(
+                                    resizable_panel()
+                                        .size(px(workspace_width * 0.6))
+                                        .size_range(px(MIN_BROWSER_WIDTH)..Pixels::MAX)
+                                        .child(browser),
+                                )
+                                .child(
+                                    resizable_panel()
+                                        .size(px(workspace_width * 0.4))
+                                        .size_range(px(MIN_PREVIEW_WIDTH)..px(MAX_PREVIEW_WIDTH))
+                                        .child(preview),
+                                ),
+                        ),
+                        None => workspace.child(browser),
+                    }
+                }),
+            ))
             .children(picker_bar)
             .children(entry_menu)
             .children(bookmark_menu)

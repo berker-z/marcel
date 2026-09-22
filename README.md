@@ -20,7 +20,7 @@ Linux only. Wayland is the tested target. X11 mostly works, but dragging files o
 
 ### Browsing
 
-List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. `Ctrl+L` to type a path, or just start typing to filter the folder with fuzzy matching. Sort by name, modified time, size, or kind from the button next to the location bar, or by clicking a column heading in list view; folders stay first. Folders update as they change on disk instead of reloading, and 50,000 entries remain comfortable. Refresh, in the right-click menu on empty space, is there for the filesystems that do not send change notifications.
+List and grid views, breadcrumbs, bookmarks, and the usual XDG places in a sidebar. The sidebar folds to a strip (`Ctrl+B`, or the button beside the gear) and folds on its own when the window is too narrow for it, as does the preview pane below that; both come back as the window grows. `Ctrl+L` to type a path, or just start typing to filter the folder with fuzzy matching. Sort by name, modified time, size, or kind from the button next to the location bar, or by clicking a column heading in list view; folders stay first. Folders update as they change on disk instead of reloading, and 50,000 entries remain comfortable. Refresh, in the right-click menu on empty space, is there for the filesystems that do not send change notifications.
 
 The Trash is the last place in the sidebar. It shows what is in every freedesktop Trash Marcel can find, previews it, and offers Restore where the item menu would otherwise say Move to Trash; Empty Trash is in the empty-space menu there, behind the same confirmation as permanent deletion.
 
@@ -76,6 +76,7 @@ Several themes, picked in Settings and remembered. Marcel ships its own icons an
 | F2                                               | Rename               |
 | Ctrl+I or Alt+Enter                              | Properties           |
 | Ctrl+Z / Ctrl+Y                                  | Undo / redo          |
+| Ctrl+B                                           | Fold or unfold the sidebar |
 
 Escape has a stack of meanings and takes the topmost one: it closes an open context menu, then cancels a running file operation (from the window that started it), then clears the filter, then cancels a rename or location edit in progress, then closes a file-chooser dialog, and only when none of those apply does it clear the selection.
 
@@ -92,7 +93,6 @@ Known gaps, roughly in the order they are likely to be addressed:
 * No video playback; the preview pane shows a frame and a play button for your player.
 * Create Link is in the menu, greyed out, until it exists.
 * Some conventional shortcuts are not bound: `Ctrl+H` for hidden files (it is the `.*` button next to the view toggle, and in the empty-space menu), `F5` for refresh, `Alt+Up` and `Alt+Left` for parent and back (Marcel uses `Ctrl+Up` and `Ctrl+Left`), and `Ctrl+Shift+Z` for redo (`Ctrl+Y`).
-* The window needs to be at least 900 pixels wide; below that the preview pane runs off the edge. Marcel asks the desktop not to shrink it further, and a tiling compositor can insist anyway.
 * Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer, and screen readers see nothing.
 * RAR extraction needs a separate build. The default package ships only free components.
 * Nix is the only packaging route today. One file operation runs at a time; a second is refused until the first finishes.

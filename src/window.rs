@@ -26,16 +26,12 @@ const DEFAULT_WINDOW_SIZE: (f32, f32) = (1200.0, 760.0);
 
 /// The narrowest window whose layout still fits inside itself.
 ///
-/// The browser and preview panes each refuse to go below a minimum, and the
-/// places sidebar is as wide as its widest label in the current font, so below
-/// roughly 844 px the three of them together are wider than the window and the
-/// preview pane hangs off the right edge. 900 leaves room for a sidebar wider
-/// than this machine's.
-///
-/// This is a floor, not a fix: the panes should shrink instead of overflowing.
-/// A floating desktop honours this and stops the user resizing into the broken
-/// layout; a tiling compositor is free to ignore it.
-const MIN_WINDOW_SIZE: (f32, f32) = (900.0, 480.0);
+/// The sidebar folds itself below 900 px and the preview pane goes below
+/// 640 px of workspace, so the browser pane alone sets the floor: its 360 px
+/// minimum, the folded strip, and a top bar whose location field, buttons,
+/// and filter still have their minimums. A floating desktop honours this; a
+/// tiling compositor is free to ignore it, and gets a clipped top bar.
+const MIN_WINDOW_SIZE: (f32, f32) = (640.0, 480.0);
 
 /// How far each additional window steps down and to the right.
 ///

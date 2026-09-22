@@ -8,7 +8,9 @@ use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, Div, Hsla, IntoElement, MouseButton,
     MouseDownEvent, ObjectFit, Pixels, Stateful, TextRun, Window, div, font, img, px,
 };
-use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, notification::Notification};
+use gpui_component::{
+    ActiveTheme as _, WindowExt as _, h_flex, notification::Notification, tooltip::Tooltip,
+};
 
 use crate::{
     bookmarks::Bookmark,
@@ -515,9 +517,49 @@ impl Marcel {
         px((max_text_width + 84.0).clamp(MIN_PLACES_WIDTH, MAX_PLACES_WIDTH))
     }
 
-    pub(super) fn render_sidebar(&mut self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+    /// The sidebar at `width`, or, with `None`, folded to a strip holding
+    /// only the unfold button and the gear.
+    pub(super) fn render_sidebar(
+        &mut self,
+        width: Option<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = cx.theme().colors;
         let radius = cx.theme().radius;
+        let settings_button = super::chrome::icon_button("open-settings", "⚙", true, cx)
+            .tooltip(|window, cx| Tooltip::new("Settings").build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| this.open_settings_dialog(window, cx)));
+        let shown = width.is_some();
+        let fold_button =
+            super::chrome::icon_button("fold-sidebar", if shown { "⟨" } else { "⟩" }, true, cx)
+                .tooltip(move |window, cx| {
+                    Tooltip::new(if shown {
+                        "Hide the sidebar (Ctrl+B)"
+                    } else {
+                        "Show the sidebar (Ctrl+B)"
+                    })
+                    .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
+        let Some(width) = width else {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(super::chrome::FOLDED_SIDEBAR_WIDTH))
+                .h_full()
+                .py_4()
+                .px_2()
+                .items_center()
+                .bg(colors.sidebar)
+                .border_r_1()
+                .border_color(colors.sidebar_border)
+                .text_color(colors.sidebar_foreground)
+                .child(fold_button)
+                .child(div().flex_1())
+                .child(settings_button)
+                .into_any_element();
+        };
         let muted = |text: &'static str| {
             div().px_3().py_1().text_xs().text_color(colors.muted_foreground).child(text)
         };
@@ -559,9 +601,6 @@ impl Marcel {
         let network = self.render_network_rows(cx);
         let final_insertion = self.sidebar.bookmark_insertion == Some(bookmarks.len());
         let bookmark_region_bounds = self.sidebar.bookmark_region_bounds.clone();
-
-        let settings_button = super::chrome::icon_button("open-settings", "⚙", true, cx)
-            .on_click(cx.listener(|this, _, window, cx| this.open_settings_dialog(window, cx)));
 
         // Everything above the footer scrolls as one column: in a short
         // window the sections used to run on under the footer, and the gear
@@ -666,7 +705,7 @@ impl Marcel {
             .border_color(colors.sidebar_border)
             .text_color(colors.sidebar_foreground)
             .child(sections)
-            .child(h_flex().w_full().justify_end().child(settings_button))
+            .child(h_flex().w_full().justify_between().child(fold_button).child(settings_button))
             .into_any_element()
     }
 }
