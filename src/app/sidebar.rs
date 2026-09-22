@@ -531,7 +531,7 @@ impl Marcel {
             .on_click(cx.listener(|this, _, window, cx| this.open_settings_dialog(window, cx)));
         let shown = width.is_some();
         let fold_button =
-            super::chrome::icon_button("fold-sidebar", if shown { "⟨" } else { "⟩" }, true, cx)
+            super::chrome::icon_button("fold-sidebar", if shown { "❮" } else { "❯" }, true, cx)
                 .tooltip(move |window, cx| {
                     Tooltip::new(if shown {
                         "Hide the sidebar (Ctrl+B)"
@@ -555,9 +555,11 @@ impl Marcel {
                 .border_r_1()
                 .border_color(colors.sidebar_border)
                 .text_color(colors.sidebar_foreground)
-                .child(fold_button)
+                // The button stays where it was when the sidebar folded, so
+                // the cursor that folded it is already on the one that unfolds
+                // it. Settings waits until the sidebar is back.
                 .child(div().flex_1())
-                .child(settings_button)
+                .child(fold_button)
                 .into_any_element();
         };
         let muted = |text: &'static str| {
