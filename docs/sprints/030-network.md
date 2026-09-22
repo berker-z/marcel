@@ -127,12 +127,15 @@ word is still a folder name there, because it usually is one.
 ### Fixed on the way
 
 **The sidebar folds.** The 900 px minimum window width came from three
-minimums added up: sidebar, browser, preview. The sidebar now folds to a
-strip on `Ctrl+B` or the button beside the gear, and folds on its own below
+minimums added up: sidebar, browser, preview. The sidebar now folds away
+on `Ctrl+B` or the leftmost button of the top bar, and folds on its own below
 900 px without writing the preference, so a drag to half the screen is not
 remembered as a choice; the preview pane goes below 640 px of workspace and
 keeps its width for when the room returns. The floor drops to 640 px, which
-is the browser pane, the strip, and a top bar whose fields have minimums.
+is the browser pane and a top bar whose fields have minimums. The toggle
+lives in the navigation cluster rather than the sidebar so it is reachable
+in both states from the same spot; folded, the cluster keeps the sidebar's
+minimum width so nothing on the right moves.
 
 **The sidebar footer.** In a short window the Show Hidden switch and the
 settings gear painted over the last bookmarks, because the sections above

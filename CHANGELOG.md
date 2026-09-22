@@ -24,7 +24,7 @@ put until the new one has arrived, and a folder that churns is reread at most
 every 1.5 seconds. Leaving a large folder stops its enumeration. Comfortable
 at 50,000 entries.
 
-The sidebar folds to a strip with `Ctrl+B` or the button beside the gear,
+The sidebar folds away with `Ctrl+B` or the leftmost button of the top bar,
 and folds on its own below 900 px so the panes keep fitting; the preview
 pane goes too when less than 640 px is left for it and the browser. Both
 come back as the window grows, and a fold the window forced is not

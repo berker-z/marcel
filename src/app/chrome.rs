@@ -22,16 +22,13 @@ use super::{
     MAX_PREVIEW_WIDTH, MIN_BROWSER_WIDTH, MIN_PREVIEW_WIDTH, Marcel,
     actions::{BROWSER_KEY_CONTEXT, BrowserCommand, bind_actions},
     pointer::{BookmarkDrag, FileDrag},
+    sidebar::MIN_PLACES_WIDTH,
     state::{ContextMenuTarget, ViewMode},
 };
 
 /// Narrower than this, the sidebar folds on its own: the browser and preview
 /// minimums plus a sidebar at its widest is where the panes stop fitting.
 const AUTO_FOLD_SIDEBAR_WIDTH: f32 = 900.0;
-/// The folded sidebar: a strip wide enough for one button column.
-pub(super) const FOLDED_SIDEBAR_WIDTH: f32 = 44.0;
-/// Five 28 px buttons, their gaps, and the padding either side.
-const NAV_CLUSTER_WIDTH: f32 = 5.0 * 28.0 + 4.0 * 4.0 + 16.0;
 
 /// A glyph button on the chrome. gpui-component's icon-only Button loses its
 /// SVG tint on Marcel's themed surfaces, so these few controls draw a glyph
@@ -111,6 +108,28 @@ pub(super) fn view_mark(mode: ViewMode, color: Hsla) -> AnyElement {
     }
 }
 
+/// The sidebar toggle's mark: a panel outline whose left column is filled
+/// while the sidebar is shown. Drawn at the arrows' stroke width so it sits
+/// in their row without looking heavier than they do.
+fn sidebar_mark(shown: bool, color: Hsla) -> AnyElement {
+    div()
+        .flex()
+        .w(px(15.0))
+        .h(px(12.0))
+        .border_1()
+        .border_color(color)
+        .rounded(px(2.0))
+        .child(
+            div()
+                .w(px(5.0))
+                .h_full()
+                .border_r_1()
+                .border_color(color)
+                .when(shown, |column| column.bg(color)),
+        )
+        .into_any_element()
+}
+
 impl Marcel {
     /// `sidebar_width` is the unfolded sidebar's width, which the navigation
     /// cluster matches so the two columns line up; `None` while folded, when
@@ -168,7 +187,26 @@ impl Marcel {
                     .build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| this.set_show_hidden(!show_hidden, cx)));
-        let cluster_width = sidebar_width.map_or(NAV_CLUSTER_WIDTH, f32::from);
+        let sidebar_shown = sidebar_width.is_some();
+        let sidebar_button = mark_button(
+            "toggle-sidebar",
+            sidebar_mark(sidebar_shown, colors.sidebar_foreground),
+            true,
+            cx,
+        )
+        .tooltip(move |window, cx| {
+            Tooltip::new(if sidebar_shown {
+                "Hide the sidebar (Ctrl+B)"
+            } else {
+                "Show the sidebar (Ctrl+B)"
+            })
+            .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
+        // Folded, the cluster keeps the sidebar's minimum width, which is what
+        // the sidebar is unless a place label forces it wider, so toggling
+        // moves nothing on the right.
+        let cluster_width = sidebar_width.map_or(MIN_PLACES_WIDTH, f32::from);
         let location_width =
             (f32::from(window.bounds().size.width) - cluster_width - 400.0).max(180.0);
         let max_breadcrumbs = ((location_width / 96.0).floor() as usize).clamp(3, 8);
@@ -189,6 +227,7 @@ impl Marcel {
                     .gap_1()
                     .border_r_1()
                     .border_color(colors.sidebar_border)
+                    .child(sidebar_button)
                     .child(command_button("back", "←", BrowserCommand::GoBack, cx))
                     .child(command_button("forward", "→", BrowserCommand::GoForward, cx))
                     .child(command_button("up", "↑", BrowserCommand::GoToParent, cx))
@@ -393,7 +432,7 @@ impl Render for Marcel {
         }
 
         // Below a certain width the panes no longer fit side by side, and the
-        // sidebar is the first to go: it folds to a strip on its own, without
+        // sidebar is the first to go: it folds away on its own, without
         // touching the saved preference, and comes back when there is room.
         // The user can still unfold it over a narrow window, or fold it
         // again, until the next resize across the line.
@@ -409,8 +448,7 @@ impl Render for Marcel {
             !self.ui.sidebar_hidden
         };
         self.ui.sidebar_shown = sidebar_shown;
-        let sidebar_width =
-            if sidebar_shown { self.sidebar_width(window, cx) } else { px(FOLDED_SIDEBAR_WIDTH) };
+        let sidebar_width = if sidebar_shown { self.sidebar_width(window, cx) } else { px(0.0) };
         // The preview is next: with less than the two panes' minimums left,
         // the browser takes the whole width rather than pushing the preview
         // off the edge. It keeps its width for when the room returns.
@@ -422,7 +460,7 @@ impl Render for Marcel {
         }
 
         let topbar = self.render_topbar(sidebar_shown.then_some(sidebar_width), window, cx);
-        let sidebar = self.render_sidebar(sidebar_shown.then_some(sidebar_width), cx);
+        let sidebar = sidebar_shown.then(|| self.render_sidebar(sidebar_width, cx));
         let browser = bind_actions(div().id("browser-pane"), cx)
             .key_context(BROWSER_KEY_CONTEXT)
             .track_focus(&self.browser_focus)
@@ -487,7 +525,7 @@ impl Render for Marcel {
             })
             .on_key_down(cx.listener(Self::on_window_key_down))
             .child(topbar)
-            .child(h_flex().flex_1().min_h_0().w_full().child(sidebar).child(
+            .child(h_flex().flex_1().min_h_0().w_full().children(sidebar).child(
                 div().flex_1().min_w_0().h_full().map(|workspace| {
                     match preview {
                         Some(preview) => workspace.child(
