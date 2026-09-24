@@ -292,6 +292,9 @@ impl Marcel {
             sort: self.directory.sort,
             sidebar_hidden: self.ui.sidebar_hidden,
             theme: crate::theme::chosen(),
+            thumbnails: self.ui.thumbnails,
+            folder_sizes: self.ui.folder_sizes,
+            thumbnail_limit_mb: self.ui.thumbnail_limit_mb,
         });
     }
 }

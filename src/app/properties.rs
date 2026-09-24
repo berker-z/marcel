@@ -18,8 +18,11 @@ use std::{
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, FontWeight, Hsla, Subscription, Task, Window, div, px};
 use gpui_component::{
-    ActiveTheme as _, WindowExt as _, button::ButtonVariant, checkbox::Checkbox,
-    dialog::DialogButtonProps, h_flex, v_flex,
+    ActiveTheme as _, Sizable as _, WindowExt as _,
+    button::{Button, ButtonVariant},
+    checkbox::Checkbox,
+    dialog::DialogButtonProps,
+    h_flex, v_flex,
 };
 
 use crate::{
@@ -48,6 +51,13 @@ struct RootKinds {
 
 pub(super) struct PropertiesView {
     paths: Vec<PathBuf>,
+    /// Whether a tree walk is running or has already run. A folder on a
+    /// share does not start one unless asked, and the dialog has to tell
+    /// "still counting" apart from "never counted".
+    walking: bool,
+    /// Whether the walk may start on its own: `folder_sizes` against this
+    /// folder's locality, decided by the window that opened the dialog.
+    measure_automatically: bool,
     /// One item's facts, once read, or why they could not be.
     item: Option<Result<ItemProperties, String>>,
     /// What the selected items are, for more than one.
@@ -60,9 +70,11 @@ pub(super) struct PropertiesView {
 }
 
 impl PropertiesView {
-    fn new(paths: Vec<PathBuf>, cx: &mut Context<Self>) -> Self {
+    fn new(paths: Vec<PathBuf>, measure_automatically: bool, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             paths,
+            walking: false,
+            measure_automatically,
             item: None,
             roots: None,
             totals: None,
@@ -104,7 +116,7 @@ impl PropertiesView {
             let _ = this.update(cx, |this, cx| {
                 let is_folder = matches!(&result, Ok(item) if item.object == ObjectKind::Directory);
                 this.item = Some(result);
-                if is_folder && measure {
+                if is_folder && measure && this.measure_automatically {
                     this.start_measuring(vec![path], cx);
                 }
                 cx.notify();
@@ -155,10 +167,13 @@ impl PropertiesView {
                 cx.notify();
             });
         }));
-        self.start_measuring(paths, cx);
+        if self.measure_automatically {
+            self.start_measuring(paths, cx);
+        }
     }
 
     fn start_measuring(&mut self, roots: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.walking = true;
         let (sender, receiver) = async_channel::unbounded();
         let cancelled = self.cancelled.clone();
         let walk = cx.background_executor().spawn(smol::unblock(move || {
@@ -207,6 +222,10 @@ enum RowValue {
         mode: u32,
         folder: bool,
     },
+    /// A total the dialog has not spent the time to work out, and the button
+    /// that spends it. What a share costs to walk is the user's to decide,
+    /// so the dialog offers rather than assumes.
+    Uncounted,
 }
 
 fn row(label: &'static str, value: impl Into<String>) -> Row {
@@ -261,9 +280,17 @@ fn plural(count: u64, one: &str, many: &str) -> String {
 }
 
 /// "3 folders, 12 files" and "4.2 MiB", with the walk's state folded in.
-fn describe_totals(totals: Option<TreeTotals>) -> (String, String) {
+///
+/// `walking` separates "the walk is running and has not reported yet" from
+/// "no walk was started", which are the same empty `totals` and must not read
+/// the same: one resolves on its own, the other never will.
+fn describe_totals(totals: Option<TreeTotals>, walking: bool) -> (String, String) {
     let Some(totals) = totals else {
-        return ("Counting…".to_string(), "Counting…".to_string());
+        return if walking {
+            ("Counting…".to_string(), "Counting…".to_string())
+        } else {
+            ("Not counted".to_string(), "Not counted".to_string())
+        };
     };
     let mut parts =
         vec![plural(totals.folders, "folder", "folders"), plural(totals.files, "file", "files")];
@@ -316,9 +343,23 @@ impl PropertiesView {
         rows.push(row("Location", location(&item.path)));
         match item.object {
             ObjectKind::Directory => {
-                let (contents, size) = describe_totals(self.totals);
-                rows.push(row("Contents", contents));
-                rows.push(row("Size", size));
+                let (contents, size) = describe_totals(self.totals, self.walking);
+                if self.walking {
+                    rows.push(row("Contents", contents));
+                    rows.push(row("Size", size));
+                } else {
+                    // Nothing has been walked, and on a share nothing will be
+                    // until the user says so. Offering the work is the row.
+                    rows.push(Row {
+                        label: "Contents",
+                        value: RowValue::Uncounted,
+                        note: Some(
+                            "Counting what a network folder holds means reading all of it"
+                                .to_string(),
+                        ),
+                        color: None,
+                    });
+                }
                 if let Some(free) = item.free_space {
                     rows.push(row("Free space", format_size(Some(free))));
                 }
@@ -455,11 +496,22 @@ impl PropertiesView {
             }),
             (totals, _) => totals,
         };
-        let (contents, _) = describe_totals(inside);
-        let (_, size) = describe_totals(self.totals);
+        let (contents, _) = describe_totals(inside, self.walking);
+        let (_, size) = describe_totals(self.totals, self.walking);
         let mut rows = vec![row("Selected", kinds)];
         if let Some(first) = self.paths.first() {
             rows.push(row("Location", location(first)));
+        }
+        if !self.walking {
+            rows.push(Row {
+                label: "Total size",
+                value: RowValue::Uncounted,
+                note: Some(
+                    "Counting what a network folder holds means reading all of it".to_string(),
+                ),
+                color: None,
+            });
+            return rows;
         }
         if self.roots.is_some_and(|kinds| kinds.folders > 0) {
             rows.push(row("Inside folders", contents));
@@ -489,6 +541,16 @@ impl PropertiesView {
                         RowValue::Access { class, mode, folder } => {
                             Self::render_access(class, mode, folder, busy, cx)
                         }
+                        RowValue::Uncounted => Button::new("properties-count-tree")
+                            .label("Calculate")
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let roots = this.paths.clone();
+                                this.start_measuring(roots, cx);
+                                cx.notify();
+                            }))
+                            .into_any_element(),
                     };
                     h_flex()
                         .items_start()
@@ -602,7 +664,10 @@ impl Marcel {
             return;
         }
         self.ui.entry_menu = None;
-        let view = cx.new(|cx| PropertiesView::new(paths, cx));
+        // Whether a tree walk may start on its own is the window's call:
+        // it is the one that knows whether this folder is a network away.
+        let measure = self.ui.folder_sizes.allows(self.directory.locality);
+        let view = cx.new(|cx| PropertiesView::new(paths, measure, cx));
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
                 .title("Properties")
@@ -631,20 +696,20 @@ mod tests {
 
     #[test]
     fn totals_say_whether_they_are_still_growing_or_were_cut_short() {
-        let (contents, size) = describe_totals(None);
+        let (contents, size) = describe_totals(None, true);
         assert_eq!((contents.as_str(), size.as_str()), ("Counting…", "Counting…"));
 
         let running = TreeTotals { folders: 2, files: 1, bytes: 10, ..TreeTotals::default() };
-        let (contents, size) = describe_totals(Some(running));
+        let (contents, size) = describe_totals(Some(running), true);
         assert_eq!(contents, "2 folders, 1 file (counting…)");
         assert_eq!(size, "10 B (counting…)");
 
         let capped = TreeTotals { files: 5, finished: true, capped: true, ..running };
-        let (contents, _) = describe_totals(Some(capped));
+        let (contents, _) = describe_totals(Some(capped), true);
         assert_eq!(contents, "More than 2 folders, 5 files");
 
         let partial = TreeTotals { finished: true, unreadable: 1, other: 3, ..running };
-        let (contents, size) = describe_totals(Some(partial));
+        let (contents, size) = describe_totals(Some(partial), true);
         assert_eq!(contents, "2 folders, 1 file, 3 other items; 1 entry could not be read");
         assert_eq!(size, "10 B");
     }

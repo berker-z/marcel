@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::UNIX_EPOCH,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -48,13 +48,64 @@ pub fn is_video(path: &Path) -> bool {
 /// The freedesktop thumbnail for `path`, made if there is none. `cancelled`
 /// is the listing's flag: once it is set the file is no longer on screen,
 /// and the decode — or the ffmpeg child — stops where it is.
-pub fn load_or_create(path: &Path, cancelled: &Arc<AtomicBool>) -> Result<PathBuf> {
+///
+/// `limit_bytes` is the user's `thumbnail_limit_mb`: an image past it is
+/// left as an icon rather than read in full. `MAX_SOURCE_BYTES` still caps
+/// it, so raising the setting cannot talk Marcel into a decode it will not
+/// survive.
+pub fn load_or_create(
+    path: &Path,
+    limit_bytes: u64,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<PathBuf> {
     let cache_home = thumbnail_cache_home()?;
-    load_or_create_in(path, &cache_home, cancelled)
+    load_or_create_in(path, limit_bytes, &cache_home, cancelled)
+}
+
+/// The thumbnail some application already cached for `path`, if it is still
+/// current. Nothing is made, and nothing is read from `path`: the size and
+/// modification time come from the listing already on screen, so this costs
+/// one local `open` of the cache PNG and not a single byte over a network.
+///
+/// This is what a share gets when [`crate::config::SpeedTradeoff`] says not
+/// to spend a download on making one. A folder Nautilus or an earlier local
+/// visit has already thumbnailed still looks like itself; the rest fall back
+/// to icons rather than to a progress bar.
+pub fn load_cached(
+    path: &Path,
+    size: Option<u64>,
+    modified: Option<SystemTime>,
+) -> Result<PathBuf> {
+    let cache_home = thumbnail_cache_home()?;
+    load_cached_in(path, size, modified, &cache_home)
+}
+
+fn load_cached_in(
+    path: &Path,
+    size: Option<u64>,
+    modified: Option<SystemTime>,
+    cache_home: &Path,
+) -> Result<PathBuf> {
+    // Without both of these there is nothing to validate a cache entry
+    // against, and serving an unvalidated one would show the thumbnail of a
+    // file that has since been replaced.
+    let (Some(size), Some(modified)) = (size, modified) else {
+        bail!("listing has no size or modification time to validate a thumbnail against");
+    };
+    let uri = Url::from_file_path(path)
+        .map_err(|_| anyhow::anyhow!("could not build file URI"))?
+        .to_string();
+    let mtime = modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
+    let cache_path = thumbnail_cache_path(cache_home, &uri);
+    if cached_thumbnail_is_current(&cache_path, &uri, &mtime, &size.to_string()) {
+        return Ok(cache_path);
+    }
+    bail!("no current cached thumbnail")
 }
 
 fn load_or_create_in(
     path: &Path,
+    limit_bytes: u64,
     cache_home: &Path,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<PathBuf> {
@@ -69,7 +120,7 @@ fn load_or_create_in(
     }
     // The size limit guards the image decode; a video is only ever decoded
     // by ffmpeg, one frame at a time, so its length does not matter here.
-    if !is_video(&canonical) && metadata.len() > MAX_SOURCE_BYTES {
+    if !is_video(&canonical) && metadata.len() > limit_bytes.min(MAX_SOURCE_BYTES) {
         bail!("image exceeds thumbnail source-size limit");
     }
 
@@ -270,8 +321,8 @@ mod tests {
         let cache = sandbox.path("cache");
         DynamicImage::new_rgba8(320, 180).save(&source).unwrap();
 
-        let first = load_or_create_in(&source, &cache, &no_cancel()).unwrap();
-        let second = load_or_create_in(&source, &cache, &no_cancel()).unwrap();
+        let first = load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &no_cancel()).unwrap();
+        let second = load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &no_cancel()).unwrap();
         let (uri, mtime, size) = identity(&source);
 
         assert_eq!(first, second);
@@ -289,7 +340,7 @@ mod tests {
         DynamicImage::new_rgba8(320, 180).save(&source).unwrap();
 
         let cancelled = Arc::new(AtomicBool::new(true));
-        let error = load_or_create_in(&source, &cache, &cancelled).unwrap_err();
+        let error = load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &cancelled).unwrap_err();
 
         assert!(error.to_string().contains("cancelled"), "{error}");
         assert!(!cache.exists(), "a cancelled thumbnail leaves no cache directory behind");
@@ -330,7 +381,7 @@ mod tests {
         write_foreign_thumbnail(&cache_path, &source, MAX_CACHED_EDGE + 1);
         assert!(!cached_thumbnail_is_current(&cache_path, &uri, &mtime, &size));
 
-        let replaced = load_or_create_in(&source, &cache, &no_cancel()).unwrap();
+        let replaced = load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &no_cancel()).unwrap();
         let info =
             png::Decoder::new(BufReader::new(File::open(&replaced).unwrap())).read_info().unwrap();
         assert_eq!(replaced, cache_path);

@@ -429,7 +429,7 @@ impl Marcel {
     fn show_directory(&mut self, path: PathBuf, reveal: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.sidebar.browsing_trash = false;
         self.sidebar.trash_records.clear();
-        self.directory.current_dir = path;
+        self.directory.set_directory(path);
         self.directory.pending_reveal = reveal;
         self.start_directory_load(true, cx);
     }

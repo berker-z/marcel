@@ -66,6 +66,13 @@ const BROWSER_IMAGE_BUDGET: usize = 64 * 1024 * 1024;
 const DEFAULT_PREVIEW_WIDTH: f32 = 420.0;
 const PREVIEW_TEXT_CHROME_WIDTH: f32 = 92.0;
 const PREVIEW_WRAP_DEBOUNCE: Duration = Duration::from_millis(80);
+/// How long a selection on a share must stand still before its file is read.
+///
+/// Long enough that arrowing through a folder reads only where the user
+/// stops, short enough that stopping on a file does not feel like waiting.
+/// It is the keyboard-repeat interval that sets the floor: anything under
+/// one repeat would still read every row held through.
+const REMOTE_PREVIEW_SETTLE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub enum ThumbnailState {
@@ -469,8 +476,25 @@ impl Marcel {
         }
         let (ticket, cancelled) =
             self.preview.begin(PreviewContent::Loading { name: entry.name.clone() });
-        let load_task = unblock(cx, move || load_preview(&entry, &cancelled));
+        // On a share, reading the selected file is a download. Holding Down
+        // through a folder would start one per row, and cancelling them does
+        // not help: a read already handed to the kernel is paid for whether
+        // or not anyone still wants it. So the read waits to see whether the
+        // selection is settling here. Replacing this task drops the timer
+        // with it, and the read that was never started costs nothing.
+        //
+        // Locally there is nothing to wait for, and waiting would only make
+        // the pane feel slower than it is.
+        let settle = self.directory.locality.is_remote().then_some(REMOTE_PREVIEW_SETTLE);
         self.preview.task = Some(cx.spawn(async move |this, cx| {
+            if let Some(delay) = settle {
+                cx.background_executor().timer(delay).await;
+            }
+            let Ok(load_task) =
+                this.update(cx, |_, cx| unblock(cx, move || load_preview(&entry, &cancelled)))
+            else {
+                return;
+            };
             let result = load_task.await;
             let _ = this.update(cx, |this, cx| {
                 if ticket != this.preview.ticket {
@@ -670,7 +694,23 @@ impl Marcel {
             |this| this.directory.generation,
             |this, path| {
                 let (path, cancelled) = (path.clone(), this.preview.thumbnail_cancel.clone());
-                Some(Box::new(move || thumbnails::load_or_create(&path, &cancelled)))
+                // On a share, *making* a thumbnail means downloading the
+                // file. Unless the user has asked for that, only a thumbnail
+                // something already cached is used: it costs nothing, and a
+                // folder another application has visited still looks like
+                // itself instead of turning into a wall of generic icons.
+                if this.ui.thumbnails.allows(this.directory.locality) {
+                    let limit = this.ui.thumbnail_limit_mb.saturating_mul(1024 * 1024);
+                    return Some(Box::new(move || {
+                        thumbnails::load_or_create(&path, limit, &cancelled)
+                    }));
+                }
+                // The listing already holds what validates a cache entry, so
+                // asking for it costs no round trip of its own.
+                let entry = this.directory.entry(&path);
+                let (size, modified) =
+                    entry.map_or((None, None), |entry| (entry.size, entry.modified));
+                Some(Box::new(move || thumbnails::load_cached(&path, size, modified)))
             },
             |this, path, result, _| {
                 if this.preview.thumbnail_stale.remove(&path) {

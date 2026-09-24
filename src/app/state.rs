@@ -16,7 +16,7 @@ use gpui::{
 use gpui_component::{input::InputState, select::SelectState};
 
 use crate::{
-    config::{BrowserState, BrowserView},
+    config::{BrowserState, BrowserView, SpeedTradeoff},
     desktop::{
         gvfs::{Location, MountSpec},
         picker::{FileFilter, PickerMode, PickerRequest, PickerResponse},
@@ -128,6 +128,12 @@ pub struct UiState {
     pub sidebar_override_while_narrow: Option<bool>,
     /// What the last frame showed, so a toggle knows what it is flipping.
     pub sidebar_shown: bool,
+    /// When a thumbnail is worth making, and how large a file is worth
+    /// reading to make one. See [`crate::config::SpeedTradeoff`].
+    pub thumbnails: SpeedTradeoff,
+    pub thumbnail_limit_mb: u64,
+    /// When Properties may walk a tree to total up what it holds.
+    pub folder_sizes: SpeedTradeoff,
     pub state_save_sender: Sender<BrowserState>,
     pub _state_save_task: Task<()>,
 }
@@ -156,6 +162,9 @@ impl UiState {
             narrow: false,
             sidebar_override_while_narrow: None,
             sidebar_shown: !browser_state.sidebar_hidden,
+            thumbnails: browser_state.thumbnails,
+            thumbnail_limit_mb: browser_state.thumbnail_limit_mb,
+            folder_sizes: browser_state.folder_sizes,
             state_save_sender,
             _state_save_task: state_save_task,
         }

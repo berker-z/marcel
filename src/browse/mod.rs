@@ -8,5 +8,6 @@
 pub mod directory_session;
 pub mod entries;
 pub mod history;
+pub mod remoteness;
 pub mod selection;
 pub mod watcher;

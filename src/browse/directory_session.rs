@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::browse::entries::{FileEntry, SortOrder, merge_sorted_entries, sort_entries};
+use crate::browse::remoteness::{self, Locality};
 use crate::browse::selection::SelectionModel;
 
 /// Background work that stops when dropped.
@@ -130,6 +131,11 @@ pub struct DirectorySession {
     /// Applied under the hidden-file rule and before the fuzzy filter, so
     /// type-to-filter searches only what the filter admits.
     content_filter: Option<ContentFilter>,
+    /// Whether this directory is a network away, decided once when the
+    /// window navigates here rather than per file. Work that costs a round
+    /// trip per entry — thumbnailing a grid, sizing a tree — reads it to
+    /// know what it is about to spend.
+    pub(crate) locality: Locality,
 }
 
 /// Decides whether an entry belongs in the visible listing at all.
@@ -138,6 +144,7 @@ pub type ContentFilter = Arc<dyn Fn(&FileEntry) -> bool>;
 impl DirectorySession {
     pub fn new(current_dir: PathBuf) -> Self {
         Self {
+            locality: remoteness::of(&current_dir),
             current_dir,
             entries: Vec::new(),
             visible_entries: Vec::new(),
@@ -164,6 +171,17 @@ impl DirectorySession {
             entry_index: RefCell::new(EntryIndex::default()),
             content_filter: None,
         }
+    }
+
+    /// Point the session at `directory`, deciding once whether it is a
+    /// network away.
+    ///
+    /// Classifying here rather than per file is the point: a grid of 500
+    /// entries asks the question 500 times, and the answer is a property of
+    /// the folder, not of anything in it.
+    pub fn set_directory(&mut self, directory: PathBuf) {
+        self.locality = remoteness::of(&directory);
+        self.current_dir = directory;
     }
 
     /// Replace the content filter and re-project the listing under it.

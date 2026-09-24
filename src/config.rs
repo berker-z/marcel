@@ -18,7 +18,10 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 
 use crate::{
-    browse::entries::{SortKey, SortOrder},
+    browse::{
+        entries::{SortKey, SortOrder},
+        remoteness::Locality,
+    },
     theme::Palette,
 };
 
@@ -102,6 +105,51 @@ pub(crate) enum BrowserView {
     Grid,
 }
 
+/// When work that costs a round trip on a share, and nothing on an SSD, is
+/// worth doing.
+///
+/// This is Nautilus's `org.gnome.nautilus.SpeedTradeoff`, which it applies
+/// to thumbnails, folder item counts, and recursive search, each defaulting
+/// to `local-only`. The reasoning carries over exactly: the same feature is
+/// free on one filesystem and a download on another, and which one the user
+/// wants is not knowable from the feature alone. Marcel's default matches
+/// Nautilus's, so a share behaves the way a GNOME user already expects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SpeedTradeoff {
+    Always,
+    #[default]
+    LocalOnly,
+    Never,
+}
+
+impl SpeedTradeoff {
+    /// Whether the work this governs may run against `locality`.
+    pub fn allows(self, locality: Locality) -> bool {
+        match self {
+            Self::Always => true,
+            Self::LocalOnly => !locality.is_remote(),
+            Self::Never => false,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::LocalOnly => "local-only",
+            Self::Never => "never",
+        }
+    }
+
+    fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "always" => Some(Self::Always),
+            "local-only" => Some(Self::LocalOnly),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BrowserState {
     pub view: BrowserView,
@@ -116,7 +164,19 @@ pub(crate) struct BrowserState {
     /// force, and changing it there keeps working, until the user picks one
     /// in the dialog.
     pub theme: Option<Palette>,
+    /// When to *make* a thumbnail. One that another application already
+    /// cached is shown wherever it is found, so this only governs the work,
+    /// not the picture.
+    pub thumbnails: SpeedTradeoff,
+    /// When to walk a tree to total up what it holds, which Properties does.
+    pub folder_sizes: SpeedTradeoff,
+    /// The largest file, in megabytes, worth reading to make a thumbnail of.
+    /// Nautilus's `thumbnail-limit`, and its default.
+    pub thumbnail_limit_mb: u64,
 }
+
+/// Nautilus's `thumbnail-limit` default, in megabytes.
+pub(crate) const DEFAULT_THUMBNAIL_LIMIT_MB: u64 = 50;
 
 impl Default for BrowserState {
     fn default() -> Self {
@@ -126,6 +186,9 @@ impl Default for BrowserState {
             sort: SortOrder::default(),
             sidebar_hidden: false,
             theme: None,
+            thumbnails: SpeedTradeoff::default(),
+            folder_sizes: SpeedTradeoff::default(),
+            thumbnail_limit_mb: DEFAULT_THUMBNAIL_LIMIT_MB,
         }
     }
 }
@@ -218,6 +281,9 @@ pub(crate) fn save(path: &Path, state: BrowserState) -> Result<()> {
         if let Some(theme) = state.theme {
             writeln!(file, "theme={}", theme.name())?;
         }
+        writeln!(file, "thumbnails={}", state.thumbnails.name())?;
+        writeln!(file, "folder_sizes={}", state.folder_sizes.name())?;
+        writeln!(file, "thumbnail_limit_mb={}", state.thumbnail_limit_mb)?;
         Ok(())
     })
 }
@@ -233,6 +299,9 @@ fn parse(contents: &str) -> Result<BrowserState> {
     let mut sort = SortOrder::default();
     let mut sidebar_hidden = false;
     let mut theme = None;
+    let mut thumbnails = SpeedTradeoff::default();
+    let mut folder_sizes = SpeedTradeoff::default();
+    let mut thumbnail_limit_mb = DEFAULT_THUMBNAIL_LIMIT_MB;
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -255,6 +324,11 @@ fn parse(contents: &str) -> Result<BrowserState> {
             "sort_direction" => sort.descending = value == "descending",
             "sidebar" => sidebar_hidden = value == "hidden",
             "theme" => theme = Palette::from_name(value),
+            "thumbnails" => thumbnails = SpeedTradeoff::from_name(value).unwrap_or_default(),
+            "folder_sizes" => folder_sizes = SpeedTradeoff::from_name(value).unwrap_or_default(),
+            "thumbnail_limit_mb" => {
+                thumbnail_limit_mb = value.parse().unwrap_or(DEFAULT_THUMBNAIL_LIMIT_MB);
+            }
             _ => {}
         }
     }
@@ -268,6 +342,9 @@ fn parse(contents: &str) -> Result<BrowserState> {
         sort,
         sidebar_hidden,
         theme,
+        thumbnails,
+        folder_sizes,
+        thumbnail_limit_mb,
     })
 }
 
@@ -292,12 +369,17 @@ mod tests {
             sort: SortOrder { key: SortKey::Modified, descending: true },
             sidebar_hidden: true,
             theme: Some(Palette::TokyoNight),
+            thumbnails: SpeedTradeoff::Always,
+            folder_sizes: SpeedTradeoff::Never,
+            thumbnail_limit_mb: 12,
         };
         save(&path, state).unwrap();
         assert_eq!(load(&path).unwrap(), state);
         assert_eq!(
             fs::read_to_string(path).unwrap(),
-            "version=1\nview=list\nshow_hidden=false\nsort=modified\nsort_direction=descending\nsidebar=hidden\ntheme=tokyo-night\n"
+            "version=1\nview=list\nshow_hidden=false\nsort=modified\nsort_direction=descending\n\
+             sidebar=hidden\ntheme=tokyo-night\nthumbnails=always\nfolder_sizes=never\n\
+             thumbnail_limit_mb=12\n"
         );
     }
 
@@ -326,6 +408,39 @@ mod tests {
             parse("version=1\nview=grid\nshow_hidden=true\nsort=colour\ntheme=none\n").unwrap();
         assert_eq!(state.sort, SortOrder::default());
         assert_eq!(state.theme, None);
+    }
+
+    /// Marcel's defaults are Nautilus's: thumbnails and folder totals on
+    /// local filesystems only, and images past 50 MB left as icons. A file
+    /// written before these keys existed reads as if it had said so.
+    #[test]
+    fn the_network_keys_default_the_way_nautilus_does() {
+        let state = parse("version=1\nview=grid\nshow_hidden=true\n").unwrap();
+        assert_eq!(state.thumbnails, SpeedTradeoff::LocalOnly);
+        assert_eq!(state.folder_sizes, SpeedTradeoff::LocalOnly);
+        assert_eq!(state.thumbnail_limit_mb, 50);
+
+        // An unreadable value for one falls back rather than failing the load,
+        // as every key added after version 1 does.
+        let state =
+            parse("version=1\nview=grid\nshow_hidden=true\nthumbnails=sometimes\nthumbnail_limit_mb=lots\n")
+                .unwrap();
+        assert_eq!(state.thumbnails, SpeedTradeoff::LocalOnly);
+        assert_eq!(state.thumbnail_limit_mb, 50);
+    }
+
+    /// The whole point of the setting: the same feature is free on one
+    /// filesystem and a download on another.
+    #[test]
+    fn a_speed_tradeoff_gates_on_where_the_filesystem_is() {
+        assert!(SpeedTradeoff::Always.allows(Locality::Remote));
+        assert!(SpeedTradeoff::Always.allows(Locality::Local));
+
+        assert!(SpeedTradeoff::LocalOnly.allows(Locality::Local));
+        assert!(!SpeedTradeoff::LocalOnly.allows(Locality::Remote));
+
+        assert!(!SpeedTradeoff::Never.allows(Locality::Local));
+        assert!(!SpeedTradeoff::Never.allows(Locality::Remote));
     }
 
     #[test]
