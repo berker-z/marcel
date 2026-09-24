@@ -616,6 +616,17 @@ impl std::fmt::Display for MountError {
 
 impl std::error::Error for MountError {}
 
+/// What [`GvfsClient::changed`] woke for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GvfsChange {
+    /// A share was connected or disconnected: the list needs re-reading.
+    Mounts,
+    /// The daemon itself was replaced, by a restart or a crash. Every mount
+    /// record held anywhere is stale, and the connection to the old daemon's
+    /// signals is worth nothing, so the caller starts over.
+    DaemonReplaced,
+}
+
 /// A connection to GVfs's daemon, or the reason there is none.
 pub struct GvfsClient {
     connection: zbus::Connection,
@@ -639,6 +650,32 @@ impl GvfsClient {
         Ok(Self { connection, tracker, next_operation: AtomicU64::new(0) })
     }
 
+    /// Wait until something owns the daemon's name, without starting one.
+    ///
+    /// [`connect`](Self::connect) activates GVfs, which is the right thing
+    /// when a file manager opens. Reaching for it again after it has gone is
+    /// not the same: a user who stopped GVfs on purpose would find Marcel
+    /// starting it again every couple of seconds. This waits for a daemon
+    /// somebody else brought up.
+    pub async fn wait_for_daemon() -> Result<()> {
+        use smol::stream::StreamExt as _;
+
+        let connection = zbus::Connection::session().await.context("No session bus")?;
+        let dbus = zbus::fdo::DBusProxy::new(&connection).await?;
+        // Subscribed before asking, or a daemon that appears between the two
+        // is missed and the wait never ends.
+        let mut changes = dbus.receive_name_owner_changed_with_args(&[(0, DAEMON)]).await?;
+        if dbus.name_has_owner(DAEMON.try_into()?).await? {
+            return Ok(());
+        }
+        while let Some(change) = changes.next().await {
+            if change.args()?.new_owner().is_some() {
+                return Ok(());
+            }
+        }
+        Err(anyhow!("The bus stopped reporting name changes"))
+    }
+
     /// Every mount GVfs shows users, in the daemon's order.
     pub async fn mounts(&self) -> Result<Vec<Mount>> {
         let infos: Vec<MountInfo> =
@@ -646,13 +683,28 @@ impl GvfsClient {
         Ok(infos.into_iter().map(mount_from).collect())
     }
 
-    /// Resolve once a mount has come or gone.
-    pub async fn changed(&self) -> Result<()> {
+    /// Resolve once a mount has come or gone, or the daemon behind the name
+    /// has been replaced.
+    ///
+    /// The second case is why this reports which happened. A `Mount` records
+    /// the unique bus name of the backend serving it (`:1.227769`), and a
+    /// daemon that restarts takes every one of those with it: the records a
+    /// caller is holding name peers that no longer exist, and calling
+    /// `Unmount` on one fails with "The name is not activatable" no matter
+    /// whether the share is still mounted. Nothing in the tracker's own
+    /// signals says this has happened, so the bus's `NameOwnerChanged` is
+    /// what has to say it.
+    pub async fn changed(&self) -> Result<GvfsChange> {
         use smol::stream::StreamExt as _;
 
-        let mounted = self.tracker.receive_signal("Mounted").await?.map(|_| ());
-        let unmounted = self.tracker.receive_signal("Unmounted").await?.map(|_| ());
-        let mut any = mounted.race(unmounted);
+        let mounted = self.tracker.receive_signal("Mounted").await?.map(|_| GvfsChange::Mounts);
+        let unmounted = self.tracker.receive_signal("Unmounted").await?.map(|_| GvfsChange::Mounts);
+        let dbus = zbus::fdo::DBusProxy::new(&self.connection).await?;
+        let replaced = dbus
+            .receive_name_owner_changed_with_args(&[(0, DAEMON)])
+            .await?
+            .map(|_| GvfsChange::DaemonReplaced);
+        let mut any = mounted.race(unmounted).race(replaced);
         any.next().await.ok_or_else(|| anyhow!("GVfs stopped sending changes"))
     }
 
@@ -669,7 +721,32 @@ impl GvfsClient {
 
     /// Disconnect a share. Files still open on it make the backend ask, via
     /// `prompts`, whether to wait or force it.
+    ///
+    /// A record whose backend is no longer on the bus is not an error to
+    /// report: it means the daemon was replaced since the mount was listed
+    /// (see [`GvfsChange::DaemonReplaced`]). What the user asked for is that
+    /// this share stop being mounted, so the list is re-read and the answer
+    /// comes from what is mounted now — the current record is disconnected,
+    /// or, if nothing serves the spec any more, it already is.
     pub async fn unmount(&self, mount: &Mount, prompts: Sender<Prompt>) -> Result<(), MountError> {
+        match self.unmount_record(mount, prompts.clone()).await {
+            Err(UnmountFailure::OwnerGone) => {}
+            Err(UnmountFailure::Mount(error)) => return Err(error),
+            Ok(()) => return Ok(()),
+        }
+        let mounts = self.mounts().await.map_err(|error| MountError::Failed(error.to_string()))?;
+        let Some(live) = mounts.into_iter().find(|live| mount.spec.is_served_by(&live.spec)) else {
+            return Ok(());
+        };
+        self.unmount_record(&live, prompts).await.map_err(MountError::from)
+    }
+
+    /// One `Unmount` call against exactly the backend a record names.
+    async fn unmount_record(
+        &self,
+        mount: &Mount,
+        prompts: Sender<Prompt>,
+    ) -> Result<(), UnmountFailure> {
         let operation = self.operation(prompts).await?;
         let proxy = zbus::Proxy::new(
             &self.connection,
@@ -682,7 +759,12 @@ impl GvfsClient {
         // Unlike `MountLocation`, this takes the source flattened: `(sou)`.
         let (name, path) = operation.source();
         let result = proxy.call::<_, _, ()>("Unmount", &(name, path, 0u32)).await;
-        operation.finish(result).await
+        let vanished = matches!(&result, Err(error) if owner_is_gone(error));
+        let finished = operation.finish(result).await;
+        match finished {
+            Err(error) if vanished => Err(UnmountFailure::from_vanished(error)),
+            other => other.map_err(UnmountFailure::Mount),
+        }
     }
 
     /// Export a fresh `MountOperation` for one call.
@@ -702,6 +784,64 @@ impl GvfsClient {
             .map_err(|error| MountError::Failed(format!("Could not answer GVfs: {error}")))?;
         Ok(ExportedOperation { client: self, path: path.into(), cancelled })
     }
+}
+
+/// Why one `Unmount` call against one record did not go through.
+enum UnmountFailure {
+    /// The backend the record names is not on the bus at all, so the call
+    /// never reached a GVfs. Distinguishing this from a refusal by a live
+    /// backend is the whole point: one is worth retrying against a fresh
+    /// record, the other is the server's answer and must reach the user.
+    OwnerGone,
+    Mount(MountError),
+}
+
+impl UnmountFailure {
+    /// Cancellation wins over a vanished peer: the user answered a prompt,
+    /// which means a backend was there to ask.
+    fn from_vanished(error: MountError) -> Self {
+        match error {
+            MountError::Cancelled => Self::Mount(MountError::Cancelled),
+            MountError::Failed(_) => Self::OwnerGone,
+        }
+    }
+}
+
+impl From<MountError> for UnmountFailure {
+    fn from(error: MountError) -> Self {
+        Self::Mount(error)
+    }
+}
+
+impl From<UnmountFailure> for MountError {
+    fn from(failure: UnmountFailure) -> Self {
+        match failure {
+            UnmountFailure::Mount(error) => error,
+            // Reached only when a record that was fresh a moment ago has
+            // gone in between, which is the share being disconnected.
+            UnmountFailure::OwnerGone => MountError::Failed(
+                "GVfs stopped serving that share while it was being disconnected".to_string(),
+            ),
+        }
+    }
+}
+
+/// Whether the bus refused the call because nothing owns the name, rather
+/// than a backend refusing the unmount.
+fn owner_is_gone(error: &zbus::Error) -> bool {
+    matches!(error, zbus::Error::MethodError(name, _, _) if names_a_missing_peer(name.as_str()))
+}
+
+/// The two D-Bus errors that mean the call never reached anyone.
+///
+/// `ServiceUnknown` is what a unique name that has gone gets, and it is the
+/// one a user sees as "The name is not activatable"; `NameHasNoOwner` is the
+/// same answer worded for a well-known one.
+fn names_a_missing_peer(error_name: &str) -> bool {
+    matches!(
+        error_name,
+        "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner"
+    )
 }
 
 /// A `MountOperation` on the bus for the span of one call.
@@ -751,6 +891,117 @@ mod tests {
 
     fn items(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// A mount records the unique name of the backend serving it. Restart
+    /// GVfs and every one of those names is dead, so `Unmount` against a
+    /// record listed beforehand comes back "The name is not activatable" —
+    /// which says nothing about whether the share is still mounted, and must
+    /// not reach the user as though it did.
+    #[test]
+    fn a_call_that_reached_nobody_is_told_apart_from_a_backend_refusing() {
+        assert!(names_a_missing_peer("org.freedesktop.DBus.Error.ServiceUnknown"));
+        assert!(names_a_missing_peer("org.freedesktop.DBus.Error.NameHasNoOwner"));
+
+        // A live backend saying no. These are the server's answer and belong
+        // on screen exactly as they are.
+        assert!(!names_a_missing_peer("org.freedesktop.DBus.Error.AccessDenied"));
+        assert!(!names_a_missing_peer("org.gtk.vfs.Error.Busy"));
+        assert!(!names_a_missing_peer("org.freedesktop.DBus.Error.NoReply"));
+    }
+
+    const PRIVATE_BUS_CHILD: &str = "MARCEL_GVFS_PRIVATE_BUS_TEST_CHILD";
+    const PRIVATE_BUS_CONFIG: &str = "MARCEL_TEST_DBUS_SESSION_CONFIG";
+
+    /// Watching for a daemon that is not there yet, on a bus where it can be
+    /// made to appear on cue.
+    ///
+    /// The live test can only check the case where a daemon is already
+    /// running, which `NameHasOwner` answers without the signal ever being
+    /// read. This checks the other half, and the half that matters after a
+    /// restart: the name appearing while Marcel is waiting. Both ways of
+    /// getting it wrong — an argument filter that matches nothing, a
+    /// subscription made after the check — look like a wait that never ends,
+    /// so a timeout is the assertion.
+    #[test]
+    fn private_session_bus_daemon_wait() {
+        if std::env::var_os(PRIVATE_BUS_CHILD).is_some() {
+            return;
+        }
+        let module = module_path!()
+            .strip_prefix(concat!(env!("CARGO_PKG_NAME"), "::"))
+            .unwrap_or(module_path!());
+        let mut command = std::process::Command::new("dbus-run-session");
+        if let Some(config) = std::env::var_os(PRIVATE_BUS_CONFIG) {
+            command.arg("--config-file").arg(config);
+        }
+        let output = command
+            .arg("--")
+            .arg(std::env::current_exe().expect("test executable must have a path"))
+            .arg("--exact")
+            .arg(format!("{module}::private_session_bus_daemon_wait_child"))
+            .arg("--nocapture")
+            .env(PRIVATE_BUS_CHILD, "1")
+            .output()
+            .expect("dbus-run-session must be available in Marcel's development environment");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "private session-bus child failed:\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child must have run exactly one test:\n{stdout}\n{stderr}"
+        );
+    }
+
+    #[test]
+    fn private_session_bus_daemon_wait_child() {
+        if std::env::var_os(PRIVATE_BUS_CHILD).is_none() {
+            return;
+        }
+        smol::block_on(async {
+            let connection =
+                zbus::Connection::session().await.expect("the private bus must be reachable");
+            let dbus = zbus::fdo::DBusProxy::new(&connection).await.unwrap();
+            assert!(
+                !dbus.name_has_owner(DAEMON.try_into().unwrap()).await.unwrap(),
+                "a fresh private bus must not already have a GVfs on it"
+            );
+
+            let appear = async {
+                // Long enough for the wait to have subscribed and found no
+                // owner, so the name genuinely arrives while it is watching.
+                smol::Timer::after(std::time::Duration::from_millis(250)).await;
+                connection
+                    .request_name(DAEMON)
+                    .await
+                    .expect("the private bus must hand over the name");
+            };
+            let wait = async {
+                GvfsClient::wait_for_daemon().await.expect("watching the bus must not fail");
+                true
+            };
+            let timeout = async {
+                smol::Timer::after(std::time::Duration::from_secs(10)).await;
+                false
+            };
+            let (saw_it, ()) = smol::future::zip(smol::future::or(wait, timeout), appear).await;
+            assert!(saw_it, "a daemon taking the name must end the wait");
+        });
+    }
+
+    /// Cancelling wins over a vanished peer: the user cannot have answered a
+    /// prompt unless a backend was there to ask it, so the retry that a
+    /// stale record earns would re-ask a question already answered.
+    #[test]
+    fn cancelling_an_unmount_is_never_read_as_a_stale_record() {
+        assert!(matches!(
+            UnmountFailure::from_vanished(MountError::Cancelled),
+            UnmountFailure::Mount(MountError::Cancelled)
+        ));
+        assert!(matches!(
+            UnmountFailure::from_vanished(MountError::Failed("gone".to_string())),
+            UnmountFailure::OwnerGone
+        ));
     }
 
     #[test]
@@ -902,6 +1153,29 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+
+    /// The signal-argument filter and `NameHasOwner` are the two things here
+    /// that only the real bus can check: an argument index off by one makes
+    /// the wait miss every daemon that ever appears, and both failures look
+    /// like nothing happening.
+    #[test]
+    #[ignore = "needs GVfs on the session bus"]
+    fn live_wait_for_daemon_returns_at_once_while_one_is_running() {
+        smol::block_on(async {
+            // Proves a daemon is up, so the wait must not block.
+            GvfsClient::connect().await.expect("GVfs has to be running for this test");
+            let waited = smol::future::or(
+                async { GvfsClient::wait_for_daemon().await.map(|()| true) },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                    Ok(false)
+                },
+            )
+            .await
+            .unwrap();
+            assert!(waited, "a running daemon must be seen without waiting for a signal");
+        });
+    }
 
     /// Talks to the real GVfs, so it is opt-in: `cargo test -- --ignored
     /// live_mounts --nocapture` prints what the Network section would list.

@@ -23,7 +23,7 @@ use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Task}
 
 use crate::{
     config,
-    desktop::gvfs::{GvfsClient, Location, Mount, MountError, MountSpec},
+    desktop::gvfs::{GvfsChange, GvfsClient, Location, Mount, MountError, MountSpec},
     surface::{self, Report},
 };
 
@@ -106,6 +106,14 @@ pub fn save(path: &Path, servers: &[Server]) -> Result<()> {
 // ---------------------------------------------------------------------------
 // The store.
 
+/// How long to let a daemon that has just taken the name finish starting.
+///
+/// The bus reports the name as owned the moment the daemon takes it, which
+/// is before it can answer a call on it. Long enough to let a
+/// `systemctl --user restart gvfs-daemon` settle, short enough that the
+/// Network section is back before the user has finished wondering.
+const GVFS_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 struct GlobalNetwork(Entity<NetworkStore>);
 
 impl Global for GlobalNetwork {}
@@ -183,31 +191,65 @@ impl NetworkStore {
                     return;
                 }
             };
-            let _ = this.update(cx, |this, _| this.client = Some(Arc::clone(&client)));
+            let mut client = client;
             loop {
-                match client.mounts().await {
-                    Ok(mounts) => {
-                        if this
-                            .update(cx, |this, cx| {
-                                this.mounts = mounts;
-                                cx.notify();
-                            })
-                            .is_err()
-                        {
-                            return;
+                let _ = this.update(cx, |this, _| this.client = Some(Arc::clone(&client)));
+                let restart = loop {
+                    match client.mounts().await {
+                        Ok(mounts) => {
+                            if this
+                                .update(cx, |this, cx| {
+                                    this.mounts = mounts;
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
+                        Err(error) => eprintln!("Marcel could not list network shares: {error:#}"),
                     }
-                    Err(error) => eprintln!("Marcel could not list network shares: {error:#}"),
-                }
-                if let Err(error) = client.changed().await {
+                    match client.changed().await {
+                        Ok(GvfsChange::Mounts) => continue,
+                        // Every mount record names a backend of the daemon
+                        // that has just gone, and so does the subscription
+                        // these signals arrive on. Nothing of this client is
+                        // worth keeping.
+                        Ok(GvfsChange::DaemonReplaced) => break None,
+                        Err(error) => break Some(error),
+                    }
+                };
+                if let Some(error) = restart {
                     eprintln!("Marcel stopped watching network shares: {error:#}");
-                    let _ = this.update(cx, |this, cx| {
+                }
+                // The share list belongs to a daemon that is gone: showing it
+                // would offer rows that cannot be clicked. The section comes
+                // back with the daemon.
+                if this
+                    .update(cx, |this, cx| {
                         this.client = None;
                         this.mounts.clear();
                         cx.notify();
-                    });
+                    })
+                    .is_err()
+                {
                     return;
                 }
+                client = loop {
+                    // Waited for rather than started: see `wait_for_daemon`.
+                    if let Err(error) = GvfsClient::wait_for_daemon().await {
+                        eprintln!("Marcel stopped waiting for GVfs: {error:#}");
+                        return;
+                    }
+                    // The name is owned from the moment the daemon takes it,
+                    // which is before it is ready to answer; a failed connect
+                    // here simply waits for the next one.
+                    cx.background_executor().timer(GVFS_RECONNECT_DELAY).await;
+                    match GvfsClient::connect().await {
+                        Ok(client) => break Arc::new(client),
+                        Err(error) => eprintln!("Marcel could not reach GVfs: {error:#}"),
+                    }
+                };
             }
         });
 
@@ -357,7 +399,20 @@ impl NetworkStore {
         prompts::serve(incoming, origin, cx);
         cx.spawn(async move |this, cx| {
             let result = client.unmount(&mount, prompts).await;
-            let _ = this.update(cx, |this, cx| this.finish(&mount.spec, cx));
+            // The `Unmounted` signal refreshes the list on its own, but a
+            // record that was stale enough to need `unmount`'s second attempt
+            // came from a daemon whose signals never arrived. Re-reading here
+            // costs one call and leaves the row matching the truth either way.
+            let mounts = match &result {
+                Ok(()) => client.mounts().await.ok(),
+                Err(_) => None,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.finish(&mount.spec, cx);
+                if let Some(mounts) = mounts {
+                    this.mounts = mounts;
+                }
+            });
             let report = match result {
                 Ok(()) => Some(Report::Success(format!("Disconnected from “{}”", mount.name))),
                 Err(MountError::Cancelled) => None,
