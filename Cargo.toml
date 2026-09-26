@@ -37,6 +37,8 @@ path = "src/main.rs"
 anyhow = "1"
 ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 async-channel = "2.5"
+calloop = "0.14"
+calloop-wayland-source = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = "0.18.2"
 freedesktop-icons = "0.4"
@@ -60,6 +62,9 @@ tempfile = "3"
 trash = "5"
 unicode-width = "0.2"
 url = "2"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 xattr = "1"
 zbus = { version = "5.18", default-features = false, features = ["async-io"] }
 

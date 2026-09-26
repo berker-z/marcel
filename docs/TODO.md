@@ -128,7 +128,14 @@ libraries, portals, icon and thumbnail paths).
 ## Parked
 
 - X11 outbound drag. Wayland is the tested target.
-- Desktop clipboard interoperability for files.
+- The file clipboard on GNOME and X11. Mutter offers no data-control
+  protocol, and a second connection cannot use `wl_data_device` without an
+  input serial from its own surface, so it would have to go through GPUI:
+  let a `ClipboardItem` carry extra MIME types and have `send` answer each
+  with its own bytes (`gpui_linux` `wayland/clipboard.rs` and `client.rs`,
+  plus the X11 clipboard). Upstream it or pin a fork. Also parked: pasting
+  `sftp://` URIs another program copied, which needs the GVfs URI mapped to
+  its FUSE path.
 - Bundle ffmpeg, or keep finding it on `PATH`. Decided on 2026-09-18 for
   `PATH` plus the `settings.media` Nix switch: ffmpeg-headless is a 300 MiB
   closure against Marcel's 224, and only video posters, video thumbnails,

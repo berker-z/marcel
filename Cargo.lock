@@ -3888,6 +3888,8 @@ dependencies = [
  "anyhow",
  "ashpd 0.12.3",
  "async-channel",
+ "calloop",
+ "calloop-wayland-source",
  "chrono",
  "cpal",
  "freedesktop-icons",
@@ -3911,6 +3913,9 @@ dependencies = [
  "trash",
  "unicode-width",
  "url",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
  "xattr",
  "zbus",
 ]

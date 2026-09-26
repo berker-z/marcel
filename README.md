@@ -32,7 +32,7 @@ Audio plays in the pane: cover art and tags, a waveform you can click to seek, a
 
 ### File operations
 
-Copy and move with progress and cancellation. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge, and one answer can apply to the rest of the operation. Undo and redo cover copy, move, duplicate, rename, Trash, restore, archive creation, extraction, and permission changes. Permanent deletion requires confirmation and stays out of undo history. New folders and files, zip creation, extraction of the common free formats, Move To… through a small folder dialog, and Copy Path.
+Copy and move with progress and cancellation. When a destination is taken, Marcel asks whether to replace, rename, skip, or merge, and one answer can apply to the rest of the operation. Undo and redo cover copy, move, duplicate, rename, Trash, restore, archive creation, extraction, and permission changes. Permanent deletion requires confirmation and stays out of undo history. New folders and files, zip creation, extraction of the common free formats, Move To… through a small folder dialog, and Copy Path. Copy and Cut share the desktop clipboard, so files cross to Nautilus, Dolphin, a terminal, or a chat client and back.
 
 Properties (`Ctrl+I`, or `Alt+Enter` if your hands know KDE) shows what an item is, where it lives, who owns it, and its permissions and timestamps, plus what the preview loaders know: image dimensions, PDF page count, text line count, archive contents. Folders are measured in the background while the dialog is open. The permission bits are checkboxes, and ticking one is a `chmod` that undoes like everything else.
 
@@ -87,7 +87,7 @@ Known gaps, roughly in the order they are likely to be addressed:
 * No search. You can filter the folder you are in, but there is no recursive search by name or content.
 * A share does not update as files change on it; Refresh reloads. Neither does an `ntfs-3g` mount, since both are FUSE.
 * No LUKS, MTP, or optical drives in the sidebar, and no SMB browsing of the local network; connect to a share by address.
-* The file clipboard is Marcel's own. Ctrl+C in Marcel and Ctrl+V in Nautilus, a terminal, or a chat client does nothing, and the other way round does nothing either. Drag and drop is how files cross into other applications. Copy Path puts the paths on the real clipboard as text.
+* Copy and Cut reach other applications through the Wayland data-control protocol, which Hyprland, Sway, and KDE offer and GNOME does not. On GNOME or under X11 the file clipboard is Marcel's own: Ctrl+C here and Ctrl+V in Nautilus does nothing. Anywhere, files another program copied from a network location it mounted itself (an `sftp://` URI from Nautilus) are skipped, because Marcel only pastes local paths.
 * Undo history lives in the running process. Close Marcel and the operations it could have undone are just history.
 * No dual pane. Open a second window (Open in New Window on a folder, or run `marcel-rs` again) and drag between the two.
 * No video playback; the preview pane shows a frame and a play button for your player.

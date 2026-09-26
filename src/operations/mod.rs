@@ -36,6 +36,7 @@ use std::{
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
 use crate::{
+    desktop::clipboard as system_clipboard,
     fsops::{
         CommittedOperation, CompletedTransfer, DirectoryChanges, HistoryDirection, MutationOutcome,
         OperationJournal, OperationRecord, TransferMode, TransferProgress,
@@ -60,11 +61,7 @@ mod conflict_dialog;
 /// How often an active operation's progress is redrawn.
 const PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
 
-#[derive(Clone, Debug)]
-pub(crate) struct FileClipboard {
-    pub mode: TransferMode,
-    pub paths: Vec<PathBuf>,
-}
+pub(crate) use crate::desktop::clipboard::FileClipboard;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OperationProgressKind {
@@ -129,6 +126,7 @@ impl Global for GlobalOperations {}
 /// Create the application's operation owner and arrange for it to release what
 /// it is holding when the application exits.
 pub fn init(cx: &mut App) {
+    system_clipboard::start();
     let coordinator = cx.new(|_| OperationCoordinator::default());
     cx.set_global(GlobalOperations(coordinator.clone()));
     // Quitting destroys the records that could restore a replaced file, so the
@@ -214,11 +212,17 @@ impl OperationCoordinator {
         !self.busy && self.journal.can_redo()
     }
 
-    pub fn clipboard(&self) -> Option<&FileClipboard> {
-        self.clipboard.as_ref()
+    /// What Paste would paste: the desktop clipboard, which other
+    /// applications copy to as well, or Marcel's own where there is none.
+    pub fn clipboard(&self) -> Option<FileClipboard> {
+        match system_clipboard::system() {
+            Some(system) => system,
+            None => self.clipboard.clone(),
+        }
     }
 
     pub fn set_clipboard(&mut self, clipboard: Option<FileClipboard>) {
+        system_clipboard::publish(clipboard.clone());
         self.clipboard = clipboard;
     }
 
@@ -293,11 +297,14 @@ impl OperationCoordinator {
             completed.iter().map(|transfer| transfer.source.as_path()).collect::<HashSet<_>>();
         let remaining = clipboard
             .paths
-            .into_iter()
+            .iter()
             .filter(|path| !completed_sources.contains(path.as_path()))
+            .cloned()
             .collect::<Vec<_>>();
-        self.clipboard = (!remaining.is_empty())
+        let remaining = (!remaining.is_empty())
             .then_some(FileClipboard { mode: clipboard.mode, paths: remaining });
+        system_clipboard::replace_if_current(&clipboard, remaining.clone());
+        self.clipboard = remaining;
     }
 
     /// Take the one busy lock.

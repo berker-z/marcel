@@ -54,8 +54,9 @@ impl Marcel {
             return;
         }
         let count = paths.len();
-        // The clipboard is the application's, so cutting here and pasting in
-        // another window is one gesture rather than two disconnected ones.
+        // The clipboard is the desktop's where the compositor lets Marcel
+        // reach it, and the application's otherwise, so cutting here and
+        // pasting in another window, or another file manager, is one gesture.
         self.operations.update(cx, |operations, _| {
             operations.set_clipboard(Some(FileClipboard { mode, paths }));
         });
@@ -65,14 +66,14 @@ impl Marcel {
             TransferMode::Move => "Cut",
         };
         window.push_notification(
-            Notification::success(format!("{verb} {count} item(s) to the file clipboard")),
+            Notification::success(format!("{verb} {count} item(s) to the clipboard")),
             cx,
         );
         cx.notify();
     }
 
     pub(super) fn start_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = self.operations.read(cx).clipboard().cloned() else {
+        let Some(clipboard) = self.operations.read(cx).clipboard() else {
             return;
         };
         let destination = self.directory.current_dir.clone();

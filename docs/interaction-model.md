@@ -89,10 +89,15 @@ recursive filename/content search is a separate future feature.
 | `Delete` | Move the selection to Trash |
 | `Shift+Delete` | Permanently delete after explicit confirmation |
 
-Copy and cut currently use a session-local Marcel file clipboard. The shared
-commands and menus do not depend on that implementation detail. Desktop
-`text/uri-list` and `x-special/gnome-copied-files` support remains required so
-transfers can interoperate with other file managers.
+Copy and cut put files on the desktop clipboard as
+`x-special/gnome-copied-files`, `text/uri-list` (with
+`application/x-kde-cutselection` for a cut), and plain-text paths, and Paste
+reads the same formats from other applications. GPUI only offers text, so
+`src/desktop/clipboard.rs` keeps its own Wayland connection and speaks
+`ext-data-control-v1` or `zwlr-data-control-unstable-v1`. Where the compositor
+offers neither (GNOME, X11) the clipboard stays inside Marcel. A cut pasted
+successfully is cleared from the desktop clipboard; items that failed stay on
+it for a retry.
 
 Permanent deletion is a background, progress-reporting operation but is not
 cancellable after confirmation and preflight. Cancellation at that point would
