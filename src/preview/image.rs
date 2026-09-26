@@ -13,6 +13,7 @@ use image::{
     metadata::Orientation,
 };
 
+use super::heif;
 use crate::fsops::local::open_regular_file;
 
 const PREVIEW_EDGE: u32 = 2_048;
@@ -38,15 +39,19 @@ pub fn prepare(path: &Path, cancelled: &AtomicBool) -> Result<Arc<RenderImage>> 
 
     // Every open below goes through `open_regular_file`: a FIFO named like an
     // image would otherwise block the preview worker forever.
+    //
+    // A HEIF file has no `ImageFormat`: libheif decodes it through a hook,
+    // which `format()` reports as `None`. It is a still like any other, and a
+    // file nothing recognises fails in the still decode with the reason.
+    heif::register();
     let format =
         ImageReader::new(BufReader::new(open_regular_file(path)?)).with_guessed_format()?.format();
-    let format = format.context("image format could not be identified")?;
-    let frames =
-        if matches!(format, ImageFormat::Gif | ImageFormat::WebP) && is_animated(path, format)? {
+    let frames = match format {
+        Some(format @ (ImageFormat::Gif | ImageFormat::WebP)) if is_animated(path, format)? => {
             decode_bounded_animation(path, format, cancelled)?
-        } else {
-            vec![decode_bounded_still(path, cancelled)?]
-        };
+        }
+        _ => vec![decode_bounded_still(path, cancelled)?],
+    };
     check_cancelled(cancelled)?;
     Ok(Arc::new(RenderImage::new(frames)))
 }
@@ -314,6 +319,38 @@ mod tests {
             assert!(budget.admit(PREVIEW_EDGE, PREVIEW_EDGE));
         }
         assert!(!budget.admit(PREVIEW_EDGE, PREVIEW_EDGE));
+    }
+
+    /// The container says to turn the stored pixels a quarter clockwise.
+    /// libheif does that while decoding; turning them again here would put
+    /// the blue quadrant bottom-right, and not at all would leave it
+    /// top-left.
+    #[test]
+    fn a_heic_is_turned_by_its_own_rotation_once() {
+        let output =
+            prepare(&crate::preview::fixture("rotated.heic"), &AtomicBool::new(false)).unwrap();
+        assert_eq!((output.size(0).width.0, output.size(0).height.0), (240, 320));
+
+        let bgra = output.as_bytes(0).unwrap();
+        let pixel = |x: usize, y: usize| &bgra[(y * 240 + x) * 4..][..3];
+        let is_blue = |bgr: &[u8]| bgr[0] > 200 && bgr[2] < 60;
+        assert!(is_blue(pixel(230, 10)), "top-right is {:?}", pixel(230, 10));
+        assert!(!is_blue(pixel(10, 10)), "top-left is {:?}", pixel(10, 10));
+    }
+
+    #[test]
+    fn previews_a_ten_bit_avif() {
+        let output =
+            prepare(&crate::preview::fixture("photo.avif"), &AtomicBool::new(false)).unwrap();
+        assert_eq!((output.size(0).width.0, output.size(0).height.0), (64, 48));
+    }
+
+    #[test]
+    fn a_file_no_decoder_recognises_is_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("noise.png");
+        std::fs::write(&source, b"not an image at all").unwrap();
+        assert!(prepare(&source, &AtomicBool::new(false)).is_err());
     }
 
     #[test]

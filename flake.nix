@@ -128,6 +128,10 @@
 
           rustToolchain = mkRustToolchain pkgs;
 
+          # Linked, not dlopened: `libheif-sys` finds it through pkg-config at
+          # build time, and test binaries find it here at run time.
+          libheif = pkgs.callPackage ./nix/libheif.nix { };
+
           runtimeLibraries = with pkgs; [
             alsa-lib
             expat
@@ -142,6 +146,7 @@
             libxcursor
             libxi
             libxrandr
+            libheif
           ];
         in
         {

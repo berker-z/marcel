@@ -8,6 +8,7 @@ use gpui::RenderImage;
 
 pub mod audio;
 pub mod details;
+pub mod heif;
 pub mod image;
 pub mod media;
 pub mod pdf;
@@ -304,8 +305,11 @@ pub(super) fn is_probably_text(bytes: &[u8]) -> bool {
     suspicious * 100 / bytes.len() < 5
 }
 
+/// Extensions the preview can decode: the `image` crate's formats as Marcel
+/// enables them, and HEIC and AVIF through libheif.
 pub(super) fn is_image_extension(path: &Path) -> bool {
-    has_extension(path, &["avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "tif", "tiff", "webp"])
+    has_extension(path, &["bmp", "gif", "ico", "jpeg", "jpg", "png", "tif", "tiff", "webp"])
+        || heif::has_extension(path)
 }
 
 pub(super) fn has_extension(path: &Path, extensions: &[&str]) -> bool {
@@ -329,6 +333,12 @@ fn language_for_path(path: &Path) -> &'static str {
         Some("css") => "css",
         _ => "text",
     }
+}
+
+/// A file from `src/preview/fixtures`.
+#[cfg(test)]
+pub(crate) fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/preview/fixtures").join(name)
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ The Trash is the last place in the sidebar. It shows what is in every freedeskto
 
 ### Preview
 
-Text and code, images, continuously scrolling PDFs, and folder listings. Thumbnails come from the freedesktop cache, shared with other applications rather than generated again.
+Text and code, images (HEIC and AVIF included), continuously scrolling PDFs, and folder listings. Thumbnails come from the freedesktop cache, shared with other applications rather than generated again.
 
 Audio plays in the pane: cover art and tags, a waveform you can click to seek, and spectrum bars that move with the sound. MP3, FLAC, Ogg Vorbis, WAV, AAC, and ALAC decode in-process. Video gets a poster frame, its duration, size, and codecs, a play button that hands the file to your video player, and a thumbnail in the grid. Video, and any audio Marcel cannot decode itself (Opus voice notes, mostly), need `ffprobe` and `ffmpeg` on `PATH`; they are not bundled because ffmpeg is a 300 MiB closure, bigger than Marcel. The Nix module has `settings.media = true` to put them there.
 

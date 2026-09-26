@@ -213,12 +213,15 @@ fn inspect_file(path: &Path, cancelled: &Arc<AtomicBool>) -> io::Result<(String,
         let mut mime = sniffed;
         let details = image_details(path)
             .map(|(width, height, format)| {
-                mime.get_or_insert_with(|| format.to_mime_type().to_string());
-                Details::Image {
-                    width,
-                    height,
-                    format: format.extensions_str().first().unwrap_or(&"").to_uppercase(),
+                if let Some(format) = format {
+                    mime.get_or_insert_with(|| format.to_mime_type().to_string());
                 }
+                // A format decoded through a hook (HEIC and AVIF, by libheif)
+                // has no `ImageFormat`, and its extension names it instead.
+                let name = format
+                    .and_then(|format| format.extensions_str().first().copied())
+                    .or_else(|| path.extension().and_then(|extension| extension.to_str()));
+                Details::Image { width, height, format: name.unwrap_or("").to_uppercase() }
             })
             .unwrap_or(Details::None);
         return Ok((fallback(mime), details));
@@ -284,10 +287,11 @@ fn inspect_file(path: &Path, cancelled: &Arc<AtomicBool>) -> io::Result<(String,
     Ok((fallback(sniffed), Details::None))
 }
 
-fn image_details(path: &Path) -> anyhow::Result<(u32, u32, image::ImageFormat)> {
+fn image_details(path: &Path) -> anyhow::Result<(u32, u32, Option<image::ImageFormat>)> {
+    super::heif::register();
     let reader =
         ImageReader::new(BufReader::new(open_regular_file(path)?)).with_guessed_format()?;
-    let format = reader.format().ok_or_else(|| anyhow::anyhow!("unrecognized image format"))?;
+    let format = reader.format();
     let (width, height) = reader.into_dimensions()?;
     Ok((width, height, format))
 }
@@ -599,6 +603,18 @@ mod tests {
         assert_eq!(
             item.details,
             Details::Image { width: 37, height: 11, format: "PNG".to_string() }
+        );
+    }
+
+    /// The size shown is the upright one, after the container's rotation.
+    #[test]
+    fn a_heic_reports_its_upright_dimensions() {
+        let item = inspect(&crate::preview::fixture("rotated.heic"), &no_cancel()).unwrap();
+
+        assert!(item.mime.as_deref().is_some_and(|mime| mime.starts_with("image/hei")));
+        assert_eq!(
+            item.details,
+            Details::Image { width: 240, height: 320, format: "HEIC".to_string() }
         );
     }
 

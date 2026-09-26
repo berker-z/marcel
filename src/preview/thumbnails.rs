@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::fsops::local::create_private_dir_all;
 
-use super::media;
+use super::{heif, media};
 
 const THUMBNAIL_EDGE: u32 = 128;
 /// The largest cached PNG accepted from another application. The spec's
@@ -152,22 +152,18 @@ fn load_or_create_in(
     };
     check_cancelled(cancelled)?;
 
-    let mut limits = Limits::no_limits();
-    limits.max_alloc = Some(MAX_DECODE_BYTES);
-    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
-    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
-
-    let mut reader =
-        ImageReader::new(BufReader::new(crate::fsops::local::open_regular_file(decode_source)?));
-    reader.limits(limits);
-    let mut decoder = reader.with_guessed_format()?.into_decoder()?;
-    let dimensions = decoder.dimensions();
-    if u64::from(dimensions.0) * u64::from(dimensions.1) > MAX_SOURCE_PIXELS {
-        bail!("image exceeds thumbnail pixel limit");
-    }
-
-    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let image = DynamicImage::from_decoder(decoder)?;
+    // A thumbnail the file already carries is used when it is big enough.
+    // A failure to read one is not the file's verdict: the full decode below
+    // runs and reports it properly if the file really is broken.
+    let embedded = if heif::has_extension(decode_source) {
+        heif::embedded_thumbnail(decode_source, THUMBNAIL_EDGE).ok().flatten()
+    } else {
+        None
+    };
+    let (image, orientation) = match embedded {
+        Some(image) => (DynamicImage::ImageRgba8(image), Orientation::NoTransforms),
+        None => decode_bounded(decode_source)?,
+    };
     check_cancelled(cancelled)?;
 
     // Adapted from Yazi's image pre-cache path: resize the expensive full
@@ -199,6 +195,29 @@ fn load_or_create_in(
     }
     temporary.persist(&cache_path).map_err(|error| error.error)?;
     Ok(cache_path)
+}
+
+/// The whole picture at `path`, within the source limits, and the rotation
+/// its EXIF asks for. HEIC and AVIF come through libheif's hook, already
+/// turned, so theirs is always `NoTransforms`.
+fn decode_bounded(path: &Path) -> Result<(DynamicImage, Orientation)> {
+    let mut limits = Limits::no_limits();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+
+    heif::register();
+    let mut reader =
+        ImageReader::new(BufReader::new(crate::fsops::local::open_regular_file(path)?));
+    reader.limits(limits);
+    let mut decoder = reader.with_guessed_format()?.into_decoder()?;
+    let dimensions = decoder.dimensions();
+    if u64::from(dimensions.0) * u64::from(dimensions.1) > MAX_SOURCE_PIXELS {
+        bail!("image exceeds thumbnail pixel limit");
+    }
+
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    Ok((DynamicImage::from_decoder(decoder)?, orientation))
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
@@ -328,6 +347,24 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.is_file());
         assert!(cached_thumbnail_is_current(&first, &uri, &mtime, &size));
+    }
+
+    /// Both routes a HEIF file can take: `photo.heic` carries a 160×120
+    /// thumbnail and is thumbnailed from it, `rotated.heic` carries none and
+    /// is decoded whole, turned upright by libheif.
+    #[test]
+    fn thumbnails_heic_with_and_without_an_embedded_thumbnail() {
+        let sandbox = Sandbox::new();
+        let cache = sandbox.path("cache");
+        for (name, expected) in [("photo.heic", (128, 96)), ("rotated.heic", (96, 128))] {
+            let source = sandbox.path(name);
+            std::fs::copy(crate::preview::fixture(name), &source).unwrap();
+
+            let thumbnail =
+                load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &no_cancel()).unwrap();
+            let decoded = image::open(&thumbnail).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), expected, "{name}");
+        }
     }
 
     /// The flag is the listing's: once it is set the tile is gone and the

@@ -30,6 +30,8 @@
   _7zz,
 }:
 let
+  libheif = callPackage ./libheif.nix { };
+
   # Keep the standalone nixpkgs recipe available; flake builds use Crane so
   # dependencies survive application-only source changes.
   buildPackage =
@@ -169,7 +171,7 @@ buildPackage (finalAttrs: {
     _7zz
   ];
 
-  buildInputs = runtimeLibraries;
+  buildInputs = runtimeLibraries ++ [ libheif ];
 
   preCheck = ''
     export HOME="$TMPDIR"

@@ -185,6 +185,20 @@ The Yazi MIT license notice applies to the adaptations identified above:
   it. Marcel's other headline audio dependency, `cpal` (Apache-2.0), plays the
   decoded samples.
 
+## libheif
+
+- Project: <https://github.com/strukturag/libheif>, with the Rust bindings
+  `libheif-rs` and `libheif-sys` (<https://github.com/Cykooz/libheif-rs>)
+- License: libheif is LGPL-3.0-or-later; its HEVC decoder libde265 is
+  LGPL-3.0-or-later and its AV1 decoder dav1d BSD-2-Clause; the bindings are
+  MIT
+- Use in Marcel: decodes HEIC and AVIF for thumbnails and the image preview,
+  registered with the `image` crate as a decoding hook in
+  `src/preview/heif.rs`. libheif and its decoders are linked dynamically from
+  an unmodified source build (`nix/libheif.nix` only turns encoders and the
+  gdk-pixbuf loader off), so the LGPL's relinking terms are met by the shared
+  libraries themselves, and nothing of libheif is copied into Marcel.
+
 ## Poppler
 
 - Project: <https://poppler.freedesktop.org/>

@@ -43,6 +43,9 @@ Decoded images are held to a budget (64 MiB for thumbnails and icons, 128 MiB
 for PDF pages) and released with their GPU tiles, so paging through a long
 document does not grow the process without limit; an animation past 240
 frames or 64 MiB plays what fitted rather than failing.
+HEIC and AVIF decode through libheif, built without its encoders; a phone
+photo is thumbnailed from the small preview stored inside it rather than
+decoded whole.
 Thumbnails come from the freedesktop cache, so they are shared with other
 applications rather than duplicated; video thumbnails and anything Marcel
 cannot decode itself (Opus) need ffmpeg on `PATH`.
