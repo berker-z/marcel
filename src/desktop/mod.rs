@@ -17,3 +17,11 @@ pub mod picker;
 pub mod places;
 pub mod terminal;
 pub(crate) mod volumes;
+
+/// Byte strings from GLib and UDisks2 carry their C terminator.
+fn trim_nul(mut bytes: Vec<u8>) -> Vec<u8> {
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    bytes
+}

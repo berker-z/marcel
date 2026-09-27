@@ -23,6 +23,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
+
+use super::trim_nul;
 use zbus::{
     fdo::{ManagedObjects, ObjectManagerProxy},
     zvariant::{OwnedObjectPath, OwnedValue},
@@ -472,7 +474,7 @@ fn display_name(block: &BlockFacts) -> String {
     if let Some(name) =
         block.fstab.as_ref().and_then(|entry| fstab_option_value(&entry.options, "x-gvfs-name"))
     {
-        return unescape_fstab(name);
+        return String::from_utf8_lossy(&crate::mounts::unescape(name.as_bytes())).into_owned();
     }
     if !block.label.is_empty() {
         return block.label.clone();
@@ -502,29 +504,6 @@ fn size_for_display(bytes: u64) -> String {
     } else {
         format!("{value:.0} {unit}")
     }
-}
-
-/// fstab escapes spaces as `\040`; `x-gvfs-name=My\040Disk` should read back
-/// as "My Disk".
-fn unescape_fstab(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(index) = rest.find('\\') {
-        output.push_str(&rest[..index]);
-        let escape = &rest[index + 1..];
-        match escape.get(..3).and_then(|digits| u8::from_str_radix(digits, 8).ok()) {
-            Some(byte) => {
-                output.push(byte as char);
-                rest = &escape[3..];
-            }
-            None => {
-                output.push('\\');
-                rest = escape;
-            }
-        }
-    }
-    output.push_str(rest);
-    output
 }
 
 fn block_facts(properties: &Properties) -> BlockFacts {
@@ -575,14 +554,6 @@ fn drive_facts(properties: &Properties) -> DriveFacts {
 
 fn property<T: TryFrom<OwnedValue>>(properties: &Properties, name: &str) -> Option<T> {
     properties.get(name).and_then(|value| T::try_from(value.clone()).ok())
-}
-
-/// UDisks2 byte strings carry their C terminator.
-fn trim_nul(mut bytes: Vec<u8>) -> Vec<u8> {
-    while bytes.last() == Some(&0) {
-        bytes.pop();
-    }
-    bytes
 }
 
 #[cfg(test)]

@@ -17,6 +17,8 @@
 
 use std::path::Path;
 
+use crate::mounts::MountTable;
+
 /// Where the filesystem holding a path actually is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Locality {
@@ -64,43 +66,14 @@ const REMOTE_FUSE_SUBTYPES: &[&str] =
 /// and the cost of guessing wrong the other way is a file manager that
 /// silently stops showing thumbnails.
 pub fn of(path: &Path) -> Locality {
-    match std::fs::read_to_string("/proc/self/mountinfo") {
-        Ok(table) => in_table(path, &table),
-        Err(_) => Locality::Local,
-    }
+    MountTable::read().map_or(Locality::Local, |table| in_table(path, &table))
 }
 
-/// `of`, against a mount table already in hand. Split out so the
-/// classification can be tested without one particular machine's mounts.
-fn in_table(path: &Path, table: &str) -> Locality {
-    let mut best: Option<(usize, Locality)> = None;
-    for line in table.lines() {
-        let Some((left, right)) = line.split_once(" - ") else {
-            continue;
-        };
-        // Up to the separator: id, parent, major:minor, root, mount point,
-        // options, then any number of optional fields. After it: the type.
-        let Some(mount_point) = left.split_whitespace().nth(4) else {
-            continue;
-        };
-        let Some(filesystem) = right.split_whitespace().next() else {
-            continue;
-        };
-        let mount_point = unescape(mount_point);
-        if !path.starts_with(&mount_point) {
-            continue;
-        }
-        // The deepest mount point that still contains the path is the one
-        // serving it; a share under a local directory must not read as local.
-        // Of two mounts on the same point the later one is on top, as the
-        // kernel lists them in order: an automounted share is an `autofs`
-        // line followed by the `nfs4` or `cifs` one that actually serves it.
-        let depth = mount_point.len();
-        if best.is_none_or(|(deepest, _)| depth >= deepest) {
-            best = Some((depth, classify(filesystem)));
-        }
-    }
-    best.map_or(Locality::Local, |(_, locality)| locality)
+/// `of`, against a mount table already in hand. The deepest mount holding
+/// the path serves it, so a share mounted under the home directory reads as
+/// a share.
+pub fn in_table(path: &Path, table: &MountTable) -> Locality {
+    table.serving(path).map_or(Locality::Local, |mount| classify(&mount.filesystem))
 }
 
 fn classify(filesystem: &str) -> Locality {
@@ -109,30 +82,6 @@ fn classify(filesystem: &str) -> Locality {
         _ => REMOTE_TYPES.contains(&filesystem),
     };
     if remote { Locality::Remote } else { Locality::Local }
-}
-
-/// `mountinfo` escapes space, tab, newline, and backslash in paths as their
-/// three-digit octal codes. A share mounted at `/mnt/My Files` arrives as
-/// `/mnt/My\040Files` and would match nothing unescaped.
-fn unescape(field: &str) -> String {
-    let mut out = String::with_capacity(field.len());
-    let mut rest = field;
-    while let Some(slash) = rest.find('\\') {
-        out.push_str(&rest[..slash]);
-        let octal = rest.get(slash + 1..slash + 4);
-        match octal.and_then(|digits| u8::from_str_radix(digits, 8).ok()) {
-            Some(byte) => {
-                out.push(byte as char);
-                rest = &rest[slash + 4..];
-            }
-            None => {
-                out.push('\\');
-                rest = &rest[slash + 1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
@@ -153,7 +102,7 @@ mod tests {
 ";
 
     fn locality(path: &str) -> Locality {
-        in_table(&PathBuf::from(path), TABLE)
+        in_table(&PathBuf::from(path), &MountTable::parse(TABLE.as_bytes()))
     }
 
     #[test]
@@ -180,7 +129,8 @@ mod tests {
 610 28 0:101 / /mnt/nas rw,relatime shared:600 - autofs systemd-1 rw,fd=45
 615 610 0:102 / /mnt/nas rw,relatime shared:605 - nfs4 nas:/export rw
 ";
-        assert_eq!(in_table(&PathBuf::from("/mnt/nas/photos"), table), Locality::Remote);
+        let table = MountTable::parse(table.as_bytes());
+        assert_eq!(in_table(&PathBuf::from("/mnt/nas/photos"), &table), Locality::Remote);
     }
 
     #[test]
@@ -198,15 +148,6 @@ mod tests {
 
     #[test]
     fn a_path_under_nothing_known_is_treated_as_local() {
-        assert_eq!(in_table(&PathBuf::from("/srv/data"), ""), Locality::Local);
-    }
-
-    #[test]
-    fn octal_escapes_in_a_mount_point_are_read_back() {
-        assert_eq!(unescape("/mnt/My\\040Files"), "/mnt/My Files");
-        assert_eq!(unescape("/mnt/plain"), "/mnt/plain");
-        // A trailing backslash that escapes nothing is kept as itself
-        // rather than swallowing the rest of the path.
-        assert_eq!(unescape("/mnt/odd\\"), "/mnt/odd\\");
+        assert_eq!(in_table(&PathBuf::from("/srv/data"), &MountTable::default()), Locality::Local);
     }
 }

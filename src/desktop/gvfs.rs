@@ -32,6 +32,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
+
+use super::trim_nul;
 use async_channel::Sender;
 use percent_encoding::percent_decode_str;
 use url::Url;
@@ -135,14 +137,6 @@ fn path_starts_with(path: &str, prefix: &str) -> bool {
 
 fn text(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&trim_nul(bytes)).into_owned()
-}
-
-/// GLib bytestrings carry their C terminator.
-fn trim_nul(mut bytes: Vec<u8>) -> Vec<u8> {
-    while bytes.last() == Some(&0) {
-        bytes.pop();
-    }
-    bytes
 }
 
 // ---------------------------------------------------------------------------

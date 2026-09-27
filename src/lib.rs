@@ -34,6 +34,7 @@ pub mod config;
 pub mod desktop;
 pub mod fonts;
 pub(crate) mod fsops;
+pub(crate) mod mounts;
 pub(crate) mod names;
 pub(crate) mod network;
 pub mod operations;

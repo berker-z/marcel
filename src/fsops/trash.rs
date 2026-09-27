@@ -21,6 +21,7 @@ use std::{
 };
 
 use super::local::PathContext as _;
+use crate::mounts::MountTable;
 use anyhow::{Context as _, Result, bail};
 
 use super::{
@@ -458,7 +459,11 @@ impl TrashSites {
     fn discover(home_trash: &Path) -> Result<Self> {
         Ok(Self::new(
             canonicalize_or_parents(home_trash),
-            read_mount_points()?,
+            MountTable::read()
+                .context("Could not read the mount table")?
+                .iter()
+                .map(|mount| mount.point.clone())
+                .collect(),
             rustix::process::getuid().as_raw(),
         ))
     }
@@ -576,52 +581,6 @@ fn canonicalize_or_parents(path: &Path) -> PathBuf {
             },
         }
     }
-}
-
-/// Every mount point the kernel reports, from the same two tables the crate
-/// reads with `getmntent`, which is where the escaping of spaces in a mount
-/// path is undone.
-fn read_mount_points() -> Result<Vec<PathBuf>> {
-    let table = fs::read("/proc/self/mounts")
-        .or_else(|_| fs::read("/etc/mtab"))
-        .context("Could not read the mount table")?;
-    Ok(parse_mount_points(&table))
-}
-
-fn parse_mount_points(table: &[u8]) -> Vec<PathBuf> {
-    use std::os::unix::ffi::OsStringExt as _;
-
-    table
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| line.split(|byte| *byte == b' ').nth(1))
-        .map(|field| PathBuf::from(std::ffi::OsString::from_vec(unescape_mount_field(field))))
-        .collect()
-}
-
-/// Undo the `\ooo` octal escapes `/proc/mounts` uses for the bytes that would
-/// break its space-separated format.
-fn unescape_mount_field(field: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(field.len());
-    let mut bytes = field.iter().copied();
-    while let Some(byte) = bytes.next() {
-        if byte != b'\\' {
-            out.push(byte);
-            continue;
-        }
-        let digits = [bytes.next(), bytes.next(), bytes.next()];
-        let value = digits.iter().try_fold(0u8, |acc, digit| {
-            let digit = digit.filter(|digit| (b'0'..=b'7').contains(digit))? - b'0';
-            acc.checked_mul(8)?.checked_add(digit)
-        });
-        match value {
-            Some(value) => out.push(value),
-            None => {
-                out.push(b'\\');
-                out.extend(digits.iter().flatten());
-            }
-        }
-    }
-    out
 }
 
 /// Which new Trash entry holds `original`, if exactly one can be said to.
@@ -1211,15 +1170,6 @@ mod tests {
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].original_path(), original);
-    }
-
-    #[test]
-    fn mount_points_are_read_the_way_getmntent_reads_them() {
-        let table = b"tmpfs /tmp tmpfs rw 0 0\n/dev/sda1 /mnt/my\\040disk ext4 rw 0 0\nnone /odd\\x path 0 0\n\n";
-        assert_eq!(
-            parse_mount_points(table),
-            [PathBuf::from("/tmp"), PathBuf::from("/mnt/my disk"), PathBuf::from("/odd\\x")]
-        );
     }
 
     #[test]
