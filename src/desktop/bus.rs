@@ -608,7 +608,7 @@ mod tests {
         desktop::picker::{PickerMode, PickerResponse},
         testing::Sandbox,
     };
-    use std::{process::Command, time::Duration};
+    use std::time::Duration;
 
     /// The defect this rule exists to prevent: running `marcel` while Marcel is
     /// already open navigated the window the user was reading, or — with no
@@ -628,8 +628,9 @@ mod tests {
         );
     }
 
+    use crate::testing::{is_private_bus_child, run_on_private_session_bus};
+
     const PRIVATE_BUS_CHILD: &str = "MARCEL_PRIVATE_BUS_TEST_CHILD";
-    const PRIVATE_BUS_CONFIG: &str = "MARCEL_TEST_DBUS_SESSION_CONFIG";
     const FILE_MANAGER_ROLE: BusRoles = BusRoles { file_manager: true, file_chooser: false };
     const FILE_CHOOSER_ROLE: BusRoles = BusRoles { file_manager: false, file_chooser: true };
 
@@ -776,37 +777,13 @@ mod tests {
 
     #[test]
     fn private_session_bus_integration() {
-        if std::env::var_os(PRIVATE_BUS_CHILD).is_some() {
-            return;
+        if !is_private_bus_child(PRIVATE_BUS_CHILD) {
+            run_on_private_session_bus(
+                module_path!(),
+                "private_session_bus_child",
+                PRIVATE_BUS_CHILD,
+            );
         }
-
-        // libtest names tests without the crate, which `module_path!`
-        // includes; with it, `--exact` matched nothing and the child passed
-        // by running no test at all.
-        let module = module_path!()
-            .strip_prefix(concat!(env!("CARGO_PKG_NAME"), "::"))
-            .unwrap_or(module_path!());
-        let mut command = Command::new("dbus-run-session");
-        if let Some(config) = std::env::var_os(PRIVATE_BUS_CONFIG) {
-            command.arg("--config-file").arg(config);
-        }
-        let output = command
-            .arg("--")
-            .arg(std::env::current_exe().expect("test executable must have a path"))
-            .arg("--exact")
-            .arg(format!("{module}::private_session_bus_child"))
-            .arg("--nocapture")
-            .env(PRIVATE_BUS_CHILD, "1")
-            .output()
-            .expect("dbus-run-session must be available in Marcel's development environment");
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "private session-bus child failed:\n{stdout}\n{stderr}");
-        assert!(
-            stdout.contains("test result: ok. 1 passed"),
-            "the child must have run exactly one test:\n{stdout}\n{stderr}"
-        );
     }
 
     /// Wait for the bus to release the application name, then own it.
@@ -833,7 +810,7 @@ mod tests {
 
     #[test]
     fn private_session_bus_child() {
-        if std::env::var_os(PRIVATE_BUS_CHILD).is_none() {
+        if !is_private_bus_child(PRIVATE_BUS_CHILD) {
             return;
         }
 

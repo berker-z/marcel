@@ -1063,8 +1063,9 @@ mod tests {
         assert!(!names_a_missing_peer("org.freedesktop.DBus.Error.NoReply"));
     }
 
+    use crate::testing::{is_private_bus_child, run_on_private_session_bus};
+
     const PRIVATE_BUS_CHILD: &str = "MARCEL_GVFS_PRIVATE_BUS_TEST_CHILD";
-    const PRIVATE_BUS_CONFIG: &str = "MARCEL_TEST_DBUS_SESSION_CONFIG";
 
     /// Watching for a daemon that is not there yet, on a bus where it can be
     /// made to appear on cue.
@@ -1078,37 +1079,18 @@ mod tests {
     /// so a timeout is the assertion.
     #[test]
     fn private_session_bus_daemon_wait() {
-        if std::env::var_os(PRIVATE_BUS_CHILD).is_some() {
-            return;
+        if !is_private_bus_child(PRIVATE_BUS_CHILD) {
+            run_on_private_session_bus(
+                module_path!(),
+                "private_session_bus_daemon_wait_child",
+                PRIVATE_BUS_CHILD,
+            );
         }
-        let module = module_path!()
-            .strip_prefix(concat!(env!("CARGO_PKG_NAME"), "::"))
-            .unwrap_or(module_path!());
-        let mut command = std::process::Command::new("dbus-run-session");
-        if let Some(config) = std::env::var_os(PRIVATE_BUS_CONFIG) {
-            command.arg("--config-file").arg(config);
-        }
-        let output = command
-            .arg("--")
-            .arg(std::env::current_exe().expect("test executable must have a path"))
-            .arg("--exact")
-            .arg(format!("{module}::private_session_bus_daemon_wait_child"))
-            .arg("--nocapture")
-            .env(PRIVATE_BUS_CHILD, "1")
-            .output()
-            .expect("dbus-run-session must be available in Marcel's development environment");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "private session-bus child failed:\n{stdout}\n{stderr}");
-        assert!(
-            stdout.contains("test result: ok. 1 passed"),
-            "the child must have run exactly one test:\n{stdout}\n{stderr}"
-        );
     }
 
     #[test]
     fn private_session_bus_daemon_wait_child() {
-        if std::env::var_os(PRIVATE_BUS_CHILD).is_none() {
+        if !is_private_bus_child(PRIVATE_BUS_CHILD) {
             return;
         }
         smol::block_on(async {

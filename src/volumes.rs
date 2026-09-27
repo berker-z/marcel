@@ -138,12 +138,7 @@ impl VolumeStore {
     /// The volume mounted at or above `path`, if any: what the sidebar
     /// highlights while a window is somewhere on a drive.
     pub fn volume_containing(&self, path: &Path) -> Option<&Volume> {
-        self.volumes
-            .iter()
-            .filter(|volume| {
-                volume.mount_point.as_deref().is_some_and(|point| path.starts_with(point))
-            })
-            .max_by_key(|volume| volume.mount_point.as_ref().map(|point| point.as_os_str().len()))
+        deepest_containing(&self.volumes, path)
     }
 
     /// Mount a volume, reporting failure on the window that asked and handing
@@ -267,6 +262,15 @@ impl VolumeStore {
 /// Why a volume came up read-only, as far as Marcel can tell from outside
 /// the kernel. NTFS has one overwhelmingly common cause and a fix the user
 /// can apply; anything else gets the honest generic sentence.
+/// The mounted volume whose mount point is the deepest one holding `path`, so
+/// a stick mounted inside another drive's tree is the one a path on it is on.
+fn deepest_containing<'a>(volumes: &'a [Volume], path: &Path) -> Option<&'a Volume> {
+    volumes
+        .iter()
+        .filter(|volume| volume.mount_point.as_deref().is_some_and(|point| path.starts_with(point)))
+        .max_by_key(|volume| volume.mount_point.as_ref().map(|point| point.as_os_str().len()))
+}
+
 fn read_only_explanation(volume: &Volume) -> String {
     if volume.filesystem == "ntfs" {
         format!(
@@ -319,5 +323,52 @@ async fn watch_volumes(
             Err(error) => eprintln!("Marcel could not list drives: {error:#}"),
         }
         changes.next().await?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn volume(device: &str, name: &str, filesystem: &str, mount_point: Option<&str>) -> Volume {
+        Volume {
+            block: zbus::zvariant::OwnedObjectPath::try_from("/b").unwrap(),
+            drive: None,
+            device: PathBuf::from(device),
+            name: name.to_string(),
+            filesystem: filesystem.to_string(),
+            size: 0,
+            mount_point: mount_point.map(PathBuf::from),
+            removable: true,
+            ejectable: false,
+            can_power_off: true,
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn the_deepest_mounted_volume_holds_a_path() {
+        let volumes = [
+            volume("/dev/sda1", "Data", "ext4", Some("/mnt/data")),
+            volume("/dev/sdb1", "STICK", "vfat", Some("/mnt/data/stick")),
+            volume("/dev/sdc1", "Card", "exfat", None),
+        ];
+        let on = |path: &str| {
+            deepest_containing(&volumes, Path::new(path)).map(|volume| volume.name.as_str())
+        };
+        assert_eq!(on("/mnt/data/stick/photo.jpg"), Some("STICK"));
+        assert_eq!(on("/mnt/data/notes.txt"), Some("Data"));
+        assert_eq!(on("/mnt/datastore"), None, "a prefix of the name is not inside it");
+        assert_eq!(on("/home/me"), None, "an unmounted card holds nothing");
+    }
+
+    /// A Windows partition left dirty by Fast Startup is the usual reason a
+    /// drive mounts read-only, and the one the user can do something about.
+    #[test]
+    fn a_read_only_ntfs_mount_is_explained_by_fast_startup() {
+        let windows = volume("/dev/nvme0n1p3", "Windows", "ntfs", Some("/mnt/win"));
+        assert!(read_only_explanation(&windows).contains("Fast Startup"));
+        let stick = volume("/dev/sdb1", "STICK", "vfat", Some("/run/media/me/STICK"));
+        assert!(read_only_explanation(&stick).contains("may need a check"));
     }
 }
