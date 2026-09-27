@@ -617,6 +617,7 @@ fn thumbnail_presentation(
     match state {
         Some(ThumbnailState::Ready(path)) => ThumbnailPresentation::Ready(path.clone()),
         Some(ThumbnailState::Failed) => ThumbnailPresentation::Failed,
+        Some(ThumbnailState::NotCached) => ThumbnailPresentation::Unsupported,
         None if supported && pending => ThumbnailPresentation::Loading,
         None => ThumbnailPresentation::Unsupported,
     }
@@ -705,6 +706,10 @@ mod tests {
         assert_eq!(
             thumbnail_presentation(Some(&failed), false, true),
             ThumbnailPresentation::Failed
+        );
+        assert_eq!(
+            thumbnail_presentation(Some(&ThumbnailState::NotCached), false, true),
+            ThumbnailPresentation::Unsupported
         );
         assert_eq!(thumbnail_presentation(None, false, false), ThumbnailPresentation::Unsupported);
         assert_eq!(thumbnail_presentation(None, true, false), ThumbnailPresentation::Unsupported);

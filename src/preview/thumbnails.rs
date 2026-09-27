@@ -71,11 +71,14 @@ pub fn load_or_create(
 /// to spend a download on making one. A folder Nautilus or an earlier local
 /// visit has already thumbnailed still looks like itself; the rest fall back
 /// to icons rather than to a progress bar.
+///
+/// `Ok(None)` is that fallback, not a failure: nothing went wrong, a
+/// thumbnail was just not made.
 pub fn load_cached(
     path: &Path,
     size: Option<u64>,
     modified: Option<SystemTime>,
-) -> Result<PathBuf> {
+) -> Result<Option<PathBuf>> {
     let cache_home = thumbnail_cache_home()?;
     load_cached_in(path, size, modified, &cache_home)
 }
@@ -85,22 +88,20 @@ fn load_cached_in(
     size: Option<u64>,
     modified: Option<SystemTime>,
     cache_home: &Path,
-) -> Result<PathBuf> {
+) -> Result<Option<PathBuf>> {
     // Without both of these there is nothing to validate a cache entry
     // against, and serving an unvalidated one would show the thumbnail of a
     // file that has since been replaced.
     let (Some(size), Some(modified)) = (size, modified) else {
-        bail!("listing has no size or modification time to validate a thumbnail against");
+        return Ok(None);
     };
     let uri = Url::from_file_path(path)
         .map_err(|_| anyhow::anyhow!("could not build file URI"))?
         .to_string();
     let mtime = modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
     let cache_path = thumbnail_cache_path(cache_home, &uri);
-    if cached_thumbnail_is_current(&cache_path, &uri, &mtime, &size.to_string()) {
-        return Ok(cache_path);
-    }
-    bail!("no current cached thumbnail")
+    Ok(cached_thumbnail_is_current(&cache_path, &uri, &mtime, &size.to_string())
+        .then_some(cache_path))
 }
 
 fn load_or_create_in(
@@ -471,5 +472,27 @@ mod tests {
             png::Decoder::new(BufReader::new(File::open(&replaced).unwrap())).read_info().unwrap();
         assert_eq!(replaced, cache_path);
         assert!(info.info().width <= THUMBNAIL_EDGE && info.info().height <= THUMBNAIL_EDGE);
+    }
+
+    /// On a share the cache is all there is, and a file it has never seen is
+    /// the usual case, so a miss is an answer rather than an error.
+    #[test]
+    fn a_cache_lookup_finds_a_current_thumbnail_and_misses_without_error() {
+        let sandbox = Sandbox::new();
+        let source = sandbox.path("source.png");
+        let cache = sandbox.path("cache");
+        DynamicImage::new_rgba8(320, 180).save(&source).unwrap();
+        // The cache is keyed by the URI of the path as `identity` resolves it.
+        let source = source.canonicalize().unwrap();
+        let metadata = source.metadata().unwrap();
+        let (size, modified) = (Some(metadata.len()), Some(metadata.modified().unwrap()));
+
+        assert_eq!(load_cached_in(&source, size, modified, &cache).unwrap(), None);
+        assert_eq!(load_cached_in(&source, None, modified, &cache).unwrap(), None);
+
+        let (uri, _, _) = identity(&source);
+        let cache_path = thumbnail_cache_path(&cache, &uri);
+        write_foreign_thumbnail(&cache_path, &source, THUMBNAIL_EDGE);
+        assert_eq!(load_cached_in(&source, size, modified, &cache).unwrap(), Some(cache_path));
     }
 }

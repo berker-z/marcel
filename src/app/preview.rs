@@ -77,6 +77,9 @@ const REMOTE_PREVIEW_SETTLE: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug)]
 pub enum ThumbnailState {
     Ready(PathBuf),
+    /// None was made, on purpose: on a share only the cache is asked, and
+    /// it had nothing. The tile keeps its plain icon.
+    NotCached,
     Failed,
 }
 
@@ -702,7 +705,7 @@ impl Marcel {
                 if this.ui.thumbnails.allows(this.directory.locality) {
                     let limit = this.ui.thumbnail_limit_mb.saturating_mul(1024 * 1024);
                     return Some(Box::new(move || {
-                        thumbnails::load_or_create(&path, limit, &cancelled)
+                        thumbnails::load_or_create(&path, limit, &cancelled).map(Some)
                     }));
                 }
                 // The listing already holds what validates a cache entry, so
@@ -720,7 +723,8 @@ impl Marcel {
                     return;
                 }
                 let state = match result {
-                    Ok(thumbnail) => ThumbnailState::Ready(thumbnail),
+                    Ok(Some(thumbnail)) => ThumbnailState::Ready(thumbnail),
+                    Ok(None) => ThumbnailState::NotCached,
                     Err(_) => ThumbnailState::Failed,
                 };
                 this.preview.remember_thumbnail(path, state);
