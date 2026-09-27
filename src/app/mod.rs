@@ -68,7 +68,7 @@ use crate::{
 
 pub use actions::init_key_bindings;
 use preview::PreviewState;
-use state::{DragState, PickerState, SidebarState, UiState};
+use state::{DragState, PickerState, PlaceInfo, SidebarState, UiState};
 
 const DIRECTORY_ROW_HEIGHT: f32 = 36.0;
 const GRID_TILE_WIDTH: f32 = 120.0;
@@ -104,6 +104,8 @@ pub struct Marcel {
     pub(crate) ui: UiState,
     pub(crate) history: NavigationHistory,
     pub(crate) sidebar: SidebarState,
+    /// Which drive or share the folder shown is on.
+    pub(crate) place: PlaceInfo,
     /// Present when this window is a file chooser answering a portal request.
     pub(crate) picker: Option<PickerState>,
 }
@@ -170,8 +172,16 @@ impl Marcel {
         let shared = [
             cx.observe(&operations, |_, _, cx| cx.notify()),
             cx.observe(&bookmarks, |_, _, cx| cx.notify()),
-            cx.observe(&volumes, |_, _, cx| cx.notify()),
-            cx.observe(&network, |_, _, cx| cx.notify()),
+            // A drive or share coming or going can change which one the folder
+            // shown is on, without the window moving.
+            cx.observe(&volumes, |this, _, cx| {
+                this.refresh_place(cx);
+                cx.notify();
+            }),
+            cx.observe(&network, |this, _, cx| {
+                this.refresh_place(cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&operations, window, |this, _, event: &OperationEvent, window, cx| {
                 this.on_operation_event(event, window, cx);
             }),
@@ -198,10 +208,12 @@ impl Marcel {
             ),
             history: NavigationHistory::new(Location::Folder(start_dir)),
             sidebar: SidebarState::new(&home_dir),
+            place: PlaceInfo::default(),
             picker: None,
         };
         this.start_places_load(home_dir, cx);
         this.start_load(true, cx);
+        this.refresh_place(cx);
         // Said once the window is up: the file is left as it is, and the
         // user should know why their settings will not stick this session.
         if let Some(reason) = state_unreadable {

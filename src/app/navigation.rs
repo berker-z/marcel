@@ -28,7 +28,10 @@ use crate::{
     operations::OperationEvent,
 };
 
-use super::{Marcel, state::ViewMode};
+use super::{
+    Marcel,
+    state::{MountKind, MountRoot, PlaceInfo, ViewMode},
+};
 
 /// Run blocking work on the background pool.
 pub(super) fn unblock<T: Send + 'static>(
@@ -436,9 +439,34 @@ impl Marcel {
         self.show_location(location, reveal, cx);
     }
 
+    /// Work out which drive or share the folder shown is on. A share wins
+    /// over a drive when both contain it, which is a share mounted under a
+    /// drive's mount point.
+    pub(super) fn refresh_place(&mut self, cx: &Context<Self>) {
+        let mount = self.directory.folder().and_then(|folder| {
+            let share = self.network.read(cx).mount_containing(folder).and_then(|mount| {
+                Some(MountRoot {
+                    kind: MountKind::Share(mount.id()),
+                    label: mount.name.clone(),
+                    root: mount.fuse_root.clone()?,
+                })
+            });
+            share.or_else(|| {
+                let volume = self.volumes.read(cx).volume_containing(folder)?;
+                Some(MountRoot {
+                    kind: MountKind::Drive(volume.device.clone()),
+                    label: volume.name.clone(),
+                    root: volume.mount_point.clone()?,
+                })
+            })
+        });
+        self.place = PlaceInfo { mount };
+    }
+
     fn show_location(&mut self, location: Location, reveal: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.sidebar.trash_records.clear();
         self.directory.set_location(location);
+        self.refresh_place(cx);
         self.directory.pending_reveal = reveal;
         self.start_load(true, cx);
     }

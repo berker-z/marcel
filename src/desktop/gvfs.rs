@@ -140,11 +140,11 @@ fn text(bytes: Vec<u8>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Locations: a spec plus a path inside it, from and to a URI.
+// Share addresses: a spec plus a path inside it, from and to a URI.
 
 /// A place on a server: the mount to reach and the directory inside it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Location {
+pub struct ShareAddress {
     pub spec: MountSpec,
     /// The directory inside the mount, as the server sees it (`/home/me`),
     /// or empty for "wherever the server puts me": the home directory over
@@ -152,7 +152,7 @@ pub struct Location {
     pub path: String,
 }
 
-impl Location {
+impl ShareAddress {
     /// What the user typed or saved: a URI with one of the schemes GVfs has a
     /// backend for here, or a bare `[user@]host[:port]`, which means SFTP
     /// because a shell user who types a hostname means `ssh`.
@@ -166,13 +166,38 @@ impl Location {
         if input.is_empty() {
             return Err("Enter a server address such as sftp://host/ or smb://host/share".into());
         }
-        let text = if input.contains("://") {
-            input.to_string()
-        } else if looks_like_host(input) {
-            format!("sftp://{input}/")
-        } else {
-            return Err(format!("“{input}” is not a server address"));
-        };
+        if input.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:")) {
+            return Err("That is a local path; type it in the location bar".into());
+        }
+        match Self::parse_uri(input) {
+            Ok(address) => Ok(address),
+            Err(UriError::Invalid(message)) => Err(message),
+            Err(UriError::NotAUri) if looks_like_host(input) => {
+                Self::parse_uri(&format!("sftp://{input}/")).map_err(UriError::into_message)
+            }
+            Err(UriError::NotAUri) => Err(format!("“{input}” is not a server address")),
+        }
+    }
+
+    /// A URI only, with no bare-host shorthand: what the location bar and
+    /// the servers file take. Anything that is not `scheme://` with a
+    /// scheme-shaped scheme, or is a `file:` URI, is [`UriError::NotAUri`],
+    /// so a path with a colon in it stays a path.
+    pub fn parse_uri(input: &str) -> Result<Self, UriError> {
+        let input = input.trim();
+        let is_uri = input.split_once("://").is_some_and(|(scheme, _)| {
+            !scheme.is_empty()
+                && !scheme.eq_ignore_ascii_case("file")
+                && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+        if !is_uri {
+            return Err(UriError::NotAUri);
+        }
+        Self::parse_url(input).map_err(UriError::Invalid)
+    }
+
+    fn parse_url(input: &str) -> Result<Self, String> {
+        let text = input.to_string();
         let url = Url::parse(&text).map_err(|_| format!("“{input}” is not a valid address"))?;
         let host = url.host_str().map(str::to_string);
         let user = decode(url.username());
@@ -214,7 +239,6 @@ impl Location {
                 (spec, path)
             }
             "smb" => smb_location(host.as_deref(), &user, url.path()),
-            "file" => return Err("That is a local path; type it in the location bar".into()),
             _ => {
                 return Err(format!(
                     "Marcel can connect to sftp://, smb://, ftp://, and dav:// addresses, not {scheme}://"
@@ -229,7 +253,7 @@ impl Location {
     }
 
     /// The URI form, the one saved to the servers file. Round-trips through
-    /// [`Location::parse`] for every spec this module produces.
+    /// [`ShareAddress::parse`] for every spec this module produces.
     pub fn to_uri(&self) -> String {
         let spec = &self.spec;
         let authority = |host_key: &str| {
@@ -263,12 +287,17 @@ impl Location {
         }
     }
 
-    /// Whether this location survives the servers file: its URI parses back
+    /// The mount this address is on.
+    pub fn id(&self) -> ShareId {
+        ShareId(self.spec.clone())
+    }
+
+    /// Whether this address survives the servers file: its URI parses back
     /// to itself. GVfs lists mounts of backends Marcel has no address for
     /// (MTP phones, cameras, Google Drive); those can be browsed but not
     /// saved.
     pub fn can_be_saved(&self) -> bool {
-        Self::parse(&self.to_uri()).is_ok_and(|parsed| parsed == *self)
+        Self::parse_uri(&self.to_uri()).is_ok_and(|parsed| parsed == *self)
     }
 
     /// What to call this when the mount has not said: the host, or the share
@@ -284,6 +313,46 @@ impl Location {
             "smb-network" => "Windows Network".to_string(),
             _ => spec.host().unwrap_or("Server").to_string(),
         }
+    }
+}
+
+/// Why text is not a share address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UriError {
+    /// Not a URI GVfs would mount: a path, a `file:` URI, a bare word.
+    NotAUri,
+    /// A URI, but not one Marcel can connect to, and why.
+    Invalid(String),
+}
+
+impl UriError {
+    fn into_message(self) -> String {
+        match self {
+            Self::NotAUri => "Not a server address".to_string(),
+            Self::Invalid(message) => message,
+        }
+    }
+}
+
+/// One mount, as the store and the sidebar refer to it without looking
+/// inside: which backend and what it connects to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareId(MountSpec);
+
+impl From<MountSpec> for ShareId {
+    fn from(spec: MountSpec) -> Self {
+        Self(spec)
+    }
+}
+
+impl ShareId {
+    pub fn spec(&self) -> &MountSpec {
+        &self.0
+    }
+
+    /// What to call it before its mount has said.
+    pub fn label(&self) -> String {
+        ShareAddress { spec: self.0.clone(), path: String::new() }.label()
     }
 }
 
@@ -374,6 +443,16 @@ pub struct Mount {
 }
 
 impl Mount {
+    pub fn id(&self) -> ShareId {
+        ShareId(self.spec.clone())
+    }
+
+    /// The address of the mount itself, with no path inside it: what Add to
+    /// Network saves.
+    pub fn address(&self) -> ShareAddress {
+        ShareAddress { spec: self.spec.clone(), path: String::new() }
+    }
+
     /// The directory a location inside this mount is at, through FUSE.
     pub fn directory_for(&self, path: &str) -> Option<PathBuf> {
         let root = self.fuse_root.as_ref()?;
@@ -1009,43 +1088,43 @@ mod tests {
 
     #[test]
     fn a_bare_host_means_sftp() {
-        let location = Location::parse("wired").unwrap();
+        let location = ShareAddress::parse("wired").unwrap();
         assert_eq!(location.spec.kind, "sftp");
         assert_eq!(location.spec.items, items(&[("host", "wired")]));
         assert_eq!(location.path, "");
         assert_eq!(location.to_uri(), "sftp://wired/");
 
-        let location = Location::parse("me@box.local:2222").unwrap();
+        let location = ShareAddress::parse("me@box.local:2222").unwrap();
         assert_eq!(
             location.spec.items,
             items(&[("host", "box.local"), ("user", "me"), ("port", "2222")])
         );
         assert_eq!(location.to_uri(), "sftp://me@box.local:2222/");
 
-        assert!(Location::parse("not a host").is_err());
-        assert!(Location::parse("").is_err());
+        assert!(ShareAddress::parse("not a host").is_err());
+        assert!(ShareAddress::parse("").is_err());
     }
 
     #[test]
     fn sftp_uris_keep_their_path_and_drop_the_default_port() {
-        let location = Location::parse("sftp://me@wired:22/home/me/Work Notes/").unwrap();
+        let location = ShareAddress::parse("sftp://me@wired:22/home/me/Work Notes/").unwrap();
         assert_eq!(location.spec.items, items(&[("host", "wired"), ("user", "me")]));
         assert_eq!(location.path, "/home/me/Work Notes");
         assert_eq!(location.to_uri(), "sftp://me@wired/home/me/Work%20Notes");
-        assert_eq!(Location::parse(&location.to_uri()).unwrap(), location);
-        assert_eq!(Location::parse("ssh://wired").unwrap().spec.kind, "sftp");
+        assert_eq!(ShareAddress::parse(&location.to_uri()).unwrap(), location);
+        assert_eq!(ShareAddress::parse("ssh://wired").unwrap().spec.kind, "sftp");
     }
 
     #[test]
     fn smb_picks_the_backend_by_depth() {
-        assert_eq!(Location::parse("smb://").unwrap().spec.kind, "smb-network");
+        assert_eq!(ShareAddress::parse("smb://").unwrap().spec.kind, "smb-network");
 
-        let server = Location::parse("smb://nas/").unwrap();
+        let server = ShareAddress::parse("smb://nas/").unwrap();
         assert_eq!(server.spec.kind, "smb-server");
         assert_eq!(server.spec.items, items(&[("server", "nas")]));
         assert_eq!(server.to_uri(), "smb://nas/");
 
-        let share = Location::parse("smb://me@nas/media/films/2024").unwrap();
+        let share = ShareAddress::parse("smb://me@nas/media/films/2024").unwrap();
         assert_eq!(share.spec.kind, "smb-share");
         assert_eq!(
             share.spec.items,
@@ -1054,18 +1133,19 @@ mod tests {
         assert_eq!(share.path, "/films/2024");
         assert_eq!(share.to_uri(), "smb://me@nas/media/films/2024");
         assert_eq!(share.label(), "media on nas");
-        assert_eq!(Location::parse(&share.to_uri()).unwrap(), share);
+        assert_eq!(ShareAddress::parse(&share.to_uri()).unwrap(), share);
     }
 
     #[test]
     fn dav_is_rooted_where_the_uri_points() {
-        let location = Location::parse("davs://cloud.example/remote.php/dav/files/me/").unwrap();
+        let location =
+            ShareAddress::parse("davs://cloud.example/remote.php/dav/files/me/").unwrap();
         assert_eq!(location.spec.kind, "dav");
         assert_eq!(location.spec.items, items(&[("host", "cloud.example"), ("ssl", "true")]));
         assert_eq!(location.spec.prefix, "/remote.php/dav/files/me");
         assert_eq!(location.to_uri(), "davs://cloud.example/remote.php/dav/files/me");
-        assert_eq!(Location::parse(&location.to_uri()).unwrap(), location);
-        assert_eq!(Location::parse("dav://h/").unwrap().spec.prefix, "/");
+        assert_eq!(ShareAddress::parse(&location.to_uri()).unwrap(), location);
+        assert_eq!(ShareAddress::parse("dav://h/").unwrap().spec.prefix, "/");
     }
 
     /// GVfs lists an MTP phone next to the shares. Its URI is not one Marcel
@@ -1074,37 +1154,50 @@ mod tests {
     fn only_a_location_that_reads_back_can_be_saved() {
         let mut phone = MountSpec::new("mtp");
         phone.set("host", "[usb:002,005]");
-        let phone = Location { spec: phone, path: String::new() };
-        assert!(Location::parse(&phone.to_uri()).is_err(), "{}", phone.to_uri());
+        let phone = ShareAddress { spec: phone, path: String::new() };
+        assert!(ShareAddress::parse(&phone.to_uri()).is_err(), "{}", phone.to_uri());
         assert!(!phone.can_be_saved());
 
         for saved in ["sftp://me@wired/home/me", "smb://nas/media", "davs://cloud.example/dav"] {
-            assert!(Location::parse(saved).unwrap().can_be_saved(), "{saved}");
+            assert!(ShareAddress::parse(saved).unwrap().can_be_saved(), "{saved}");
         }
+    }
+
+    /// The location bar connects a URI and resolves anything else as a path,
+    /// so the line between them is drawn once, here.
+    #[test]
+    fn only_a_non_file_uri_is_an_address_to_the_location_bar() {
+        assert!(ShareAddress::parse_uri("sftp://wired/").is_ok());
+        assert!(ShareAddress::parse_uri("  smb://nas/media ").is_ok());
+        assert!(matches!(ShareAddress::parse_uri("davs+sd://x/"), Err(UriError::Invalid(_))));
+        for path in ["file:///tmp", "wired", "/home/me/notes://odd", "://x"] {
+            assert_eq!(ShareAddress::parse_uri(path), Err(UriError::NotAUri), "{path}");
+        }
+        assert!(ShareAddress::parse("wired").is_ok(), "the Connect dialog takes a bare host");
     }
 
     #[test]
     fn unsupported_schemes_are_named() {
-        let error = Location::parse("gopher://x/").unwrap_err();
+        let error = ShareAddress::parse("gopher://x/").unwrap_err();
         assert!(error.contains("gopher"), "{error}");
-        assert!(Location::parse("file:///tmp").unwrap_err().contains("local"));
-        assert!(Location::parse("sftp:///nohost").is_err());
+        assert!(ShareAddress::parse("file:///tmp").unwrap_err().contains("local"));
+        assert!(ShareAddress::parse("sftp:///nohost").is_err());
     }
 
     #[test]
     fn a_saved_server_matches_the_mount_that_serves_it() {
-        let wanted = Location::parse("sftp://wired/home/me").unwrap().spec;
+        let wanted = ShareAddress::parse("sftp://wired/home/me").unwrap().spec;
         let mut mounted = wanted.clone();
         assert!(wanted.is_served_by(&mounted));
         mounted.items.insert("user".into(), "me".into());
         assert!(wanted.is_served_by(&mounted), "the backend may add what it learned");
-        let other = Location::parse("sftp://other/").unwrap().spec;
+        let other = ShareAddress::parse("sftp://other/").unwrap().spec;
         assert!(!wanted.is_served_by(&other));
         let mut ftp = wanted.clone();
         ftp.kind = "ftp".into();
         assert!(!wanted.is_served_by(&ftp));
 
-        let deep = Location::parse("davs://h/remote.php/dav/files/me").unwrap().spec;
+        let deep = ShareAddress::parse("davs://h/remote.php/dav/files/me").unwrap().spec;
         let mut root = deep.clone();
         root.prefix = "/remote.php/dav".into();
         assert!(deep.is_served_by(&root), "a DAV backend may settle higher");
@@ -1115,7 +1208,7 @@ mod tests {
 
     #[test]
     fn the_wire_form_is_nul_terminated_bytestrings() {
-        let spec = Location::parse("sftp://me@wired/").unwrap().spec;
+        let spec = ShareAddress::parse("sftp://me@wired/").unwrap().spec;
         let (prefix, items) = spec.to_dbus();
         assert_eq!(prefix, b"/\0");
         assert_eq!(items.len(), 3);
@@ -1135,7 +1228,7 @@ mod tests {
             owner: ":1.5".into(),
             object_path: OwnedObjectPath::try_from("/org/gtk/vfs/mount/1").unwrap(),
             name: "wired".into(),
-            spec: Location::parse("sftp://wired/").unwrap().spec,
+            spec: ShareAddress::parse("sftp://wired/").unwrap().spec,
             fuse_root: Some(PathBuf::from("/run/user/1000/gvfs/sftp:host=wired")),
             default_location: "/home/me".into(),
         };
@@ -1152,7 +1245,7 @@ mod tests {
         assert!(!mount.contains(Path::new("/run/user/1000/gvfs/sftp:host=wired2")));
 
         let mut dav = mount.clone();
-        dav.spec = Location::parse("davs://h/remote.php/dav").unwrap().spec;
+        dav.spec = ShareAddress::parse("davs://h/remote.php/dav").unwrap().spec;
         dav.default_location = String::new();
         dav.fuse_root = Some(PathBuf::from("/run/user/1000/gvfs/dav:host=h,ssl=true"));
         assert_eq!(
@@ -1210,7 +1303,7 @@ mod live {
         }
     }
 
-    /// Mounts and unmounts `MARCEL_TEST_SERVER` (an address `Location::parse`
+    /// Mounts and unmounts `MARCEL_TEST_SERVER` (an address `ShareAddress::parse`
     /// takes) through GVfs, answering no prompts: the host has to be one the
     /// agent logs into on its own.
     #[test]
@@ -1220,12 +1313,12 @@ mod live {
             eprintln!("MARCEL_TEST_SERVER is not set; skipping");
             return;
         };
-        let location = Location::parse(&address).unwrap();
+        let location = ShareAddress::parse(&address).unwrap();
         smol::block_on(async {
             let client = GvfsClient::connect().await.unwrap();
             let (prompts, incoming) = async_channel::unbounded();
             drop(incoming);
-            // "Location is already mounted" from an earlier run that stopped
+            // "ShareAddress is already mounted" from an earlier run that stopped
             // short of unmounting is the one failure the round trip absorbs.
             if let Err(error) = client.mount(&location.spec, prompts.clone()).await {
                 eprintln!("mount: {error}");

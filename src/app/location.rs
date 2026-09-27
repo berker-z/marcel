@@ -18,6 +18,7 @@ use gpui_component::{
 use crate::{
     browse::location::Location,
     desktop::launch::{LocationTarget, resolve_location},
+    network::{ShareAddress, UriError},
 };
 
 use super::{Marcel, navigation::unblock};
@@ -46,17 +47,6 @@ pub(super) fn breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
         crumbs.push(Breadcrumb { label, path: Some(current.clone()) });
     }
     crumbs
-}
-
-/// Whether typed text is a URI for something GVfs mounts rather than a path
-/// or a `file:` URI: a scheme, then `://`, and not `file`.
-pub(super) fn is_network_uri(value: &str) -> bool {
-    let value = value.trim();
-    value.split_once("://").is_some_and(|(scheme, _)| {
-        !scheme.is_empty()
-            && !scheme.eq_ignore_ascii_case("file")
-            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    })
 }
 
 /// Crumbs that start at `root`, labelled `label`, and continue with the
@@ -189,9 +179,7 @@ impl Marcel {
         }
 
         let crumbs = match &self.directory.location {
-            Location::Folder(folder) => {
-                compact(self.mounted_breadcrumbs(folder, cx), max_breadcrumbs)
-            }
+            Location::Folder(folder) => compact(self.mounted_breadcrumbs(folder), max_breadcrumbs),
             trash @ Location::Trash(_) => vec![Breadcrumb { label: trash.label(), path: None }],
         };
         let (go_to, edit) = (cx.weak_entity(), cx.weak_entity());
@@ -214,20 +202,9 @@ impl Marcel {
     /// The crumbs for the current directory, starting at the drive or share
     /// it is on when it is on one: "wired / home / me" rather than the eight
     /// segments of the FUSE path, which is a place nobody chose.
-    fn mounted_breadcrumbs(&self, current: &Path, cx: &Context<Self>) -> Vec<Breadcrumb> {
-        let root = self
-            .network
-            .read(cx)
-            .mount_containing(current)
-            .and_then(|mount| Some((mount.name.clone(), mount.fuse_root.clone()?)))
-            .or_else(|| {
-                self.volumes
-                    .read(cx)
-                    .volume_containing(current)
-                    .and_then(|volume| Some((volume.name.clone(), volume.mount_point.clone()?)))
-            });
-        match root {
-            Some((label, root)) => breadcrumbs_from(&root, label, current),
+    fn mounted_breadcrumbs(&self, current: &Path) -> Vec<Breadcrumb> {
+        match &self.place.mount {
+            Some(mount) => breadcrumbs_from(&mount.root, mount.label.clone(), current),
             None => breadcrumbs(current),
         }
     }
@@ -297,9 +274,15 @@ impl Marcel {
         // A server address connects rather than resolves: `sftp://wired/` is
         // not a path until GVfs has mounted it. Only a URI counts; a bare
         // word here is a folder name, not a host.
-        if is_network_uri(&value) {
-            match self.connect_to_address(&value, window, cx) {
-                Ok(()) => {
+        let share = match ShareAddress::parse_uri(&value) {
+            Ok(address) => Some(Ok(address)),
+            Err(UriError::Invalid(error)) => Some(Err(error)),
+            Err(UriError::NotAUri) => None,
+        };
+        if let Some(share) = share {
+            match share {
+                Ok(address) => {
+                    self.open_share(address, window, cx);
                     self.ui.location.end();
                     self.focus_browser(window, cx);
                 }
@@ -389,17 +372,6 @@ mod tests {
             breadcrumbs_from(root, "wired".into(), root),
             vec![crumb("wired", root.to_str().unwrap())]
         );
-    }
-
-    #[test]
-    fn only_non_file_uris_are_server_addresses() {
-        assert!(is_network_uri("sftp://wired/"));
-        assert!(is_network_uri("  smb://nas/media "));
-        assert!(is_network_uri("davs+sd://x/"));
-        assert!(!is_network_uri("file:///tmp"));
-        assert!(!is_network_uri("wired"), "a bare word is a folder name here");
-        assert!(!is_network_uri("/home/me/notes://odd"), "a path with a colon is still a path");
-        assert!(!is_network_uri("://x"));
     }
 
     #[test]

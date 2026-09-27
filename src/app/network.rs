@@ -18,10 +18,7 @@ use gpui_component::{
     notification::Notification,
 };
 
-use crate::{
-    desktop::gvfs::{Location, Mount},
-    network::Server,
-};
+use crate::network::{Mount, Server, ShareAddress};
 
 use super::{
     Marcel,
@@ -37,7 +34,7 @@ struct NetworkRow {
     id: (&'static str, usize),
     label: String,
     /// What a click opens.
-    location: Location,
+    address: ShareAddress,
     /// Where it is browsed from while connected; `None` means disconnected.
     directory: Option<PathBuf>,
     active: bool,
@@ -48,13 +45,18 @@ struct NetworkRow {
 }
 
 impl Marcel {
-    /// Connect a location and go there, or just go there if it is connected.
-    fn open_location(&mut self, location: Location, window: &Window, cx: &mut Context<Self>) {
+    /// Connect an address and go there, or just go there if it is connected.
+    pub(super) fn open_share(
+        &mut self,
+        address: ShareAddress,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let origin = Self::origin(window);
         let view = cx.entity();
         self.network.update(cx, |store, cx| {
             store.connect(
-                location,
+                address,
                 origin,
                 move |directory, cx| {
                     view.update(cx, |this, cx| this.navigate_to(directory, true, cx));
@@ -66,7 +68,7 @@ impl Marcel {
 
     /// Leave a share before it goes away, as with a drive.
     fn leave_mount(&mut self, mount: &Mount, cx: &mut Context<Self>) {
-        if self.directory.folder().is_some_and(|folder| mount.contains(folder)) {
+        if self.place.is_on_share(&mount.id()) {
             self.navigate_to(self.home_dir.clone(), true, cx);
         }
     }
@@ -84,8 +86,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let location = Location::parse(address)?;
-        self.open_location(location, window, cx);
+        self.open_share(ShareAddress::parse(address)?, window, cx);
         Ok(())
     }
 
@@ -129,12 +130,12 @@ impl Marcel {
 
     fn save_mount(&mut self, mount: &Mount, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.network_menu = None;
-        let location = Location { spec: mount.spec.clone(), path: String::new() };
+        let address = mount.address();
         let origin = Self::origin(window);
         let added = self
             .network
             .clone()
-            .update(cx, |store, cx| store.add(location, Some(mount.name.clone()), origin, cx));
+            .update(cx, |store, cx| store.add(address, Some(mount.name.clone()), origin, cx));
         if added {
             window.push_notification(
                 Notification::success(format!("Added “{}” to Network", mount.name)),
@@ -147,7 +148,7 @@ impl Marcel {
     fn remove_server(
         &mut self,
         index: usize,
-        expected: &Location,
+        expected: &ShareAddress,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -175,7 +176,7 @@ impl Marcel {
     ) {
         self.sidebar.network_menu = None;
         let input = cx.new(|cx| InputState::new(window, cx).default_value(server.label()));
-        let location = server.location.clone();
+        let address = server.address.clone();
         self.ask_name(
             window,
             cx,
@@ -184,7 +185,7 @@ impl Marcel {
             move |this, name, window, cx| {
                 let origin = Self::origin(window);
                 this.network.clone().update(cx, |store, cx| {
-                    store.rename_at(index, &location, name, origin, cx);
+                    store.rename_at(index, &address, name, origin, cx);
                 });
                 cx.notify();
             },
@@ -194,27 +195,8 @@ impl Marcel {
     // -----------------------------------------------------------------------
     // Rendering.
 
-    /// The saved server the window is inside, when it is inside one: the one
-    /// whose folder is the deepest prefix of the current directory, so a
-    /// server saved at a subfolder wins over the same host saved at its root.
-    fn active_server(&self, cx: &Context<Self>) -> Option<usize> {
-        let store = self.network.read(cx);
-        store
-            .servers()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, server)| {
-                let directory =
-                    store.mount_for(&server.location.spec)?.directory_for(&server.location.path)?;
-                let here = self.directory.folder()?;
-                here.starts_with(&directory).then_some((index, directory))
-            })
-            .max_by_key(|(_, directory)| directory.as_os_str().len())
-            .map(|(index, _)| index)
-    }
-
     fn network_row(&self, row: NetworkRow, cx: &mut Context<Self>) -> AnyElement {
-        let NetworkRow { id, label, location, directory, active, busy, target, mount } = row;
+        let NetworkRow { id, label, address, directory, active, busy, target, mount } = row;
         let on_disconnect = mount;
         let colors = cx.theme().colors;
         let icon =
@@ -228,7 +210,7 @@ impl Marcel {
             None => self.sidebar_row(id, Path::new(""), active, false, cx).on_click(cx.listener(
                 move |this, event: &ClickEvent, window, cx| {
                     if !event.is_right_click() {
-                        this.open_location(location.clone(), window, cx);
+                        this.open_share(address.clone(), window, cx);
                     }
                 },
             )),
@@ -294,18 +276,18 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let store = self.network.read(cx);
-        let mount = store.mount_for(&server.location.spec).cloned();
-        let directory = mount.as_ref().and_then(|mount| mount.directory_for(&server.location.path));
-        let busy = store.is_busy(&server.location.spec);
+        let mount = store.mount_for(&server.address.id()).cloned();
+        let directory = mount.as_ref().and_then(|mount| mount.directory_for(&server.address.path));
+        let busy = store.is_busy(&server.address.id());
         self.network_row(
             NetworkRow {
                 id: ("server", index),
                 label: server.label(),
-                location: server.location.clone(),
+                address: server.address.clone(),
                 directory,
                 active,
                 busy,
-                target: NetworkTarget::Server { index, location: server.location },
+                target: NetworkTarget::Server { index, address: server.address },
                 mount,
             },
             cx,
@@ -319,17 +301,17 @@ impl Marcel {
         active: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let busy = self.network.read(cx).is_busy(&mount.spec);
+        let busy = self.network.read(cx).is_busy(&mount.id());
         let directory = mount.directory_for("");
         self.network_row(
             NetworkRow {
                 id: ("network-mount", index),
                 label: mount.name.clone(),
-                location: Location { spec: mount.spec.clone(), path: String::new() },
+                address: mount.address(),
                 directory,
                 active,
                 busy,
-                target: NetworkTarget::Mount(mount.spec.clone()),
+                target: NetworkTarget::Mount(mount.id()),
                 mount: Some(mount),
             },
             cx,
@@ -353,15 +335,11 @@ impl Marcel {
             return None;
         }
         let colors = cx.theme().colors;
-        let active_server = self.active_server(cx);
-        let inside_unsaved = if active_server.is_none() {
-            self.directory
-                .folder()
-                .and_then(|folder| self.network.read(cx).mount_containing(folder))
-                .cloned()
-        } else {
-            None
-        };
+        let active_server =
+            self.directory.folder().and_then(|here| self.network.read(cx).server_containing(here));
+        // A saved server row wins the highlight; an unsaved share only gets
+        // it when no saved server stands for where the window is.
+        let inside_unsaved = active_server.is_none();
         let mut rows: Vec<AnyElement> = servers
             .into_iter()
             .enumerate()
@@ -369,8 +347,8 @@ impl Marcel {
                 self.render_server(index, server, active_server == Some(index), cx)
             })
             .collect();
-        rows.extend(pending.into_iter().map(|spec| {
-            let label = Location { spec, path: String::new() }.label();
+        rows.extend(pending.into_iter().map(|share| {
+            let label = share.label();
             div()
                 .px_3()
                 .py_1()
@@ -391,7 +369,7 @@ impl Marcel {
             );
         }
         rows.extend(unsaved.into_iter().enumerate().map(|(index, mount)| {
-            let active = inside_unsaved.as_ref() == Some(&mount);
+            let active = inside_unsaved && self.place.is_on_share(&mount.id());
             self.render_unsaved_mount(index, mount, active, cx)
         }));
         rows.push(
@@ -429,23 +407,20 @@ impl Marcel {
         // on since it opened, it no longer describes what a click would act
         // on, so it goes away instead.
         let (server, mount) = match &menu.target {
-            NetworkTarget::Server { index, location } => {
+            NetworkTarget::Server { index, address } => {
                 let server = store
                     .servers()
                     .get(*index)
-                    .filter(|server| &server.location == location)?
+                    .filter(|server| &server.address == address)?
                     .clone();
-                let mount = store.mount_for(&server.location.spec).cloned();
+                let mount = store.mount_for(&server.address.id()).cloned();
                 (Some((*index, server)), mount)
             }
-            NetworkTarget::Mount(spec) => (None, Some(store.mount_for(spec)?.clone())),
+            NetworkTarget::Mount(share) => (None, Some(store.mount_for(share)?.clone())),
         };
         // Only a mount whose address reads back can be saved; a phone or a
         // camera is browsable and disconnectable, and that is all.
-        let save = mount.clone().filter(|mount| {
-            server.is_none()
-                && Location { spec: mount.spec.clone(), path: String::new() }.can_be_saved()
-        });
+        let save = mount.clone().filter(|mount| server.is_none() && mount.address().can_be_saved());
         let rows = usize::from(mount.is_some())
             + if server.is_some() { 2 } else { usize::from(save.is_some()) };
         let height = BOOKMARK_MENU_HEIGHT + 30.0 * (rows as f32 - 1.0);
@@ -480,7 +455,7 @@ impl Marcel {
                     this.child(
                         menu_row(("network-menu-remove", 2), "Remove from Network", true, cx)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.remove_server(index, &server.location, window, cx);
+                                this.remove_server(index, &server.address, window, cx);
                             })),
                     )
                 })

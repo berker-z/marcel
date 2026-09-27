@@ -346,9 +346,7 @@ impl Marcel {
     /// Leave a volume before it goes away: a window standing on the mount
     /// point would otherwise be left in a directory that no longer exists.
     fn leave_volume(&mut self, volume: &Volume, cx: &mut Context<Self>) {
-        if let Some(mount_point) = &volume.mount_point
-            && self.directory.folder().is_some_and(|folder| folder.starts_with(mount_point))
-        {
+        if self.place.is_on_drive(&volume.device) {
             self.navigate_to(self.home_dir.clone(), true, cx);
         }
     }
@@ -368,11 +366,7 @@ impl Marcel {
     fn render_volume(&self, index: usize, volume: Volume, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let store = self.volumes.read(cx);
-        let active = self
-            .directory
-            .folder()
-            .and_then(|folder| store.volume_containing(folder))
-            .is_some_and(|v| v.device == volume.device);
+        let active = self.place.is_on_drive(&volume.device);
         let busy = store.is_busy(&volume);
         let icon = sidebar_icon(store.icon(&volume).map(Path::to_path_buf), colors.primary);
         let mount_point = volume.mount_point.clone();

@@ -11,6 +11,10 @@
 
 mod prompts;
 
+/// What the window sees of a share: the store hands these out, and `app/`
+/// takes them from here rather than from the GVfs client.
+pub use crate::desktop::gvfs::{Mount, ShareAddress, ShareId, UriError};
+
 use std::{
     collections::HashSet,
     io::Write as _,
@@ -23,7 +27,7 @@ use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Task}
 
 use crate::{
     config,
-    desktop::gvfs::{GvfsChange, GvfsClient, Location, Mount, MountError, MountSpec},
+    desktop::gvfs::{GvfsChange, GvfsClient, MountError, MountSpec},
     surface::{self, Report},
 };
 
@@ -33,14 +37,14 @@ use crate::{
 /// One line of the servers file: where, and what the user calls it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Server {
-    pub location: Location,
+    pub address: ShareAddress,
     /// The user's name for it; without one, the host or share names it.
     pub name: Option<String>,
 }
 
 impl Server {
     pub fn label(&self) -> String {
-        self.name.clone().unwrap_or_else(|| self.location.label())
+        self.name.clone().unwrap_or_else(|| self.address.label())
     }
 }
 
@@ -72,14 +76,15 @@ pub fn load(path: &Path) -> Result<LoadedServers> {
             // The file holds URIs, which is what Marcel writes; the bare-host
             // shorthand the Connect dialog takes would make any stray word
             // here a server.
-            let Ok(location) = Location::parse(uri).ok().filter(|_| uri.contains("://")).ok_or(())
+            let Ok(location) =
+                ShareAddress::parse(uri).ok().filter(|_| uri.contains("://")).ok_or(())
             else {
                 rejected += 1;
                 return None;
             };
             // A duplicate of a server already loaded is not user data at
             // risk; collapsing it loses nothing.
-            seen.insert(location.clone()).then_some(Server { location, name })
+            seen.insert(location.clone()).then_some(Server { address: location, name })
         })
         .collect();
     Ok(LoadedServers { servers, rejected })
@@ -88,7 +93,7 @@ pub fn load(path: &Path) -> Result<LoadedServers> {
 pub fn save(path: &Path, servers: &[Server]) -> Result<()> {
     config::write_atomically(path, |file| {
         for server in servers {
-            let uri = server.location.to_uri();
+            let uri = server.address.to_uri();
             match &server.name {
                 Some(name) => writeln!(
                     file,
@@ -285,8 +290,12 @@ impl NetworkStore {
         self.icon.as_deref()
     }
 
-    /// The live mount serving `spec`, if any.
-    pub fn mount_for(&self, spec: &MountSpec) -> Option<&Mount> {
+    /// The live mount serving `share`, if any.
+    pub fn mount_for(&self, share: &ShareId) -> Option<&Mount> {
+        self.mount_serving(share.spec())
+    }
+
+    fn mount_serving(&self, spec: &MountSpec) -> Option<&Mount> {
         self.mounts.iter().find(|mount| spec.is_served_by(&mount.spec))
     }
 
@@ -296,10 +305,27 @@ impl NetworkStore {
         self.mounts
             .iter()
             .filter(|mount| {
-                !self.servers.iter().any(|server| server.location.spec.is_served_by(&mount.spec))
+                !self.servers.iter().any(|server| server.address.spec.is_served_by(&mount.spec))
             })
             .cloned()
             .collect()
+    }
+
+    /// The saved server a window at `path` is inside: the one whose folder
+    /// is the deepest prefix of it, so a server saved at a subfolder wins
+    /// over the same host saved at its root.
+    pub fn server_containing(&self, path: &Path) -> Option<usize> {
+        self.servers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, server)| {
+                let directory = self
+                    .mount_serving(&server.address.spec)?
+                    .directory_for(&server.address.path)?;
+                path.starts_with(&directory).then_some((index, directory))
+            })
+            .max_by_key(|(_, directory)| directory.as_os_str().len())
+            .map(|(index, _)| index)
     }
 
     /// The mount whose FUSE directory holds `path`: what the sidebar
@@ -311,20 +337,25 @@ impl NetworkStore {
             .max_by_key(|mount| mount.fuse_root.as_ref().map(|root| root.as_os_str().len()))
     }
 
-    pub fn is_busy(&self, spec: &MountSpec) -> bool {
+    pub fn is_busy(&self, share: &ShareId) -> bool {
+        self.is_spec_busy(share.spec())
+    }
+
+    fn is_spec_busy(&self, spec: &MountSpec) -> bool {
         self.busy.iter().any(|busy| busy == spec || busy.is_served_by(spec))
     }
 
     /// Connections in flight that no row stands for yet: an address typed
     /// into the location bar or the Connect dialog, until it is listed.
-    pub fn pending(&self) -> Vec<MountSpec> {
+    pub fn pending(&self) -> Vec<ShareId> {
         self.busy
             .iter()
             .filter(|spec| {
-                self.mount_for(spec).is_none()
-                    && !self.servers.iter().any(|server| server.location.spec.is_served_by(spec))
+                self.mount_serving(spec).is_none()
+                    && !self.servers.iter().any(|server| server.address.spec.is_served_by(spec))
             })
             .cloned()
+            .map(ShareId::from)
             .collect()
     }
 
@@ -333,12 +364,12 @@ impl NetworkStore {
     /// already mounted answers at once.
     pub fn connect(
         &mut self,
-        location: Location,
+        location: ShareAddress,
         origin: AnyWindowHandle,
         then: impl FnOnce(PathBuf, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) {
-        if let Some(mount) = self.mount_for(&location.spec) {
+        if let Some(mount) = self.mount_serving(&location.spec) {
             match mount.directory_for(&location.path) {
                 // Deferred, not called: the window that asked is mid-update
                 // when it asks, and `then` updates it again.
@@ -363,7 +394,7 @@ impl NetworkStore {
                 this.finish(&location.spec, cx);
                 result.map(|mounts| {
                     this.mounts = mounts;
-                    let mount = this.mount_for(&location.spec).cloned();
+                    let mount = this.mount_serving(&location.spec).cloned();
                     cx.notify();
                     mount
                 })
@@ -432,7 +463,7 @@ impl NetworkStore {
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Option<Arc<GvfsClient>> {
-        let refusal = if self.is_busy(spec) {
+        let refusal = if self.is_spec_busy(spec) {
             Some("That server is still being connected or disconnected; wait a moment".to_string())
         } else if self.client.is_none() {
             Some("Network shares are not available: GVfs is not on the session bus".to_string())
@@ -482,12 +513,12 @@ impl NetworkStore {
     /// refused and has said why.
     pub fn add(
         &mut self,
-        location: Location,
+        location: ShareAddress,
         name: Option<String>,
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.writable(origin, cx) || self.servers.iter().any(|s| s.location == location) {
+        if !self.writable(origin, cx) || self.servers.iter().any(|s| s.address == location) {
             return false;
         }
         // A phone, a camera, or a Google Drive mount has no address Marcel
@@ -496,7 +527,7 @@ impl NetworkStore {
         if !location.can_be_saved() {
             return false;
         }
-        self.servers.push(Server { location, name });
+        self.servers.push(Server { address: location, name });
         self.changed(origin, cx);
         true
     }
@@ -507,7 +538,7 @@ impl NetworkStore {
     pub fn remove_at(
         &mut self,
         index: usize,
-        expected: &Location,
+        expected: &ShareAddress,
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Option<Server> {
@@ -522,7 +553,7 @@ impl NetworkStore {
     pub fn rename_at(
         &mut self,
         index: usize,
-        expected: &Location,
+        expected: &ShareAddress,
         name: String,
         origin: AnyWindowHandle,
         cx: &mut Context<Self>,
@@ -536,8 +567,8 @@ impl NetworkStore {
         true
     }
 
-    fn still_at(&self, index: usize, expected: &Location) -> bool {
-        self.servers.get(index).is_some_and(|server| &server.location == expected)
+    fn still_at(&self, index: usize, expected: &ShareAddress) -> bool {
+        self.servers.get(index).is_some_and(|server| &server.address == expected)
     }
 
     fn changed(&mut self, origin: AnyWindowHandle, cx: &mut Context<Self>) {
@@ -588,7 +619,7 @@ mod tests {
     use crate::testing::Sandbox;
 
     fn server(uri: &str, name: Option<&str>) -> Server {
-        Server { location: Location::parse(uri).unwrap(), name: name.map(str::to_string) }
+        Server { address: ShareAddress::parse(uri).unwrap(), name: name.map(str::to_string) }
     }
 
     #[test]

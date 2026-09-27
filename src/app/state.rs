@@ -16,13 +16,14 @@ use gpui::{
 use gpui_component::{input::InputState, select::SelectState};
 
 use crate::{
+    browse::location::Location,
     config::{BrowserState, BrowserView, SpeedTradeoff},
     desktop::{
-        gvfs::{Location, MountSpec},
         picker::{FileFilter, PickerMode, PickerRequest, PickerResponse},
         places::Place,
     },
     fsops::trash::TrashRecord,
+    network::{ShareAddress, ShareId},
 };
 
 use super::pointer::FileDrag;
@@ -258,9 +259,9 @@ pub struct VolumeMenu {
 pub enum NetworkTarget {
     /// A saved server, by slot and by identity, re-verified on a click the
     /// way bookmarks are.
-    Server { index: usize, location: Location },
+    Server { index: usize, address: ShareAddress },
     /// A share connected by hand or by another application.
-    Mount(MountSpec),
+    Mount(ShareId),
 }
 
 #[derive(Clone, Debug)]
@@ -281,7 +282,7 @@ pub struct BookmarkMenu {
 
 pub struct SidebarState {
     pub places: Vec<Place>,
-    pub place_icons: HashMap<crate::browse::location::Location, PathBuf>,
+    pub place_icons: HashMap<Location, PathBuf>,
     pub places_loading: bool,
     pub places_task: Option<Task<()>>,
     pub trash_records: HashMap<PathBuf, TrashRecord>,
@@ -436,5 +437,45 @@ mod tests {
         drop(state);
         assert_eq!(responses.try_recv(), Ok(PickerResponse::Closed));
         assert!(responses.try_recv().is_err());
+    }
+}
+
+/// Which drive or share the window's folder is on, if either.
+///
+/// Worked out once, when the window moves or a drive or share comes or goes,
+/// by [`Marcel::refresh_place`](super::Marcel::refresh_place). The location
+/// bar's first crumb, the sidebar's highlight, and leaving a drive before it
+/// is unmounted all read this, so they cannot disagree about where the
+/// window is, and which of a share and a drive wins when both contain the
+/// folder is decided in one place.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaceInfo {
+    pub mount: Option<MountRoot>,
+}
+
+/// A drive or share, as the window is inside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountRoot {
+    pub kind: MountKind,
+    /// What the sidebar calls it: "wired", "268 GB Volume".
+    pub label: String,
+    /// Where it starts on disk: the mount point, or the share's FUSE root.
+    pub root: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MountKind {
+    /// A block device UDisks2 reports, by its device node.
+    Drive(PathBuf),
+    Share(ShareId),
+}
+
+impl PlaceInfo {
+    pub fn is_on_drive(&self, device: &Path) -> bool {
+        matches!(&self.mount, Some(MountRoot { kind: MountKind::Drive(on), .. }) if on == device)
+    }
+
+    pub fn is_on_share(&self, share: &ShareId) -> bool {
+        matches!(&self.mount, Some(MountRoot { kind: MountKind::Share(on), .. }) if on == share)
     }
 }
