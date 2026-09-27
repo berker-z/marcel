@@ -612,8 +612,8 @@ first full pass was recorded on 2026-08-21 (the record has since been removed
 from the tree with the other review documents; it is in the git history);
 Sprint 26 carries the checks that are still open. The tag waited long enough
 that drives, network shares, the shared clipboard, and HEIF landed first, so
-0.1.0 is master as [Sprint 32](sprints/032-safe-to-tag.md) leaves it and the
-hand checks below cover those too.
+0.1.0 is master as [Sprint 34](sprints/034-network-and-devices-hardening.md)
+leaves it and the hand checks below cover those too.
 
 Before creating the first tag:
 

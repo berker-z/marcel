@@ -2,7 +2,8 @@
 
 **Status:** Code done 2026-09-27; the tag waits for the hand checks in
 [`release.md`](../release.md#v010-release-gate), which need a person, a stick,
-and a share. First of three cleanup sprints (32, 33, 34) that come out of
+and a share. Sprints 33 and 34 were finished the same day, before those
+checks ran, so the tag now goes on master as Sprint 34 left it. First of three cleanup sprints (32, 33, 34) that come out of
 [`../review-2026-09-27.md`](../review-2026-09-27.md). No new features in any
 of them. The gate is green at 467 tests (449 before it), both bus tests run
 unsandboxed.

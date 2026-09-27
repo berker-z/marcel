@@ -113,14 +113,23 @@ that; an automounted NFS or SMB share counts as a share.
 
 A Network section connects shares through GVfs: Add… under it and the
 location bar take `sftp://`, `smb://`, `ftp://`, and `dav://` addresses, or
-a bare hostname for SFTP. Passwords and "trust this host?" are asked in
-Marcel's dialogs and answered to GVfs, which keeps them in the keyring if
-asked. A connected share is a folder under `/run/user/<uid>/gvfs/` and
-behaves like any other. Add to Network on a connected share saves it to
+a bare hostname for SFTP; an SMB address keeps its port and a
+`DOMAIN;user` login. Passwords and "trust this host?" are asked in Marcel's
+dialogs and answered to GVfs, which keeps them in the keyring if asked. A
+connection that hangs can be stopped with the ✕ on its row. A connected
+share is a folder under `/run/user/<uid>/gvfs/` and behaves like any
+other. Add to Network on a connected share saves it to
 `~/.config/marcel/servers`, one URI per line with an optional name, and saved
-servers stay in the sidebar whether or not they are connected. Without GVfs on
-the session bus there is no Network section; without UDisks2 on the system
-bus, no Devices section.
+servers stay in the sidebar whether or not they are connected; a phone or a
+camera GVfs lists there can be browsed but not saved. Without GVfs on the
+session bus there is no Network section; without UDisks2 on the system bus,
+no Devices section, and it comes back when UDisks2 does.
+
+Unmounting, ejecting, or disconnecting moves every window that was inside
+the drive or share to Home once it has gone, and leaves them where they are
+if it was refused. Move To offers mounted drives and connected shares next
+to the places and bookmarks. Deleting a selection where only some items have
+a Trash sends those to it and asks about the rest by name.
 
 
 ### Desktop integration

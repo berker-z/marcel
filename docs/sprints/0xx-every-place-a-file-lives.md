@@ -3,9 +3,9 @@
 **Status:** Partly done, out of order. Volumes and the cross-device move
 landed in [Sprint 29](029-drives.md) and network places in
 [Sprint 30](030-network.md), both skipping part one on the grounds that a
-mount is a folder. Part one is now [Sprint 33](033-location.md), extended
-with what those sprints added; search (part four) comes after
-[Sprint 34](034-network-and-devices-hardening.md). The text below is the plan
+mount is a folder. Part one was done in [Sprint 33](033-location.md), extended
+with what those sprints added and with a Trash per drive; search (part four)
+is what is left. The text below is the plan
 as written before any of it started.
 
 This is the 0.2.0 line of work the pre-tag review pointed at. It is written as one document because the pieces

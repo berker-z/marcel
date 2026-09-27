@@ -2,14 +2,16 @@
 
 What is left, in the order it is likely to happen. Sprint documents under
 [`sprints/`](sprints/) turn items from here into bounded work with acceptance
-checks; the latest finished one is [Sprint 31](sprints/031-what-a-share-costs.md).
+checks; the latest finished one is
+[Sprint 34](sprints/034-network-and-devices-hardening.md).
 Finished work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md),
 not here.
 
-## Now: three cleanup sprints
+## Three cleanup sprints, done
 
-No new features until these are closed. They come out of
-[`review-2026-09-27.md`](review-2026-09-27.md).
+They came out of [`review-2026-09-27.md`](review-2026-09-27.md) and closed on
+2026-09-27; the checks they could not run without a stick, a share, or
+Nautilus are in the next section.
 
 1. [Sprint 32: Safe to tag](sprints/032-safe-to-tag.md). Data-safety fixes in
    the cross-device move, the HEIF and remoteness bugs, bookkeeping, then
@@ -19,18 +21,25 @@ No new features until these are closed. They come out of
 3. [Sprint 34: Network and devices hardening](sprints/034-network-and-devices-hardening.md).
    The GVfs, UDisks2, and clipboard long tail.
 
-Search waits until after Sprint 34.
+Search is next, on top of `Location`.
 
 ## Before `v0.1.0`
 
-Everything here needs a person at the machine; the code side closed with
-[Sprint 32](sprints/032-safe-to-tag.md).
+Everything here needs a person at the machine. The plan was to tag after
+Sprint 32; the hand checks had not been run when Sprints 33 and 34 were
+finished the same day, so the tag goes on master as Sprint 34 left it.
 
 - The hand checks for what landed after the first pass, listed in
   [`release.md`](release.md#v010-release-gate): a stick moved onto and
   ejected, an SFTP share with the default settings, the clipboard both ways
   with Nautilus, a HEIC and a 10-bit AVIF. Also pulling a stick while
   browsing it (Sprint 29's open check).
+- Sprint 33 and 34's: a file trashed on a stick found in the drive's Trash
+  after Undo is gone, restored, and that Trash emptied alone; a read-only
+  drive's Trash that lists but does not empty; ejecting a stick two windows
+  are browsing; cancelling a connect to a host that never answers; Nautilus
+  copying files while Marcel's Paste enables on its own; Back from the Trash
+  in the running app.
 - Sprint 31's two checks: browsing a real share with the defaults (icons in
   the grid, the preview reading only where the selection stops, Calculate in
   Properties), and disconnecting a share in a Marcel that was running across
@@ -82,10 +91,9 @@ Small, and none of them blocks the tag.
 
 ## `0.2.0`
 
-- **Location.** `browsing_trash: bool` becomes a location: a local folder,
-  the Trash, or search results. Volumes and network shares turned out not
-  to need it (a mount is a folder), so search is what forces it. The whole
-  line of work is specified in
+- **Location**: done in Sprint 33 ([`sprints/033-location.md`](sprints/033-location.md)),
+  with a Trash per drive. Search is the variant still to add; the line of
+  work is in
   [`sprints/0xx-every-place-a-file-lives.md`](sprints/0xx-every-place-a-file-lives.md).
 - **Removable volumes** through UDisks2 in the sidebar, and cross-filesystem
   move as a verified copy plus removal of the source, journalled as one

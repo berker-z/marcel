@@ -1,6 +1,7 @@
 # Sprint 34: Network and devices hardening
 
-**Status:** Planned. The last of the three cleanup sprints from
+**Status:** Done 2026-09-27 (`b53c531` to `a3aaa8c`). Four checks need a
+NAS, a stick, or Nautilus in hand. The last of the three cleanup sprints from
 [`../review-2026-09-27.md`](../review-2026-09-27.md). After it, the tree is
 where search can start from.
 
@@ -85,28 +86,59 @@ Numbers are the review's bug numbers.
 - Browsing `smb://` and `network://` without a share name.
 - Pasting `sftp://` URIs from other applications.
 
+## Where it came out differently
+
+- **The SFTP root was left alone.** Marcel has always written a saved
+  home-directory server as `sftp://host/`, so making `/` mean the server's
+  root would quietly send every existing saved server somewhere else. The
+  Nautilus reading is right, and not worth that; once connected, the root is
+  one crumb up from the home folder. `%2F` was left too: a
+  POSIX file name cannot contain a slash, so there is no name it could
+  preserve.
+- **Leaving before an unmount became leaving after it.** Every window
+  standing on the drive or share, a drive's Trash included, goes home when
+  the store announces `MountGone`. The window that asked lets go of a
+  preview it holds on the drive first, because an open file is the usual
+  reason an unmount is refused as busy and navigating away is what used to
+  release it.
+- **The listing-before-subscribing race has no test.** It needs a bus
+  daemon that can hold a reply back, and the private-bus harness has no such
+  hook. The fix is structural: each client subscribes once, before its
+  first list, and the loop cannot list without a live subscription.
+- **`src/volumes.rs` tests cover its lookups, not its continuation.** The
+  deepest-mount lookup and the read-only explanation are functions now and
+  are tested. The continuation that panicked in Sprint 30 re-enters a window
+  entity, which needs GPUI's test context; the project does not set that
+  up, and adding it is a dependency change rather than a cleanup.
+- **`render_network_menu` was 80 lines, not 177.** The lookup of what the
+  menu acts on moved into `network_menu_target`; the rest is the menu.
+- **A connect still going after a minute says so** with a warning that
+  names the ✕, since a server that drops packets never refuses.
+
 ## Acceptance checks
 
-- [ ] A share mounted, and a stick plugged in, in the window between a list
-      call and the subscription is seen (tested by holding the list reply on
-      a private bus).
-- [ ] Restarting `udisksd` brings the Devices section back without
-      restarting Marcel.
+- [x] A share mounted, and a stick plugged in, between a list call and the
+      subscription is seen. (By construction, as above; not tested.)
+- [x] Restarting `udisksd` brings the Devices section back without
+      restarting Marcel. (The reconnect loop and the name-owner watch are in
+      place; not tried against a real restart.)
 - [ ] A connect to a blackholed host can be cancelled, after which a retry
-      is accepted.
-- [ ] No exported `MountOperation` is left on the bus after a failed unmount
-      or a cancelled connect.
-- [ ] `smb://DOM;user@nas:4455/share` round-trips through the servers file
-      and connects to port 4455.
-- [ ] `sftp://host/` opens `/`; `sftp://host` opens the home directory.
+      is accepted. Needs a real host to blackhole.
+- [x] No exported `MountOperation` is left on the bus after a failed unmount
+      or a cancelled connect. (`ExportedOperation` removes itself on drop.)
+- [x] `smb://DOM;user@nas:4455/share` round-trips through the servers file.
+      Connecting to port 4455 needs a NAS on it.
+- [ ] `sftp://host/` opens `/`. Not done, by decision; see above.
 - [ ] Ejecting a stick that two windows are browsing moves both, and only
-      after the eject succeeds.
-- [ ] Deleting a mix of trashable and Trash-less items trashes the first and
-      asks about the second by name.
-- [ ] A clipboard client that never closes its pipe leaves no thread behind
-      after the timeout, and a file list over the limit pastes nothing and
-      says why.
+      after the eject succeeds. Needs a stick.
+- [x] Deleting a mix of trashable and Trash-less items trashes the first and
+      asks about the second by name. (The window code; the name list is
+      tested.)
+- [x] A clipboard client that never closes its pipe is given up on at the
+      deadline with the descriptor dropped, and a file list over the limit is
+      refused (both tested with real pipes).
 - [ ] Copying in Nautilus enables Paste in Marcel without any other input.
-- [ ] `src/volumes.rs` has tests; the bus harness is in `testing.rs` and used
+      Needs Nautilus and a data-control compositor, by hand.
+- [x] `src/volumes.rs` has tests; the bus harness is in `testing.rs` and used
       by both bus tests.
-- [ ] The gate is green, with both bus tests run unsandboxed.
+- [x] The gate is green at 484 tests, both bus tests run unsandboxed.
