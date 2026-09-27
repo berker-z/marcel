@@ -164,7 +164,11 @@ unless a backend was there to ask it.
       unsandboxed.
 - [ ] Browsing a real share with the defaults: icons instead of downloads in
       the grid, the preview pane reading only where the selection stops, and
-      Properties showing Calculate. Not yet seen in the running application.
-- [ ] Disconnecting a share in a Marcel that was running across a
-      `systemctl --user restart gvfs-daemon`. The bug is understood and the
-      parts are tested, but the whole path has only been reasoned through.
+      Properties showing Calculate. Seen on 2026-09-27: Properties shows
+      Calculate. The grid's images carried the red "!" failure badge, because
+      a cache miss was reported as a failed thumbnail; `load_cached` now
+      answers a miss with `None`, and the grid shows plain icons. The
+      preview's reads were not traced.
+- [x] Disconnecting a share in a Marcel that was running across a
+      `systemctl --user restart gvfs-daemon`. (Driven 2026-09-27: restart,
+      reconnect from the sidebar, eject: disconnected and sent Home.)

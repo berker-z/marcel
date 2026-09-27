@@ -134,24 +134,31 @@ name order regardless of the browser's sort.
 - `scripts/check_version.sh` passes, and fails when `zed-rev` is edited.
 - [x] Tick Execute on a script in Properties; the Mode row updates, `stat`
   agrees, and `Ctrl+Z` puts it back.
-- [ ] `Ctrl+Y` sets it again.
-- [ ] Tick a bit on a file owned by root: an error notification, nothing
-  changed, the checkbox does not stay ticked.
-- [ ] Properties of a symbolic link shows words, not checkboxes.
+- [x] `Ctrl+Y` sets it again.
+- [x] Tick a bit on a file owned by root: an error notification, nothing
+  changed, the checkbox does not stay ticked. (`/etc/machine-id`.)
+- [x] Properties of a symbolic link shows words, not checkboxes.
 - [x] Click Modified in a folder: newest first, arrow on the heading; restart
   Marcel: the order is kept.
-- [ ] Click Modified again: oldest first.
+- [x] Click Modified again: oldest first.
 - [x] Pick Modified from the sort button in grid view; the tiles reorder,
   the button says so, and the picker closes on a second click.
-- [ ] Sort by Kind; Reverse Order.
+- [x] Sort by Kind; Reverse Order.
 - [ ] Type-to-filter and marquee selection still work with a header row.
+  (Filtering does; the marquee is still to be dragged by hand.)
 - [x] Pick Tokyo Night in Settings, quit, start: still Tokyo Night. Delete
   the `theme=` line: `MARCEL_THEME` applies again (the first half is what was
   driven; the second follows from the unit tests).
-- [ ] Rename a file to `.marcel-replaced-x`: refused with the reserved-name
-  message.
-- [ ] Copy `~/.ssh` (with `0600` keys): the copies are `0600`.
-- [ ] Copy Path on a two-item selection pastes two lines.
+- [x] Rename a file to `.marcel-replaced-x`: refused with the reserved-name
+  message. (The refused Enter also opened the file until 2026-09-27; while
+  a rename is open, the listing's key bindings other than Escape now stand
+  down.)
+- [x] Copy `~/.ssh` (with `0600` keys): the copies are `0600`. (A `0700`
+  folder of `0600` and `0644` files stood in for `~/.ssh`.)
+- [x] Copy Path on a two-item selection pastes two lines.
+
+Everything from `Ctrl+Y` down that was open before 2026-09-27 was driven
+that day against the dev build.
 
 One observation to keep an eye on: once during the hand run, `state.conf`
 came back with `view=grid` and `sort=name` after a restart while `theme=`

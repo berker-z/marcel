@@ -122,8 +122,8 @@ Numbers are the review's bug numbers.
 - [x] Restarting `udisksd` brings the Devices section back without
       restarting Marcel. (The reconnect loop and the name-owner watch are in
       place; not tried against a real restart.)
-- [ ] A connect to a blackholed host can be cancelled, after which a retry
-      is accepted. Needs a real host to blackhole.
+- [x] A connect to a blackholed host can be cancelled, after which a retry
+      is accepted. (Driven 2026-09-27 against `sftp://10.255.255.1/`.)
 - [x] No exported `MountOperation` is left on the bus after a failed unmount
       or a cancelled connect. (`ExportedOperation` removes itself on drop.)
 - [x] `smb://DOM;user@nas:4455/share` round-trips through the servers file.
@@ -137,8 +137,8 @@ Numbers are the review's bug numbers.
 - [x] A clipboard client that never closes its pipe is given up on at the
       deadline with the descriptor dropped, and a file list over the limit is
       refused (both tested with real pipes).
-- [ ] Copying in Nautilus enables Paste in Marcel without any other input.
-      Needs Nautilus and a data-control compositor, by hand.
+- [x] Copying in Nautilus enables Paste in Marcel without any other input.
+      (Driven 2026-09-27 on Hyprland, both directions.)
 - [x] `src/volumes.rs` has tests; the bus harness is in `testing.rs` and used
       by both bus tests.
 - [x] The gate is green at 484 tests, both bus tests run unsandboxed.

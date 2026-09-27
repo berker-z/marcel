@@ -203,9 +203,10 @@ trashing and restoring.
       Undo is gone, restores from there, and Empty on that Trash empties only
       it. The listing is covered by the `MARCEL_TEST_OTHER_FS` test; the rest
       needs a stick.
-- [ ] A read-only `.Trash-<uid>` lists and cannot be emptied, and the home
-      Trash still empties. The flag and the enablement are in place; no
-      read-only Trash was at hand.
+- [x] A read-only `.Trash-<uid>` lists and cannot be emptied, and the home
+      Trash still empties. (Driven 2026-09-27 on the Windows partition,
+      mounted read-only by Fast Startup: it lists, Empty Trash is greyed.
+      The home Trash was not emptied, only read.)
 - [x] The Trash view opens with a stalled NFS mount present. No fixture: the
       lister no longer reads the mount table or any Trash but the one shown,
       so there is nothing for a stalled mount to hold up.
@@ -214,6 +215,7 @@ trashing and restoring.
 - [x] No `desktop::gvfs` type is named under `src/app/`.
 - [x] The picker never shows either Trash, and refuses it in one place
       (`can_visit`).
-- [ ] `state.conf` and `ShowFolders` behave as before. The code paths are
-      unchanged and the bus integration test passes; not re-run by hand.
+- [x] `state.conf` and `ShowFolders` behave as before. (Driven 2026-09-27:
+      a quit and start left the file byte-for-byte and restored the view;
+      `ShowFolders` over the session bus moved the open window.)
 - [x] The gate is green, with both bus tests run unsandboxed.

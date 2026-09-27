@@ -29,32 +29,32 @@ Everything here needs a person at the machine. The plan was to tag after
 Sprint 32; the hand checks had not been run when Sprints 33 and 34 were
 finished the same day, so the tag goes on master as Sprint 34 left it.
 
-- The hand checks for what landed after the first pass, listed in
-  [`release.md`](release.md#v010-release-gate): a stick moved onto and
-  ejected, an SFTP share with the default settings, the clipboard both ways
-  with Nautilus, a HEIC and a 10-bit AVIF. Also pulling a stick while
-  browsing it (Sprint 29's open check).
-- Sprint 33 and 34's: a file trashed on a stick found in the drive's Trash
-  after Undo is gone, restored, and that Trash emptied alone; a read-only
-  drive's Trash that lists but does not empty; ejecting a stick two windows
-  are browsing; cancelling a connect to a host that never answers; Nautilus
-  copying files while Marcel's Paste enables on its own; Back from the Trash
-  in the running app.
-- Sprint 31's two checks: browsing a real share with the defaults (icons in
-  the grid, the preview reading only where the selection stops, Calculate in
-  Properties), and disconnecting a share in a Marcel that was running across
-  `systemctl --user restart gvfs-daemon`.
-- Hand-run what is left of the open checks in
-  [Sprint 26](sprints/026-tag-readiness.md#acceptance-checks): marquee
-  selection with the list header, and copying `~/.ssh`. The rest (redo of a
-  permission change, a root-owned file, a symlink in Properties, Sort by Kind
-  and Reverse Order, the `.marcel-` rename refusal, Copy Path on two items)
-  passed on 2026-09-19, driven through hyprhands.
-- One clean restart cycle of the release build to confirm `state.conf` keeps
-  the theme too (view, sort, and hidden files survived a restart of the dev
-  build on 2026-09-19). Sprint 26 saw one unexplained reset during a hand run
-  that did not reproduce; Sprint 28 made an unreadable file a reported,
-  read-only condition, which is the likeliest cause.
+Driven on 2026-09-27 and passed: the clipboard both ways with Nautilus, an
+SFTP share connected, browsed, and disconnected across a `gvfs-daemon`
+restart, a blackholed connect cancelled and retried, a read-only drive
+Trash, Back and Forward through the Trash, `ShowFolders`, a `state.conf`
+restart cycle, and every open Sprint 26 check except the marquee. The
+sprint docs carry the details.
+
+That run found two bugs, both fixed the same day and checked in the app:
+Enter in the rename field also reached the listing's `enter` binding and
+opened the file (gpui-component's single-line input propagates Enter), and on
+a share a thumbnail-cache miss was recorded as a failure, so every image
+carried the red "!" badge.
+
+Still open, and needing hardware or hands:
+
+- A USB stick: moved onto and ejected, pulled while being browsed, a file
+  trashed on it found in its Trash after Undo is gone, restored, and that
+  Trash emptied alone, and ejecting it while two windows browse it.
+- The Windows partition with the fstab line (Sprint 29). It is mounted
+  read-only now, which is Fast Startup.
+- A HEIC from a phone and a 10-bit AVIF, previewed and thumbnailed.
+- Marquee selection with the list header (the harness cannot drag).
+- The preview pane reading only where the selection stops, on a share.
+- The run above used the dev build. `release.md` asks for the release
+  build, so it needs one short pass: launch, a restart for `state.conf`,
+  and a share.
 - `nix build .#marcel-rs` and `nix flake check` on the release commit, and a
   `ci.yml` dispatch on it so both architectures have built the tree before
   the immutable tag exists.
