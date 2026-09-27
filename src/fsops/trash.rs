@@ -395,14 +395,17 @@ fn is_on_read_only_filesystem(path: &Path) -> bool {
     path.parent().is_some_and(is_read_only_filesystem)
 }
 
-/// Why these paths cannot go to any Trash, if they cannot, found before an
-/// operation starts so the window can offer a permanent delete instead.
-/// `None` when there is a Trash for every one of them, or when that cannot be
-/// told yet, in which case the operation itself reports.
-pub fn trash_unavailable_for(paths: &[PathBuf]) -> Option<NoTrash> {
+/// Each path, and why it cannot go to any Trash if it cannot, found before an
+/// operation starts so the window can trash what can be trashed and ask
+/// about the rest. When the sites cannot be worked out every path is taken as
+/// trashable, and the operation itself reports.
+pub fn trash_availability(paths: &[PathBuf]) -> Vec<(PathBuf, Option<NoTrash>)> {
     ensure_home_trash();
-    let sites = home_trash_dir().and_then(|home_trash| TrashSites::discover(&home_trash).ok())?;
-    paths.iter().find_map(|path| sites.no_trash_reason(path))
+    let sites = home_trash_dir().and_then(|home_trash| TrashSites::discover(&home_trash).ok());
+    paths
+        .iter()
+        .map(|path| (path.clone(), sites.as_ref().and_then(|sites| sites.no_trash_reason(path))))
+        .collect()
 }
 
 pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {

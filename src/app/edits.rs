@@ -89,9 +89,11 @@ impl Marcel {
         );
     }
 
-    /// Move the selection to the Trash, or, where there is no Trash to move
-    /// it to (a network share, a read-only stick), offer to delete it for
-    /// good instead, which is what Nautilus asks in the same spot.
+    /// Move the selection to the Trash. What has no Trash to go to (a file on
+    /// a network share) is not held back with the rest: the rest goes to the
+    /// Trash, and a permanent delete is offered for those items by name,
+    /// which is what Nautilus asks in the same spot. What is on a read-only
+    /// drive can go nowhere, and the window says so.
     ///
     /// The check reads the mount table and touches the filesystem, and on a
     /// stalled share that can hang, so it runs off the foreground like the
@@ -102,28 +104,36 @@ impl Marcel {
             return;
         }
         self.ui.entry_menu = None;
-        let checked = paths.clone();
-        let check = unblock(cx, move || crate::fsops::trash::trash_unavailable_for(&checked));
+        let check = unblock(cx, move || crate::fsops::trash::trash_availability(&paths));
         cx.spawn_in(window, async move |this, window| {
-            let unavailable = check.await;
-            let _ = this.update_in(window, |this, window, cx| match unavailable {
-                None => this.with_operations(window, cx, |ops, origin, cx| {
-                    ops.start_trash(paths, origin, cx);
-                }),
-                // A read-only mount can give nothing up, so there is no
-                // alternative to offer, only the reason.
-                Some(no_trash) if no_trash.read_only => {
-                    let subject = match paths.as_slice() {
-                        [only] => format!("“{}”", display_path_name(only)),
-                        _ => format!("these {} items", paths.len()),
-                    };
-                    this.report(
-                        Report::Error(format!("Cannot remove {subject}: {}", no_trash.reason)),
-                        cx,
-                    );
+            let availability = check.await;
+            let _ = this.update_in(window, |this, window, cx| {
+                let mut trashable = Vec::new();
+                let mut read_only = Vec::new();
+                let mut no_trash: Option<(Vec<PathBuf>, String)> = None;
+                for (path, reason) in availability {
+                    match reason {
+                        None => trashable.push(path),
+                        Some(reason) if reason.read_only => read_only.push(path),
+                        Some(reason) => {
+                            no_trash.get_or_insert_with(|| (Vec::new(), reason.reason)).0.push(path)
+                        }
+                    }
                 }
-                Some(no_trash) => {
-                    this.offer_permanent_delete_instead(paths, no_trash.reason, window, cx)
+                if !read_only.is_empty() {
+                    let message = format!(
+                        "Cannot remove {}: the filesystem is read-only",
+                        name_list(&read_only)
+                    );
+                    this.report(Report::Error(message), cx);
+                }
+                if !trashable.is_empty() {
+                    this.with_operations(window, cx, |ops, origin, cx| {
+                        ops.start_trash(trashable, origin, cx);
+                    });
+                }
+                if let Some((paths, reason)) = no_trash {
+                    this.offer_permanent_delete_instead(paths, reason, window, cx);
                 }
             });
         })
@@ -137,17 +147,15 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let subject = match paths.as_slice() {
-            [only] => format!("“{}” cannot", display_path_name(only)),
-            _ => format!("These {} items cannot", paths.len()),
-        };
+        let subject = name_list(&paths);
+        let verb = if paths.len() == 1 { "it" } else { "them" };
         self.confirm(
             window,
             cx,
             Confirm {
                 title: "No Trash Here",
                 description: format!(
-                    "{subject} be moved to the Trash: {reason}. Delete permanently instead?"
+                    "{subject} cannot be moved to the Trash: {reason}. Delete {verb} permanently instead?"
                 ),
                 note: Some("This action cannot be undone.".to_string()),
                 action: "Delete Permanently",
@@ -836,6 +844,20 @@ fn move_to_shortcuts(
         .collect()
 }
 
+/// Items named in a sentence: “a”, “a” and “b”, “a”, “b”, and “c”, and past
+/// three the first two and how many more.
+fn name_list(paths: &[PathBuf]) -> String {
+    let names =
+        paths.iter().map(|path| format!("“{}”", display_path_name(path))).collect::<Vec<_>>();
+    match names.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second}, and {third}"),
+        [first, second, rest @ ..] => format!("{first}, {second}, and {} more", rest.len()),
+    }
+}
+
 /// The subfolders of a destination, by display name.
 type Folders = Vec<(String, PathBuf)>;
 
@@ -1000,6 +1022,17 @@ mod tests {
 
     fn labels(shortcuts: &[(String, PathBuf)]) -> Vec<&str> {
         shortcuts.iter().map(|(label, _)| label.as_str()).collect()
+    }
+
+    #[test]
+    fn names_are_listed_as_a_sentence() {
+        let paths = |names: &[&str]| {
+            names.iter().map(|name| PathBuf::from("/x").join(name)).collect::<Vec<_>>()
+        };
+        assert_eq!(name_list(&paths(&["a"])), "“a”");
+        assert_eq!(name_list(&paths(&["a", "b"])), "“a” and “b”");
+        assert_eq!(name_list(&paths(&["a", "b", "c"])), "“a”, “b”, and “c”");
+        assert_eq!(name_list(&paths(&["a", "b", "c", "d", "e"])), "“a”, “b”, and 3 more");
     }
 
     /// The Trash is somewhere things go, not somewhere they can be moved to.
