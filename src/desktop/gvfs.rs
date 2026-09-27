@@ -742,7 +742,8 @@ impl GvfsClient {
             Err(UnmountFailure::Mount(error)) => return Err(error),
             Ok(()) => return Ok(()),
         }
-        let mounts = self.mounts().await.map_err(|error| MountError::Failed(format!("{error:#}")))?;
+        let mounts =
+            self.mounts().await.map_err(|error| MountError::Failed(format!("{error:#}")))?;
         let Some(live) = mounts.into_iter().find(|live| mount.spec.is_served_by(&live.spec)) else {
             return Ok(());
         };

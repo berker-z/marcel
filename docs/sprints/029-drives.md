@@ -153,7 +153,10 @@ its target's content when the target is a regular file.
 - [x] The stick appears under Devices, mounts on click without a prompt,
       browses, and its eject button navigates Home, unmounts, and powers it
       off (UDisks2 then drops the device until it is replugged, as with
-      Nautilus). Pulling it while browsing is not yet checked by hand.
+      Nautilus).
+- [ ] Pulling the stick while browsing it shows the vanished-folder error,
+      not a hang. (Split out of the check above on 2026-09-27, which had been
+      ticked with this part still open.)
 - [ ] With the fstab line above, "Windows" is listed unmounted, mounts on
       click without a password, and its files can be copied out, copied in,
       moved in, renamed, and trashed. (The partition is listed as "268 GB
@@ -166,7 +169,10 @@ its target's content when the target is a regular file.
 - [x] A symbolic link to a file, moved to the stick, arrives as the file.
 - [x] Trashing a file on another filesystem puts it in `.Trash-1000` at its
       root, and it shows in the Trash place and restores from there
-      (`MARCEL_TEST_OTHER_FS`, run against `/dev/shm`).
+      (`MARCEL_TEST_OTHER_FS`, run against `/dev/shm`). **No longer true
+      since Sprint 32:** the Trash place shows the home Trash only, because
+      the union let one read-only drive's Trash break Empty Trash for
+      everything. [Sprint 33](033-location.md) gives each drive its own.
 - [x] Without UDisks2 on the system bus there is no Devices section and
       everything else is unchanged (the store logs why and stays empty).
 - [x] The gate is green, `private_session_bus_integration` passes

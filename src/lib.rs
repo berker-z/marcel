@@ -9,10 +9,13 @@
 //!   is how each mutation is carried out safely.
 //! - [`preview`] decodes what the preview pane shows.
 //! - [`desktop`] is everything outside the process: the bus, the portal,
-//!   launches, other applications, icon themes.
-//! - [`window`], [`surface`], [`theme`], [`fonts`], [`config`], [`names`]
-//!   [`bookmarks`], [`volumes`], and [`network`] are the small
-//!   application-wide services the rest lean on.
+//!   launches, other applications, icon themes, the shared clipboard, and
+//!   the UDisks2 and GVfs clients.
+//! - [`volumes`] and [`network`] are the stores that keep drives and shares
+//!   in every window's sidebar, fed by those two clients.
+//! - [`window`], [`surface`], [`theme`], [`fonts`], [`config`], [`names`],
+//!   and [`bookmarks`] are the small application-wide services the rest lean
+//!   on.
 //!
 //! Only what `main.rs` starts up or drives from the bus is `pub`; the rest is
 //! crate-private so that an item nothing uses any more is a warning, not a

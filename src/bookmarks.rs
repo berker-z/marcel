@@ -335,7 +335,9 @@ impl BookmarkStore {
                     this.start_save(origin, cx);
                 }
                 match result {
-                    Err(error) => Some(Report::Error(format!("Could not save bookmarks: {error:#}"))),
+                    Err(error) => {
+                        Some(Report::Error(format!("Could not save bookmarks: {error:#}")))
+                    }
                     Ok(()) => None,
                 }
             });

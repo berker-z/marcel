@@ -169,7 +169,9 @@ impl VolumeStore {
                     }
                     cx.update(|cx| then(mounted.mount_point, cx));
                 }
-                Err(error) => surface::deliver(origin, Some(Report::Error(format!("{error:#}"))), cx),
+                Err(error) => {
+                    surface::deliver(origin, Some(Report::Error(format!("{error:#}"))), cx)
+                }
             }
         })
         .detach();

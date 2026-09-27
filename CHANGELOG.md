@@ -93,11 +93,23 @@ show: sticks, cards, the Windows partition of a dual-boot machine. Clicking an
 unmounted drive mounts it and goes there; a removable one gets an eject button
 that unmounts it and powers it off. A move to another filesystem is a copy,
 a check of the copy, and a removal of the original, journalled as one
-operation, so it undoes as one. Metadata a FAT or NTFS destination cannot
-hold is dropped and reported once, and a symbolic link to a file arrives as
-the file. Trashing something on a drive uses that drive's own Trash, which
-the Trash place does not show; where no Trash can exist (a network share, a
-read-only stick) Marcel offers to delete permanently instead.
+operation, so it undoes as one. If the original changed while it was being
+copied, it stays and the copy is taken back. Metadata a FAT or NTFS
+destination cannot hold is dropped and reported once: a symbolic link to a
+file arrives as the file, hard links as separate copies, and Undo puts the
+original permissions back. A tree with links to folders is copied without
+them but not moved, since the original is the only place they exist, and
+nothing is moved off a read-only drive. Trashing something on a drive uses
+that drive's own Trash, which the Trash place does not show yet. Where no
+Trash can exist (a network share) Marcel offers to delete permanently
+instead, and on a read-only drive it says the drive is read-only.
+
+A share costs what it takes to read it, so by default Marcel treats one the
+way Nautilus does: no thumbnails there, folder sizes in Properties behind a
+Calculate button, and the preview pane waiting until the selection settles
+before it reads a file. `thumbnails`, `folder_sizes` (both `always`,
+`local-only`, or `never`), and `thumbnail_limit_mb` in `state.conf` change
+that; an automounted NFS or SMB share counts as a share.
 
 A Network section connects shares through GVfs: Add… under it and the
 location bar take `sftp://`, `smb://`, `ftp://`, and `dav://` addresses, or

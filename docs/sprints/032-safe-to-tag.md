@@ -1,8 +1,11 @@
 # Sprint 32: Safe to tag
 
-**Status:** Planned. First of three cleanup sprints (32, 33, 34) that come out
-of [`../review-2026-09-27.md`](../review-2026-09-27.md). No new features in
-any of them.
+**Status:** Code done 2026-09-27; the tag waits for the hand checks in
+[`release.md`](../release.md#v010-release-gate), which need a person, a stick,
+and a share. First of three cleanup sprints (32, 33, 34) that come out of
+[`../review-2026-09-27.md`](../review-2026-09-27.md). No new features in any
+of them. The gate is green at 467 tests (449 before it), both bus tests run
+unsandboxed.
 
 ## Goal
 
@@ -124,6 +127,36 @@ The v0.1.0 gate in [`release.md`](../release.md#v010-release-gate) gains:
 - A new screenshot, then `nix build`, `nix flake check`, a `ci.yml` dispatch,
   `scripts/check_version.sh v0.1.0`, and `git tag -s v0.1.0`.
 
+## Where it came out differently
+
+- **(1)** Verification did not move into the copier. The copier records what
+  it read (`ObservedSource`: identity with ctime, length, mode, kind, in walk
+  order), and `ensure_source_unchanged` walks the source again in the same
+  order and compares. `verify_copied_tree` stays for the destination side.
+  A source that changed does not keep both copies: the copy is of something
+  that no longer exists, so it is withdrawn and the report says why. Removal
+  is not keyed by the root's `ObjectKey`; the walk runs immediately before
+  it, which leaves the window a rename into quarantine takes, the same one
+  `mv` has.
+- **(3)** The modes come back through `MoveRecord::source_modes`, filled only
+  when the destination lost permissions, and applied deepest first after the
+  copy back.
+- **(5)** `MoveFailure { error, copy_kept }` is the typed error, and
+  `TransferOutcome::kept_copies` is how a kept copy reaches the view.
+- **(14)** libheif-rs 3.0 exposes no cancel callback, so a HEIF decode checks
+  the flag before and after, not during. The size check happens before
+  anything is decoded. The hook stays registered, because Properties reads a
+  HEIF file's dimensions through `image`; pixels no longer go through it. A
+  HEIF is recognised by its first bytes (`heif::is_heif`), not its name.
+- **(7)** MTP phones, cameras, and Google Drive stay listed in the Network
+  section, because they browse and disconnect fine. Only Add to Network is
+  withheld, and the store refuses to save them whatever asks.
+- **(13)** `trash_unavailable_for` returns a `NoTrash { reason, read_only }`,
+  and the window reports a read-only drive instead of offering a permanent
+  delete.
+- `{error:#}` went to eleven sites, not six: every `Report::Error` built from
+  an anyhow error.
+
 ## Not in scope
 
 - `Location`, the mount table, and a Trash per drive: Sprint 33.
@@ -133,30 +166,36 @@ The v0.1.0 gate in [`release.md`](../release.md#v010-release-gate) gains:
 
 ## Acceptance checks
 
-- [ ] A regular file rewritten in place, same size, between the copy and the
-      removal of a cross-device move: both copies kept, the report says the
-      source changed. Same for the root replaced by an atomic save.
-- [ ] A tree with a link to a folder moved to FAT keeps its source and says
+- [x] A regular file rewritten in place, same size, during a cross-device
+      move: the source is kept with its new bytes, the copy withdrawn, and
+      the report says the source changed. Same for a file replaced by an
+      atomic save after the copier read it.
+- [x] A tree with a link to a folder moved to FAT keeps its source and says
       why; copied, it drops the link with a note.
-- [ ] A tree with hardlinks copies to FAT, with one loss reported.
-- [ ] Source removal failing after the copy: the destination is reported and
+- [x] A tree with hardlinks copies to FAT, with one loss reported.
+- [x] Source removal failing after the copy: the destination is reported and
       shown, and no removal is journalled.
-- [ ] Undo whose copy-back succeeds and whose stick copy cannot be removed
+- [x] Undo whose copy-back succeeds and whose stick copy cannot be removed
       reports the restored source, and the view shows it.
-- [ ] Replace, then a failure after publication: the displaced item is back
+- [x] Undo of a move to FAT restores the modes the tree left with, and redo
+      still validates afterwards.
+- [x] Replace, then a failure after publication: the displaced item is back
       where it was and nothing is in recovery storage.
-- [ ] Cancel during the copy phase reports as cancelled.
-- [ ] A two-item cross-device move whose second item fails leaves the first
+- [x] Cancel during the copy phase reports as cancelled.
+- [x] A two-item cross-device move whose second item fails leaves the first
       moved and journalled and the second untouched.
-- [ ] A move from a read-only filesystem is refused before anything is copied.
-- [ ] The 10-bit AVIF fixture previews with a pixel within a few levels of its
-      source colour (the test asserts it), and so does its thumbnail.
-- [ ] A stacked `autofs` + `nfs4` mountinfo reads as remote.
-- [ ] An MTP mount in the GVfs list offers no Add to Network, and a servers
-      file with only understood lines stays writable.
-- [ ] Permanent deletion on a read-only mount says "read-only filesystem";
-      trashing there says the same and offers no permanent delete.
-- [ ] TODO, the 0xx doc, Sprint 29, CHANGELOG, README, AGENTS.md, and
+- [x] A move from a read-only filesystem is refused before anything is
+      copied (tested against `/nix/store`, which is a read-only mount here).
+- [x] The 10-bit AVIF fixture previews and thumbnails red where it is red
+      (both tests assert the pixel), and a HEIC named `.jpg` thumbnails.
+- [x] A stacked `autofs` + `nfs4` mountinfo reads as remote.
+- [x] An MTP location is not saveable, and the menu offers Add to Network
+      only for saveable ones. (Seen in a unit test; no phone was plugged in.)
+- [x] Permanent deletion on a read-only mount says "read-only filesystem";
+      trashing there says the same and offers no permanent delete. (The
+      message and the classification are tested; the dialog is not.)
+- [x] TODO, the 0xx doc, Sprint 29, CHANGELOG, README, AGENTS.md, and
       CLAUDE.md match the tree.
-- [ ] The gate is green, with both bus tests run unsandboxed.
-- [ ] The release gate above passes and `v0.1.0` is tagged.
+- [x] The gate is green, with both bus tests run unsandboxed.
+- [ ] The release gate passes and `v0.1.0` is tagged. Waiting on the hand
+      checks; see TODO.

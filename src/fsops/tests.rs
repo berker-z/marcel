@@ -2238,6 +2238,31 @@ fn a_source_rewritten_during_a_move_is_kept_and_the_copy_withdrawn() {
     assert!(outcome.kept_copies.is_empty());
 }
 
+/// An editor's save renames a new file over the old one. Done after the
+/// copier has read the old one, the copy is of a file that no longer exists.
+#[test]
+fn a_source_replaced_by_an_atomic_save_during_a_move_is_kept() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let later = sandbox.file("home/project/zzz.txt", b"last in walk order");
+    let notes = source.join("notes.txt");
+    let saved = sandbox.file("home/saved.tmp", b"saved");
+    let (replaced, target) = (saved.clone(), notes.clone());
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |path| {
+        if path == later && replaced.exists() {
+            fs::rename(&replaced, &target).unwrap();
+        }
+    });
+    fault::cross_devices_once("project");
+
+    let outcome = mv(std::slice::from_ref(&source), &sandbox.dir("stick"));
+    assert!(outcome.completed.is_empty(), "{outcome:?}");
+    let message = &outcome.failures[0].message;
+    assert!(message.contains("changed while it was copied"), "{message}");
+    assert_eq!(read(&notes), b"saved", "the saved version is still at the source");
+    assert!(!saved.exists());
+}
+
 /// On FAT a link to a folder has nowhere to go. A copy drops it with a note;
 /// a move would delete the only place it exists, so it does not happen.
 #[test]

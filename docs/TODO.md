@@ -23,6 +23,18 @@ Search waits until after Sprint 34.
 
 ## Before `v0.1.0`
 
+Everything here needs a person at the machine; the code side closed with
+[Sprint 32](sprints/032-safe-to-tag.md).
+
+- The hand checks for what landed after the first pass, listed in
+  [`release.md`](release.md#v010-release-gate): a stick moved onto and
+  ejected, an SFTP share with the default settings, the clipboard both ways
+  with Nautilus, a HEIC and a 10-bit AVIF. Also pulling a stick while
+  browsing it (Sprint 29's open check).
+- Sprint 31's two checks: browsing a real share with the defaults (icons in
+  the grid, the preview reading only where the selection stops, Calculate in
+  Properties), and disconnecting a share in a Marcel that was running across
+  `systemctl --user restart gvfs-daemon`.
 - Hand-run what is left of the open checks in
   [Sprint 26](sprints/026-tag-readiness.md#acceptance-checks): marquee
   selection with the list header, and copying `~/.ssh`. The rest (redo of a
@@ -38,7 +50,8 @@ Search waits until after Sprint 34.
   `ci.yml` dispatch on it so both architectures have built the tree before
   the immutable tag exists.
 - A fresh screenshot for the README and the AppStream file. The current one
-  is from 2026-08-18, before sorting, the Trash view, audio, and video.
+  is from 2026-08-18, before sorting, the Trash view, audio, video, drives,
+  and network shares.
 - `scripts/check_version.sh v0.1.0`, then `git tag -s v0.1.0`, push, and a
   GitHub release with the changelog entry. The rest of the gate is in
   [`release.md`](release.md#v010-release-gate).

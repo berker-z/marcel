@@ -84,11 +84,15 @@ Shortcuts are registered in two places, so check both before editing the list:
 
 `src/lib.rs` carries the map. In short: `app/` is the window (one `Marcel`
 view split by concern: navigation, edits, pointer, preview, menus, sidebar,
-chrome), `browse/` is the read side (entries, the directory session, the
-watcher, selection, history), `fsops/` is everything that changes the disk
-(`local` primitives, `identity`, `journal`, then the mutations), `preview/`
-decodes, `desktop/` speaks to the session (bus, portal, launch, icons, places),
-and `operations` is the application-wide owner of running work and history.
+network, chrome), `browse/` is the read side (entries, the directory session,
+the watcher, selection, history, and `remoteness`, whether a folder is a
+network away), `fsops/` is everything that changes the disk (`local`
+primitives, `identity`, `journal`, then the mutations), `preview/` decodes,
+`desktop/` speaks to the session without knowing about GPUI (bus, portal,
+launch, icons, places, the shared clipboard, and the `volumes` and `gvfs`
+clients for UDisks2 and GVfs), `volumes.rs` and `network/` are the
+application-wide stores that put drives and shares in every sidebar, and
+`operations` is the application-wide owner of running work and history.
 Tests share `src/testing.rs` (`Sandbox` and friends) rather than building
 trees by hand.
 

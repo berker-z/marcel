@@ -12,10 +12,14 @@
 //! - `edits`: the window's side of every mutation — clipboard, rename, new
 //!   folder and file, duplicate, trash, delete, compress, extract, drag moves.
 //! - `pointer`: marquee selection, drag and drop, and edge autoscroll.
-//! - `preview`: what the preview pane loads and how it draws it.
+//! - `preview`: what the preview pane loads and how it draws it, with
+//!   `media_pane` for audio and video.
+//! - `image_cache`: the byte budget behind every image the window draws.
 //! - `properties`: the Properties dialog and the view that fills it in.
 //! - `picker`: the handful of things a file-chooser window does differently.
-//! - `sidebar`, `browser`, `location`, `menu`, `dialogs`: the surfaces.
+//! - `sidebar`, `network`, `browser`, `location`, `menu`, `dialogs`: the
+//!   surfaces; `network` is the sidebar's Network section and its dialogs.
+//! - `state`: what the window holds besides the directory it browses.
 //!
 //! A file-chooser window is not a separate UI. It is this same view with
 //! `picker: Some(_)`, rendered by the same `render()`, browsing the same

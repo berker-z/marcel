@@ -610,7 +610,10 @@ published source tag.
 The graphical half of this gate is evidence rather than a checkbox. The
 first full pass was recorded on 2026-08-21 (the record has since been removed
 from the tree with the other review documents; it is in the git history);
-Sprint 26 carries the checks that are still open.
+Sprint 26 carries the checks that are still open. The tag waited long enough
+that drives, network shares, the shared clipboard, and HEIF landed first, so
+0.1.0 is master as [Sprint 32](sprints/032-safe-to-tag.md) leaves it and the
+hand checks below cover those too.
 
 Before creating the first tag:
 
@@ -630,6 +633,18 @@ Before creating the first tag:
       release date against the commit. CI passes the tag name on tag builds
       and runs the file-only comparison on pull requests.
 - [ ] Run all Rust quality checks.
+- [ ] Hand-check what landed after the first pass (Sprints 27 to 32), in the
+      running release build:
+  - a USB stick: mounted from the sidebar, browsed, a folder moved onto it
+    and the move undone, then ejected;
+  - an SFTP share: connected from Add…, browsed with the default
+    `local-only` settings (icons, not thumbnails), and disconnected;
+  - a file copied in Nautilus and pasted in Marcel, and the other way round;
+  - a HEIC from a phone and a 10-bit AVIF previewed and thumbnailed in
+    their own colours;
+  - the Sprint 26 checks still open (marquee with the list header, copying
+    `~/.ssh`), and one restart cycle for `state.conf`.
+- [ ] Take a fresh screenshot for the README and the AppStream file.
 - [ ] Run the release-only Nix build and flake check.
 - [ ] Install and launch from a clean committed revision.
 - [ ] Exercise a minimal-environment smoke test covering directory browsing,

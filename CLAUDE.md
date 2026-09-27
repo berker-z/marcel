@@ -41,12 +41,14 @@ per-session scratchpad path, for instance) makes six of them fail at once with
 errors that look like permission or sandbox problems and are neither. Point
 `TMPDIR` at something short (`/tmp/claude-1000`) before running the suite.
 
-## The one test that needs an unsandboxed run
+## The tests that need an unsandboxed run
 
-`desktop::bus::tests::private_session_bus_integration` spawns
-`dbus-run-session` and fails under a restrictive sandbox. Before reporting the
-suite as green, run it once outside the sandbox; do not write that failure off
-as pre-existing.
+`desktop::bus::tests::private_session_bus_integration` and
+`desktop::gvfs::tests::private_session_bus_daemon_wait` spawn
+`dbus-run-session` and fail under a restrictive sandbox. Before reporting the
+suite as green, run them once outside the sandbox
+(`cargo test --all-targets private_session_bus`); do not write that failure
+off as pre-existing.
 
 ## One target directory per worktree
 
