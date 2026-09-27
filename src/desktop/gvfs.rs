@@ -238,7 +238,7 @@ impl ShareAddress {
                 spec.prefix = if path.is_empty() { "/".to_string() } else { path.clone() };
                 (spec, path)
             }
-            "smb" => smb_location(host.as_deref(), &user, url.path()),
+            "smb" => smb_location(host.as_deref(), &user, url.port(), url.path()),
             _ => {
                 return Err(format!(
                     "Marcel can connect to sftp://, smb://, ftp://, and dav:// addresses, not {scheme}://"
@@ -258,7 +258,10 @@ impl ShareAddress {
         let spec = &self.spec;
         let authority = |host_key: &str| {
             let host = spec.items.get(host_key).map(String::as_str).unwrap_or_default();
-            let user = spec.items.get("user").map(|user| format!("{}@", encode(user)));
+            let user = spec.items.get("user").map(|user| match spec.items.get("domain") {
+                Some(domain) => format!("{};{}@", encode(domain), encode(user)),
+                None => format!("{}@", encode(user)),
+            });
             let port = spec.items.get("port").map(|port| format!(":{port}"));
             format!("{}{host}{}", user.unwrap_or_default(), port.unwrap_or_default())
         };
@@ -358,21 +361,35 @@ impl ShareId {
 
 /// `smb://` is the network, `smb://server/` a server's shares, and
 /// `smb://server/share/...` a share, each a different backend.
-fn smb_location(host: Option<&str>, user: &str, raw_path: &str) -> (MountSpec, String) {
+///
+/// As in GVfs's `smburi.c`: a login of `DOMAIN;user` is a domain and a user,
+/// and a port other than 445 is kept, so a NAS on `:4455` connects there.
+fn smb_location(
+    host: Option<&str>,
+    login: &str,
+    port: Option<u16>,
+    raw_path: &str,
+) -> (MountSpec, String) {
     let Some(server) = host else {
         return (MountSpec::new("smb-network"), String::new());
     };
-    let mut segments = raw_path.split('/').filter(|segment| !segment.is_empty());
-    let Some(share) = segments.next() else {
-        let mut spec = MountSpec::new("smb-server");
+    let (domain, user) = login.split_once(';').unwrap_or(("", login));
+    let connect = |kind: &str| {
+        let mut spec = MountSpec::new(kind);
         spec.set("server", server);
         spec.set("user", user);
-        return (spec, String::new());
+        spec.set("domain", domain);
+        if let Some(port) = port.filter(|port| *port != 445) {
+            spec.set("port", port.to_string());
+        }
+        spec
     };
-    let mut spec = MountSpec::new("smb-share");
-    spec.set("server", server);
+    let mut segments = raw_path.split('/').filter(|segment| !segment.is_empty());
+    let Some(share) = segments.next() else {
+        return (connect("smb-server"), String::new());
+    };
+    let mut spec = connect("smb-share");
     spec.set("share", decode(share));
-    spec.set("user", user);
     let rest: Vec<String> = segments.map(decode).collect();
     let path = if rest.is_empty() { String::new() } else { format!("/{}", rest.join("/")) };
     (spec, path)
@@ -554,7 +571,7 @@ pub struct PasswordRequest {
     pub reply: Sender<Option<PasswordReply>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct PasswordReply {
     pub username: String,
     pub domain: String,
@@ -563,6 +580,20 @@ pub struct PasswordReply {
     /// Keep the password in the keyring, which GVfs does on the user's
     /// behalf when asked (`G_PASSWORD_SAVE_PERMANENTLY`).
     pub remember: bool,
+}
+
+/// Everything but the password, so a stray `{:?}` in a log or a panic message
+/// cannot leak it.
+impl std::fmt::Debug for PasswordReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordReply")
+            .field("username", &self.username)
+            .field("domain", &self.domain)
+            .field("password", &"<redacted>")
+            .field("anonymous", &self.anonymous)
+            .field("remember", &self.remember)
+            .finish()
+    }
 }
 
 pub struct QuestionRequest {
@@ -1153,6 +1184,74 @@ mod tests {
         assert_eq!(location.to_uri(), "sftp://me@wired/home/me/Work%20Notes");
         assert_eq!(ShareAddress::parse(&location.to_uri()).unwrap(), location);
         assert_eq!(ShareAddress::parse("ssh://wired").unwrap().spec.kind, "sftp");
+    }
+
+    /// `smburi.c` reads a login of `DOMAIN;user` as both, and keeps a port
+    /// other than 445. Dropping either sent a NAS on its own port, or a
+    /// domain account, to the wrong place.
+    #[test]
+    fn smb_keeps_its_port_and_domain_through_the_servers_file() {
+        let share = ShareAddress::parse("smb://WORK;me@nas:4455/media/films").unwrap();
+        assert_eq!(share.spec.kind, "smb-share");
+        assert_eq!(
+            share.spec.items,
+            items(&[
+                ("domain", "WORK"),
+                ("port", "4455"),
+                ("server", "nas"),
+                ("share", "media"),
+                ("user", "me")
+            ])
+        );
+        assert_eq!(share.path, "/films");
+        assert_eq!(share.to_uri(), "smb://WORK;me@nas:4455/media/films");
+        assert!(share.can_be_saved());
+
+        let default_port = ShareAddress::parse("smb://nas:445/media").unwrap();
+        assert!(!default_port.spec.items.contains_key("port"), "445 is the default");
+        let server = ShareAddress::parse("smb://WORK;me@nas:4455/").unwrap();
+        assert_eq!(server.spec.kind, "smb-server");
+        assert_eq!(server.to_uri(), "smb://WORK;me@nas:4455/");
+    }
+
+    #[test]
+    fn an_ipv6_host_round_trips() {
+        let location = ShareAddress::parse("sftp://me@[fe80::1]:2222/srv").unwrap();
+        assert_eq!(location.spec.host(), Some("[fe80::1]"));
+        assert_eq!(ShareAddress::parse_uri(&location.to_uri()).unwrap(), location);
+    }
+
+    /// A DAV share is rooted where its URI pointed, and a location with no
+    /// path inside it opens at that root, not at the server's.
+    #[test]
+    fn a_dav_mount_opens_at_its_prefix() {
+        let mut spec =
+            ShareAddress::parse("davs://cloud.example/remote.php/dav/files/me").unwrap().spec;
+        spec.prefix = "/remote.php/dav".into();
+        let mount = Mount {
+            owner: String::new(),
+            object_path: OwnedObjectPath::try_from("/x").unwrap(),
+            name: "cloud".into(),
+            spec,
+            fuse_root: Some(PathBuf::from("/run/user/1000/gvfs/dav:host=cloud.example")),
+            default_location: "/remote.php/dav/files/me".into(),
+        };
+        assert_eq!(
+            mount.directory_for(""),
+            Some(PathBuf::from("/run/user/1000/gvfs/dav:host=cloud.example/files/me"))
+        );
+        assert_eq!(
+            mount.directory_for("/remote.php/dav/files/me/Photos"),
+            Some(PathBuf::from("/run/user/1000/gvfs/dav:host=cloud.example/files/me/Photos"))
+        );
+    }
+
+    #[test]
+    fn a_password_reply_does_not_print_its_password() {
+        let reply = PasswordReply { password: "hunter2".into(), ..PasswordReply::default() };
+        let printed = format!("{reply:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 
     #[test]
