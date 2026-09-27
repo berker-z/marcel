@@ -343,22 +343,18 @@ impl Marcel {
         });
     }
 
-    /// Leave a volume before it goes away: a window standing on the mount
-    /// point would otherwise be left in a directory that no longer exists.
-    fn leave_volume(&mut self, volume: &Volume, cx: &mut Context<Self>) {
-        if self.place.is_on_drive(&volume.device) {
-            self.navigate_to(self.home_dir.clone(), true, cx);
-        }
-    }
-
     fn unmount_volume(&mut self, volume: Volume, window: &Window, cx: &mut Context<Self>) {
-        self.leave_volume(&volume, cx);
+        if let Some(root) = &volume.mount_point {
+            self.release_preview_under(root);
+        }
         let origin = Self::origin(window);
         self.volumes.update(cx, |store, cx| store.unmount(volume, origin, cx));
     }
 
     fn eject_volume(&mut self, volume: Volume, window: &Window, cx: &mut Context<Self>) {
-        self.leave_volume(&volume, cx);
+        if let Some(root) = &volume.mount_point {
+            self.release_preview_under(root);
+        }
         let origin = Self::origin(window);
         self.volumes.update(cx, |store, cx| store.eject(volume, origin, cx));
     }

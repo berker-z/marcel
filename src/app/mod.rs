@@ -60,6 +60,7 @@ use crate::{
         location::Location,
     },
     config::{self, BrowserState},
+    mounts::MountGone,
     network::NetworkStore,
     operations::{OperationCoordinator, OperationEvent},
     surface::{self, Report},
@@ -98,7 +99,7 @@ pub struct Marcel {
     pub(crate) volumes: Entity<VolumeStore>,
     /// Saved servers and the shares GVfs has connected, likewise shared.
     pub(crate) network: Entity<NetworkStore>,
-    _shared: [Subscription; 5],
+    _shared: [Subscription; 7],
     pub(crate) drag: DragState,
     pub(crate) preview: PreviewState,
     pub(crate) ui: UiState,
@@ -185,6 +186,8 @@ impl Marcel {
             cx.subscribe_in(&operations, window, |this, _, event: &OperationEvent, window, cx| {
                 this.on_operation_event(event, window, cx);
             }),
+            cx.subscribe(&volumes, |this, _, gone: &MountGone, cx| this.leave_gone_mount(gone, cx)),
+            cx.subscribe(&network, |this, _, gone: &MountGone, cx| this.leave_gone_mount(gone, cx)),
         ];
 
         let mut this = Self {

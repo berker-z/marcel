@@ -14,7 +14,8 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, Global, Task, WeakEntity,
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task,
+    WeakEntity,
 };
 
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
         icons::IconProvider,
         volumes::{Volume, VolumeMonitor},
     },
+    mounts::MountGone,
     surface::{self, Report},
 };
 
@@ -51,6 +53,8 @@ pub enum VolumeChange {
     Unmounted,
     Ejected,
 }
+
+impl EventEmitter<MountGone> for VolumeStore {}
 
 pub struct VolumeStore {
     monitor: Option<Arc<VolumeMonitor>>,
@@ -208,7 +212,12 @@ impl VolumeStore {
         };
         cx.spawn(async move |this, cx| {
             let result = call(monitor, volume.clone()).await;
-            let _ = this.update(cx, |this, cx| this.finish(&volume, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.finish(&volume, cx);
+                if let (Ok(_), Some(root)) = (&result, &volume.mount_point) {
+                    cx.emit(MountGone { root: root.clone() });
+                }
+            });
             let report = match result {
                 Ok(VolumeChange::Unmounted) => {
                     Report::Success(format!("Unmounted “{}”", volume.name))

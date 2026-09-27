@@ -67,15 +67,10 @@ impl Marcel {
         });
     }
 
-    /// Leave a share before it goes away, as with a drive.
-    fn leave_mount(&mut self, mount: &Mount, cx: &mut Context<Self>) {
-        if self.place.is_on_share(&mount.id()) {
-            self.navigate_to(self.home_dir.clone(), true, cx);
-        }
-    }
-
     fn disconnect_mount(&mut self, mount: Mount, window: &Window, cx: &mut Context<Self>) {
-        self.leave_mount(&mount, cx);
+        if let Some(root) = &mount.fuse_root {
+            self.release_preview_under(root);
+        }
         let origin = Self::origin(window);
         self.network.update(cx, |store, cx| store.disconnect(mount, origin, cx));
     }

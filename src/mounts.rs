@@ -19,6 +19,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// A drive or share that Marcel unmounted, ejected, or disconnected, and
+/// where it was. The stores send it once the call has succeeded, and every
+/// window standing inside `root` goes home: moving only the window that
+/// asked left the others on a folder that no longer existed, and moving it
+/// before the call left it moved when the call was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountGone {
+    pub root: PathBuf,
+}
+
 /// One line of the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mount {

@@ -27,6 +27,7 @@ use crate::{
             TrashRecord, drive_trash_dirs, home_trash, list_trash_records, unreadable_trash_warning,
         },
     },
+    mounts::MountGone,
     operations::OperationEvent,
 };
 
@@ -439,6 +440,30 @@ impl Marcel {
             self.history.push(&location);
         }
         self.show_location(location, reveal, cx);
+    }
+
+    /// A drive or share this window may be standing on has gone. Home is
+    /// the one place certain to still be there. A drive's Trash is on the
+    /// drive, so it goes too.
+    pub(super) fn leave_gone_mount(&mut self, gone: &MountGone, cx: &mut Context<Self>) {
+        let inside = match &self.directory.location {
+            Location::Folder(folder) => folder.starts_with(&gone.root),
+            Location::Trash(TrashScope::Drive(topdir)) => topdir.starts_with(&gone.root),
+            Location::Trash(TrashScope::Home) => false,
+        };
+        if inside {
+            self.navigate_to(self.home_dir.clone(), true, cx);
+        }
+    }
+
+    /// Stop previewing a file on a drive or share that is about to go, so
+    /// the preview's open file (a track playing, a PDF being read) is not
+    /// what makes the unmount fail as busy. The window stays where it is
+    /// until the unmount has actually happened.
+    pub(super) fn release_preview_under(&mut self, root: &Path) {
+        if self.directory.selection.primary().is_some_and(|path| path.starts_with(root)) {
+            self.preview.clear();
+        }
     }
 
     /// Work out which drive or share the folder shown is on. A share wins

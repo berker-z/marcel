@@ -23,11 +23,12 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Task};
+use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
 use crate::{
     config,
     desktop::gvfs::{GvfsChange, GvfsClient, MountError, MountSpec},
+    mounts::MountGone,
     surface::{self, Report},
 };
 
@@ -132,6 +133,8 @@ pub fn global(home: &Path, cx: &mut App) -> Entity<NetworkStore> {
     cx.set_global(GlobalNetwork(store.clone()));
     store
 }
+
+impl EventEmitter<MountGone> for NetworkStore {}
 
 pub struct NetworkStore {
     path: PathBuf,
@@ -487,6 +490,9 @@ impl NetworkStore {
                 this.finish(&mount.spec, cx);
                 if let Some(mounts) = mounts {
                     this.mounts = mounts;
+                }
+                if let (Ok(()), Some(root)) = (&result, &mount.fuse_root) {
+                    cx.emit(MountGone { root: root.clone() });
                 }
             });
             let report = match result {
