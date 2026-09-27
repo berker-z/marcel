@@ -2,8 +2,24 @@
 
 What is left, in the order it is likely to happen. Sprint documents under
 [`sprints/`](sprints/) turn items from here into bounded work with acceptance
-checks; the latest is [Sprint 28](sprints/028-closing-the-review.md). Finished
-work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md), not here.
+checks; the latest finished one is [Sprint 31](sprints/031-what-a-share-costs.md).
+Finished work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md),
+not here.
+
+## Now: three cleanup sprints
+
+No new features until these are closed. They come out of
+[`review-2026-09-27.md`](review-2026-09-27.md).
+
+1. [Sprint 32: Safe to tag](sprints/032-safe-to-tag.md). Data-safety fixes in
+   the cross-device move, the HEIF and remoteness bugs, bookkeeping, then
+   the v0.1.0 tag on what master holds by then.
+2. [Sprint 33: Location](sprints/033-location.md). Part one of the 0.2 plan,
+   done late: one `Location`, one mount table, a Trash per root.
+3. [Sprint 34: Network and devices hardening](sprints/034-network-and-devices-hardening.md).
+   The GVfs, UDisks2, and clipboard long tail.
+
+Search waits until after Sprint 34.
 
 ## Before `v0.1.0`
 
@@ -69,6 +85,11 @@ Small, and none of them blocks the tag.
   `servers` file: done in Sprint 30 ([`sprints/030-network.md`](sprints/030-network.md)).
   Left from it: polling for FUSE mounts (shared with `ntfs-3g` above),
   browsing `smb://` and `network://`, and a password prompt seen live.
+- **A drive's own Trash.** Items trashed on a drive go to its `.Trash-<uid>`,
+  and the Trash place shows only the home Trash (a union view let a
+  read-only NTFS partition's Trash break Empty Trash for everything). Once
+  the session's Undo is gone they have no place in Marcel's UI; give each
+  drive its Trash, reachable while browsing that drive.
 - **Search.** Recursive find by name, riding `stream_directory`'s ticketed
   cancellation, shown as a location.
 - Create Link, the last greyed context-menu item.

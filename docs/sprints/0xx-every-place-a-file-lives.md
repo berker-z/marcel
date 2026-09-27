@@ -1,7 +1,14 @@
 # Sprint ##: Every place a file lives
 
-**Status:** Specified, not scheduled. This is the 0.2.0 line of work the
-pre-tag review pointed at. It is written as one document because the pieces
+**Status:** Partly done, out of order. Volumes and the cross-device move
+landed in [Sprint 29](029-drives.md) and network places in
+[Sprint 30](030-network.md), both skipping part one on the grounds that a
+mount is a folder. Part one is now [Sprint 33](033-location.md), extended
+with what those sprints added; search (part four) comes after
+[Sprint 34](034-network-and-devices-hardening.md). The text below is the plan
+as written before any of it started.
+
+This is the 0.2.0 line of work the pre-tag review pointed at. It is written as one document because the pieces
 depend on each other in a fixed order; when it is picked up, the parts split
 into sprints along the lines drawn at the end.
 
