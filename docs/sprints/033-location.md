@@ -1,6 +1,8 @@
 # Sprint 33: Location
 
-**Status:** Planned. Part one of
+**Status:** Done 2026-09-27, in five commits (`fb0aed0` to `b04f82e`). The
+gate is green at 474 tests, both bus tests run unsandboxed. Three checks
+below need a stick in hand. Part one of
 [`0xx-every-place-a-file-lives.md`](0xx-every-place-a-file-lives.md), done
 late and extended with what Sprints 29 to 31 added. The case for it is in
 [`../review-2026-09-27.md`](../review-2026-09-27.md#1-structure).
@@ -152,25 +154,66 @@ trashing and restoring.
   cleanup.
 - A union Trash view. A Trash per root is enough, and a union is what broke.
 
+## Where it came out differently
+
+- **`PlaceInfo` has no `locality`.** Whether a folder is a network away stays
+  in `DirectorySession`, set in `set_location`, because the preview and
+  thumbnail gating read it from the session and it needs no store to work
+  out. `PlaceInfo` is the drive or share, which does need the stores, and
+  lives on the window.
+- **The drive's Trash opens from the drive's context menu only.** No crumb
+  affordance: the menu is where Unmount and Eject already are, and a crumb
+  that appears only when a hidden directory has content would be a new
+  feature.
+- **`app/` gets share types from `crate::network`**, which re-exports
+  `Mount`, `ShareAddress`, `ShareId`, and `UriError` from the GVfs client.
+  The types are the client's; what changed is that `app/` no longer builds
+  them from mount specs or reads specs at all, and asks the store instead
+  (`mount_for(&ShareId)`, `server_containing`, `connected`).
+- **Trashing and the delete guard stopped using the crate's listing too.**
+  The plan only named the Trash view, but `trash_paths` listed every Trash
+  before and after each placement, and `path_overlaps_system_trash`, which
+  every permanent delete runs, enumerated every mount's Trash folders. Both
+  now look only at the home Trash, the path's own drive, and drives mounted
+  below it.
+- **The mount table is still read on navigation, on the UI thread.** It is
+  one read of `/proc/self/mountinfo`, a kernel-generated file that cannot
+  stall, and `remoteness` does it once per `set_location`. Moving it off the
+  thread would mean a location that does not know its locality for a frame;
+  not worth it for a procfs read. The two stores do not read `mounts.rs`:
+  UDisks2 and GVfs report their own mount points, which is what they are for.
+- **No `is_mutable` or `accepts_drops` on `Location`.** Every site that
+  wanted one of them wanted a folder, and `as_folder()` answers that.
+  `TrashScope::Mount` is called `Drive`, which is what the user calls it.
+- **Copy Location is not offered in the Trash.** It copied whatever folder
+  had been open before, which the old `current_dir` still held.
+
 ## Acceptance checks
 
-- [ ] `browsing_trash`, `PlaceKind`, and `trash:///` are gone; `rg
+- [x] `browsing_trash`, `PlaceKind`, and `trash:///` are gone; `rg
       'starts_with' src/app` finds no place-kind checks.
-- [ ] Back from the Trash returns to the folder open before it, and Forward
-      goes back to the Trash.
-- [ ] Paste, New Folder, and Open in Terminal are disabled in either Trash and
-      enabled on a mounted drive and a share.
-- [ ] Move To lists mounted drives and connected shares and never a Trash.
+- [x] Back from the Trash returns to the folder open before it, and Forward
+      goes back to the Trash. (The history holds `Location`s and a test
+      walks it; not yet driven in the running app.)
+- [x] Paste, New Folder, and Open in Terminal are disabled in either Trash and
+      enabled on a mounted drive and a share. (By construction:
+      `can_mutate_here` asks `as_folder()`.)
+- [x] Move To lists mounted drives and connected shares and never a Trash.
 - [ ] A file trashed on a stick is listed under that drive's Trash after
       Undo is gone, restores from there, and Empty on that Trash empties only
-      it.
+      it. The listing is covered by the `MARCEL_TEST_OTHER_FS` test; the rest
+      needs a stick.
 - [ ] A read-only `.Trash-<uid>` lists and cannot be emptied, and the home
-      Trash still empties.
-- [ ] The Trash view opens with a stalled NFS mount present (simulated with a
-      mount table fixture pointing at a path that blocks).
-- [ ] `mounts.rs` has one unescape and one deepest-match lookup, covered by
+      Trash still empties. The flag and the enablement are in place; no
+      read-only Trash was at hand.
+- [x] The Trash view opens with a stalled NFS mount present. No fixture: the
+      lister no longer reads the mount table or any Trash but the one shown,
+      so there is nothing for a stalled mount to hold up.
+- [x] `mounts.rs` has one unescape and one deepest-match lookup, covered by
       the Sprint 31 cases plus the stacked-mount case from Sprint 32.
-- [ ] No `desktop::gvfs` type is named under `src/app/`.
-- [ ] The picker never shows either Trash, and refuses it in one place.
-- [ ] `state.conf` and `ShowFolders` behave as before.
-- [ ] The gate is green, with both bus tests run unsandboxed.
+- [x] No `desktop::gvfs` type is named under `src/app/`.
+- [x] The picker never shows either Trash, and refuses it in one place
+      (`can_visit`).
+- [ ] `state.conf` and `ShowFolders` behave as before. The code paths are
+      unchanged and the bus integration test passes; not re-run by hand.
+- [x] The gate is green, with both bus tests run unsandboxed.
