@@ -129,6 +129,17 @@ pub fn init(cx: &mut App) {
     system_clipboard::start();
     let coordinator = cx.new(|_| OperationCoordinator::default());
     cx.set_global(GlobalOperations(coordinator.clone()));
+    // Another application's files are read on the clipboard's own thread;
+    // when they land, every window has to redraw for Paste to enable.
+    if let Some(changes) = system_clipboard::changes() {
+        let clipboard_owner = coordinator.clone();
+        cx.spawn(async move |cx| {
+            while changes.recv().await.is_ok() {
+                clipboard_owner.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
+    }
     // Quitting destroys the records that could restore a replaced file, so the
     // data they were holding aside becomes unreachable at that moment. The
     // journal used to be released when a window closed, which is exactly the

@@ -13,7 +13,6 @@
 //! unavailable and the clipboard stays Marcel's own, as it always was.
 
 use std::{
-    io::{Read as _, Write as _},
     os::fd::{AsFd, OwnedFd},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
@@ -22,6 +21,7 @@ use std::{
 
 use calloop::{EventLoop, channel};
 use calloop_wayland_source::WaylandSource;
+use rustix::event::{PollFd, PollFlags};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, event_created_child,
     globals::{GlobalListContents, registry_queue_init},
@@ -56,6 +56,8 @@ const TEXT_TYPES: [&str; 5] =
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// A file list larger than this is not a file list.
 const READ_LIMIT: u64 = 16 * 1024 * 1024;
+/// How long an application that asked for Marcel's files gets to read them.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Files staged by Copy or Cut, here or in another application.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +81,10 @@ enum Selection {
 struct Shared {
     available: bool,
     selection: Selection,
+    /// Told every time `selection` changes, so the windows redraw and Paste
+    /// enables when another application's files have been read, rather than
+    /// at the next unrelated repaint.
+    changed: Option<async_channel::Sender<()>>,
     /// Bumped with every selection change, so a slow read of an old one
     /// cannot overwrite a newer one.
     generation: u64,
@@ -91,6 +97,7 @@ enum Command {
 struct Service {
     shared: Arc<Mutex<Shared>>,
     commands: Mutex<channel::Sender<Command>>,
+    changes: async_channel::Receiver<()>,
 }
 
 static SERVICE: OnceLock<Service> = OnceLock::new();
@@ -103,9 +110,11 @@ pub(crate) fn start() {
     if SERVICE.get().is_some() || std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return;
     }
-    let shared = Arc::new(Mutex::new(Shared::default()));
+    let (changed, changes) = async_channel::bounded(1);
+    let shared = Arc::new(Mutex::new(Shared { changed: Some(changed), ..Shared::default() }));
     let (sender, receiver) = channel::channel();
-    if SERVICE.set(Service { shared: shared.clone(), commands: Mutex::new(sender) }).is_err() {
+    let service = Service { shared: shared.clone(), commands: Mutex::new(sender), changes };
+    if SERVICE.set(service).is_err() {
         return;
     }
     let spawned = std::thread::Builder::new().name("marcel-clipboard".into()).spawn(move || {
@@ -117,6 +126,12 @@ pub(crate) fn start() {
     if let Err(error) = spawned {
         eprintln!("Marcel: could not start the clipboard thread: {error}");
     }
+}
+
+/// A signal for every change to what the desktop clipboard holds, several
+/// close together arriving as one. `None` without a desktop clipboard.
+pub(crate) fn changes() -> Option<async_channel::Receiver<()>> {
+    SERVICE.get().map(|service| service.changes.clone())
 }
 
 /// The files on the desktop clipboard, or `None` when there is no desktop
@@ -141,7 +156,7 @@ pub(crate) fn publish(files: Option<FileClipboard>) {
         // Answer from what was just staged at once rather than after the
         // compositor's echo, so Paste right after Copy never sees the old one.
         shared.generation += 1;
-        shared.selection = files.clone().map_or(Selection::NoFiles, Selection::Files);
+        shared.set(files.clone().map_or(Selection::NoFiles, Selection::Files));
     }
     let _ = lock(&service.commands).send(Command::Publish(files));
 }
@@ -155,6 +170,15 @@ pub(crate) fn publish(files: Option<FileClipboard>) {
 pub(crate) fn replace_if_current(pasted: &FileClipboard, remaining: Option<FileClipboard>) {
     if system().flatten().as_ref() == Some(pasted) {
         publish(remaining);
+    }
+}
+
+impl Shared {
+    fn set(&mut self, selection: Selection) {
+        self.selection = selection;
+        if let Some(changed) = &self.changed {
+            let _ = changed.try_send(());
+        }
     }
 }
 
@@ -417,7 +441,7 @@ impl State {
     fn set_selection(&self, selection: Selection) -> u64 {
         let mut shared = lock(&self.shared);
         shared.generation += 1;
-        shared.selection = selection;
+        shared.set(selection);
         shared.generation
     }
 
@@ -430,11 +454,11 @@ impl State {
         else {
             return;
         };
-        // A reader that stops reading must not stall the clipboard, so the
-        // write happens beside it; closing the pipe ends the transfer.
-        let _ = std::thread::Builder::new().name("marcel-clipboard-send".into()).spawn(move || {
-            let _ = std::fs::File::from(fd).write_all(&bytes);
-        });
+        // Written beside the event loop, which has to keep answering the
+        // compositor; `write_pipe` gives up on a reader that stops reading.
+        let _ = std::thread::Builder::new()
+            .name("marcel-clipboard-send".into())
+            .spawn(move || write_pipe(fd, &bytes));
     }
 
     fn cancelled(&mut self, source: &Source) {
@@ -486,7 +510,7 @@ impl State {
             });
             let mut shared = lock(&shared);
             if shared.generation == generation {
-                shared.selection = files.map_or(Selection::NoFiles, Selection::Files);
+                shared.set(files.map_or(Selection::NoFiles, Selection::Files));
             }
         });
     }
@@ -499,18 +523,78 @@ fn request(offer: &Offer, mime_type: &str) -> Option<std::io::PipeReader> {
     Some(reader)
 }
 
-/// Everything the offerer writes, or `None` when it takes too long.
-fn read_pipe(mut reader: std::io::PipeReader) -> Option<Vec<u8>> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("marcel-clipboard-pipe".into())
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            let read = (&mut reader).take(READ_LIMIT).read_to_end(&mut bytes);
-            let _ = sender.send(read.map(|_| bytes));
-        })
-        .ok()?;
-    receiver.recv_timeout(READ_TIMEOUT).ok()?.ok()
+/// Everything the offerer writes, or `None` when it takes longer than
+/// [`READ_TIMEOUT`] or writes more than [`READ_LIMIT`].
+///
+/// The descriptor is non-blocking and waited on with `poll` against one
+/// deadline, so an offerer that never closes its end costs nothing once the
+/// deadline passes: the descriptor is dropped here, not left with a thread
+/// blocked on it. A list past the limit is refused whole rather than cut,
+/// because a cut can end in the middle of a path and name a different file
+/// that exists.
+fn read_pipe(reader: std::io::PipeReader) -> Option<Vec<u8>> {
+    read_within(OwnedFd::from(reader), READ_LIMIT, READ_TIMEOUT)
+}
+
+fn read_within(fd: OwnedFd, limit: u64, timeout: Duration) -> Option<Vec<u8>> {
+    set_nonblocking(&fd)?;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        match rustix::io::read(&fd, &mut buffer) {
+            Ok(0) => return Some(bytes),
+            Ok(read) => {
+                bytes.extend_from_slice(&buffer[..read]);
+                if bytes.len() as u64 > limit {
+                    return None;
+                }
+            }
+            Err(rustix::io::Errno::AGAIN) => wait_for(&fd, PollFlags::IN, deadline)?,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Write `bytes` to a reader that asked for them, giving up after
+/// [`WRITE_TIMEOUT`]. A reader that stops reading gets a closed pipe, not a
+/// writer blocked on it for as long as it lives.
+fn write_pipe(fd: OwnedFd, bytes: &[u8]) {
+    if set_nonblocking(&fd).is_none() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match rustix::io::write(&fd, rest) {
+            Ok(written) => rest = &rest[written..],
+            Err(rustix::io::Errno::AGAIN) => {
+                if wait_for(&fd, PollFlags::OUT, deadline).is_none() {
+                    return;
+                }
+            }
+            Err(rustix::io::Errno::INTR) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn set_nonblocking(fd: &OwnedFd) -> Option<()> {
+    let flags = rustix::fs::fcntl_getfl(fd).ok()?;
+    rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK).ok()
+}
+
+/// Wait until `fd` is ready for `flags`, or `None` once `deadline` passes.
+fn wait_for(fd: &OwnedFd, flags: PollFlags, deadline: std::time::Instant) -> Option<()> {
+    let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+    let timeout = rustix::time::Timespec::try_from(remaining).ok()?;
+    let mut fds = [PollFd::new(fd, flags)];
+    match rustix::event::poll(&mut fds, Some(&timeout)) {
+        Ok(0) => None,
+        Ok(_) | Err(rustix::io::Errno::INTR) => Some(()),
+        Err(_) => None,
+    }
 }
 
 // --- Dispatch ------------------------------------------------------------------
@@ -613,6 +697,38 @@ mod tests {
 
     fn text(files: &FileClipboard, mime_type: &str) -> String {
         String::from_utf8(payload(files, mime_type).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_list_is_read_whole_when_the_writer_closes() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut writer, b"copy\nfile:///tmp/a").unwrap();
+        drop(writer);
+        let read = read_within(OwnedFd::from(reader), 1024, Duration::from_secs(1));
+        assert_eq!(read.as_deref(), Some(&b"copy\nfile:///tmp/a"[..]));
+    }
+
+    /// An application that offers files and never finishes writing them
+    /// costs the deadline and nothing after it.
+    #[test]
+    fn a_writer_that_never_closes_is_given_up_on_at_the_deadline() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut writer, b"copy\n").unwrap();
+        let started = std::time::Instant::now();
+        let read = read_within(OwnedFd::from(reader), 1024, Duration::from_millis(100));
+        assert_eq!(read, None);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        drop(writer);
+    }
+
+    /// Cut short, a list can end in the middle of a path that names some
+    /// other file. Past the limit it is refused whole.
+    #[test]
+    fn a_list_past_the_limit_is_refused_rather_than_cut() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut writer, b"file:///home/me/a-long-name").unwrap();
+        drop(writer);
+        assert_eq!(read_within(OwnedFd::from(reader), 16, Duration::from_secs(1)), None);
     }
 
     #[test]
