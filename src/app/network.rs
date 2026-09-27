@@ -30,6 +30,13 @@ use super::{
     state::{NetworkMenu, NetworkTarget, SidebarMenu},
 };
 
+/// What a Network context menu acts on: a saved server with its slot, a live
+/// mount, or both.
+struct MenuSubject {
+    server: Option<(usize, Server)>,
+    mount: Option<Mount>,
+}
+
 /// One row of the section, saved server or bare mount alike.
 struct NetworkRow {
     id: (&'static str, usize),
@@ -401,6 +408,32 @@ impl Marcel {
         Some(rows)
     }
 
+    /// The saved server and live mount a menu acts on, looked up again. The
+    /// menu names a server or a mount, not a slot: if the list moved on since
+    /// it opened, it no longer describes what a click would act on, so it
+    /// goes away instead.
+    fn network_menu_target(
+        &self,
+        target: &NetworkTarget,
+        cx: &Context<Self>,
+    ) -> Option<MenuSubject> {
+        let store = self.network.read(cx);
+        Some(match target {
+            NetworkTarget::Server { index, address } => {
+                let server = store
+                    .servers()
+                    .get(*index)
+                    .filter(|server| &server.address == address)?
+                    .clone();
+                let mount = store.mount_for(&server.address.id()).cloned();
+                MenuSubject { server: Some((*index, server)), mount }
+            }
+            NetworkTarget::Mount(share) => {
+                MenuSubject { server: None, mount: Some(store.mount_for(share)?.clone()) }
+            }
+        })
+    }
+
     pub(super) fn render_network_menu(
         &self,
         window: &mut Window,
@@ -409,22 +442,7 @@ impl Marcel {
         let Some(SidebarMenu::Network(menu)) = self.sidebar.menu.clone() else {
             return None;
         };
-        let store = self.network.read(cx);
-        // The menu names a server or a mount, not a slot: if the list moved
-        // on since it opened, it no longer describes what a click would act
-        // on, so it goes away instead.
-        let (server, mount) = match &menu.target {
-            NetworkTarget::Server { index, address } => {
-                let server = store
-                    .servers()
-                    .get(*index)
-                    .filter(|server| &server.address == address)?
-                    .clone();
-                let mount = store.mount_for(&server.address.id()).cloned();
-                (Some((*index, server)), mount)
-            }
-            NetworkTarget::Mount(share) => (None, Some(store.mount_for(share)?.clone())),
-        };
+        let MenuSubject { server, mount } = self.network_menu_target(&menu.target, cx)?;
         // Only a mount whose address reads back can be saved; a phone or a
         // camera is browsable and disconnectable, and that is all.
         let save = mount.clone().filter(|mount| server.is_none() && mount.address().can_be_saved());
@@ -466,10 +484,7 @@ impl Marcel {
                             })),
                     )
                 })
-                .when(server.is_none(), |this| {
-                    let Some(mount) = save else {
-                        return this;
-                    };
+                .when_some(save, |this, mount| {
                     this.child(
                         menu_row(("network-menu-save", 3), "Add to Network", true, cx).on_click(
                             cx.listener(move |this, _, window, cx| {
