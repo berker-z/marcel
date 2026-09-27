@@ -436,11 +436,17 @@ impl Marcel {
             }
             NetworkTarget::Mount(spec) => (None, Some(store.mount_for(spec)?.clone())),
         };
-        let rows = usize::from(mount.is_some()) + if server.is_some() { 2 } else { 1 };
+        // Only a mount whose address reads back can be saved; a phone or a
+        // camera is browsable and disconnectable, and that is all.
+        let save = mount.clone().filter(|mount| {
+            server.is_none()
+                && Location { spec: mount.spec.clone(), path: String::new() }.can_be_saved()
+        });
+        let rows = usize::from(mount.is_some())
+            + if server.is_some() { 2 } else { usize::from(save.is_some()) };
         let height = BOOKMARK_MENU_HEIGHT + 30.0 * (rows as f32 - 1.0);
         let (left, top) = clamp_to_window(menu.position, (BOOKMARK_MENU_WIDTH, height), window);
         let disconnect = mount.clone();
-        let save = mount.clone();
         let remove = server.clone();
         let rename = server.clone();
         Some(

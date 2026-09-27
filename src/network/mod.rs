@@ -490,6 +490,12 @@ impl NetworkStore {
         if !self.writable(origin, cx) || self.servers.iter().any(|s| s.location == location) {
             return false;
         }
+        // A phone, a camera, or a Google Drive mount has no address Marcel
+        // could read back, and one unreadable line makes the whole file
+        // read-only on the next start.
+        if !location.can_be_saved() {
+            return false;
+        }
         self.servers.push(Server { location, name });
         self.changed(origin, cx);
         true

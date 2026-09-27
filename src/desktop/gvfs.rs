@@ -269,6 +269,14 @@ impl Location {
         }
     }
 
+    /// Whether this location survives the servers file: its URI parses back
+    /// to itself. GVfs lists mounts of backends Marcel has no address for
+    /// (MTP phones, cameras, Google Drive); those can be browsed but not
+    /// saved.
+    pub fn can_be_saved(&self) -> bool {
+        Self::parse(&self.to_uri()).is_ok_and(|parsed| parsed == *self)
+    }
+
     /// What to call this when the mount has not said: the host, or the share
     /// on its server.
     pub fn label(&self) -> String {
@@ -1063,6 +1071,21 @@ mod tests {
         assert_eq!(location.to_uri(), "davs://cloud.example/remote.php/dav/files/me");
         assert_eq!(Location::parse(&location.to_uri()).unwrap(), location);
         assert_eq!(Location::parse("dav://h/").unwrap().spec.prefix, "/");
+    }
+
+    /// GVfs lists an MTP phone next to the shares. Its URI is not one Marcel
+    /// reads back, so it must never reach the servers file.
+    #[test]
+    fn only_a_location_that_reads_back_can_be_saved() {
+        let mut phone = MountSpec::new("mtp");
+        phone.set("host", "[usb:002,005]");
+        let phone = Location { spec: phone, path: String::new() };
+        assert!(Location::parse(&phone.to_uri()).is_err(), "{}", phone.to_uri());
+        assert!(!phone.can_be_saved());
+
+        for saved in ["sftp://me@wired/home/me", "smb://nas/media", "davs://cloud.example/dav"] {
+            assert!(Location::parse(saved).unwrap().can_be_saved(), "{saved}");
+        }
     }
 
     #[test]
