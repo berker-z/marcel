@@ -492,7 +492,7 @@ impl OperationCoordinator {
                         origin,
                         cx,
                     );
-                    Some(Report::Error(error.to_string()))
+                    Some(Report::Error(format!("{error:#}")))
                 }
             },
         );
@@ -620,7 +620,7 @@ impl OperationCoordinator {
         self.run(origin, cx, work, move |this, result, cx| {
             Some(match result {
                 Ok(committed) => this.report_committed(committed, verb, origin, cx),
-                Err(error) => Report::Error(error.to_string()),
+                Err(error) => Report::Error(format!("{error:#}")),
             })
         });
     }
@@ -720,7 +720,7 @@ impl OperationCoordinator {
             // exactly and the user can fix the obstacle and retry.
             MutationOutcome::Unchanged(error) => {
                 self.journal.cancel(direction, record);
-                Report::Error(error.to_string())
+                Report::Error(format!("{error:#}"))
             }
             // The step crossed its commit point. Whatever compensation
             // achieved, the record's identities predate it, so keeping it

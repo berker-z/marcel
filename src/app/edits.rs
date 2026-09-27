@@ -779,7 +779,7 @@ impl Marcel {
         // The only refusal is the window cap, and a menu item that silently
         // does nothing looks broken; the reason belongs on this window.
         if let Err(error) = crate::window::open(directory, cx) {
-            self.report(Report::Error(error.to_string()), cx);
+            self.report(Report::Error(format!("{error:#}")), cx);
         }
     }
 }

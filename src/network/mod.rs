@@ -355,7 +355,7 @@ impl NetworkStore {
         cx.spawn(async move |this, cx| {
             let result = match client.mount(&location.spec, prompts).await {
                 Ok(()) => {
-                    client.mounts().await.map_err(|error| MountError::Failed(error.to_string()))
+                    client.mounts().await.map_err(|error| MountError::Failed(format!("{error:#}")))
                 }
                 Err(error) => Err(error),
             };
@@ -566,7 +566,7 @@ impl NetworkStore {
                     this.start_save(origin, cx);
                 }
                 match result {
-                    Err(error) => Some(Report::Error(format!("Could not save servers: {error}"))),
+                    Err(error) => Some(Report::Error(format!("Could not save servers: {error:#}"))),
                     Ok(()) => None,
                 }
             });

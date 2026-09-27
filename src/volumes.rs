@@ -169,7 +169,7 @@ impl VolumeStore {
                     }
                     cx.update(|cx| then(mounted.mount_point, cx));
                 }
-                Err(error) => surface::deliver(origin, Some(Report::Error(error.to_string())), cx),
+                Err(error) => surface::deliver(origin, Some(Report::Error(format!("{error:#}"))), cx),
             }
         })
         .detach();
@@ -210,7 +210,7 @@ impl VolumeStore {
                 Ok(VolumeChange::Ejected) => {
                     Report::Success(format!("“{}” can be removed", volume.name))
                 }
-                Err(error) => Report::Error(error.to_string()),
+                Err(error) => Report::Error(format!("{error:#}")),
             };
             surface::deliver(origin, Some(report), cx);
         })

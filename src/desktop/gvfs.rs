@@ -742,7 +742,7 @@ impl GvfsClient {
             Err(UnmountFailure::Mount(error)) => return Err(error),
             Ok(()) => return Ok(()),
         }
-        let mounts = self.mounts().await.map_err(|error| MountError::Failed(error.to_string()))?;
+        let mounts = self.mounts().await.map_err(|error| MountError::Failed(format!("{error:#}")))?;
         let Some(live) = mounts.into_iter().find(|live| mount.spec.is_served_by(&live.spec)) else {
             return Ok(());
         };
@@ -763,7 +763,7 @@ impl GvfsClient {
             MOUNT,
         )
         .await
-        .map_err(|error| MountError::Failed(error.to_string()))?;
+        .map_err(|error| MountError::Failed(format!("{error:#}")))?;
         // Unlike `MountLocation`, this takes the source flattened: `(sou)`.
         let (name, path) = operation.source();
         let result = proxy.call::<_, _, ()>("Unmount", &(name, path, 0u32)).await;
@@ -782,14 +782,14 @@ impl GvfsClient {
     ) -> Result<ExportedOperation<'_>, MountError> {
         let number = self.next_operation.fetch_add(1, Ordering::Relaxed);
         let path = ObjectPath::try_from(format!("{OPERATION_PATH}/{number}"))
-            .map_err(|error| MountError::Failed(error.to_string()))?;
+            .map_err(|error| MountError::Failed(format!("{error:#}")))?;
         let cancelled = Arc::new(AtomicBool::new(false));
         let operation = MountOperation { prompts, cancelled: Arc::clone(&cancelled) };
         self.connection
             .object_server()
             .at(path.clone(), operation)
             .await
-            .map_err(|error| MountError::Failed(format!("Could not answer GVfs: {error}")))?;
+            .map_err(|error| MountError::Failed(format!("Could not answer GVfs: {error:#}")))?;
         Ok(ExportedOperation { client: self, path: path.into(), cancelled })
     }
 }

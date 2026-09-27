@@ -256,7 +256,7 @@ fn open_window_or_report(path: std::path::PathBuf, cx: &mut App) -> Option<windo
             eprintln!("Marcel could not open a window: {error}");
             if let Some(handle) = surface::current(None, cx) {
                 let _ = handle.update(cx, |_, window, cx| {
-                    surface::Report::Error(error.to_string()).show(window, cx);
+                    surface::Report::Error(format!("{error:#}")).show(window, cx);
                 });
             }
             None
