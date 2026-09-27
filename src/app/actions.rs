@@ -257,6 +257,13 @@ impl Marcel {
     /// A key binding fired. Escape is the one key with a stack of meanings:
     /// it closes whatever is frontmost before it clears anything.
     fn on_action(&mut self, command: BrowserCommand, window: &mut Window, cx: &mut Context<Self>) {
+        // The rename field sits inside the listing, and gpui-component's
+        // single-line input propagates Enter and Escape after handling them,
+        // so GPUI goes on to the listing's bindings for the same key. Escape
+        // should cancel the rename; Enter must not also open the file.
+        if self.ui.rename.is_some() && command != BrowserCommand::ClearSelection {
+            return;
+        }
         if command != BrowserCommand::ClearSelection {
             self.execute(command, window, cx);
             return;
