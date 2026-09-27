@@ -154,7 +154,9 @@ impl BrowserCommand {
 impl Marcel {
     /// Whether the folder shown can be changed from this window right now.
     fn can_mutate_here(&self, cx: &App) -> bool {
-        !self.sidebar.browsing_trash && !self.operations_busy(cx) && self.directory.error.is_none()
+        self.directory.folder().is_some()
+            && !self.operations_busy(cx)
+            && self.directory.error.is_none()
     }
 
     fn selection_is_single(&self) -> bool {
@@ -190,11 +192,11 @@ impl Marcel {
 
     pub(super) fn command_enabled(&self, command: BrowserCommand, cx: &App) -> bool {
         use BrowserCommand::*;
-        let trash = self.sidebar.browsing_trash;
+        let trash = self.directory.location.is_trash();
         let busy = self.operations_busy(cx);
         let operations = self.operations.read(cx);
         match command {
-            GoToParent => !trash && self.directory.current_dir.parent().is_some(),
+            GoToParent => self.directory.folder().and_then(Path::parent).is_some(),
             GoBack => self.history.can_go_back(),
             GoForward => self.history.can_go_forward(),
             ActivateSelection => self

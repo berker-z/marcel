@@ -647,7 +647,11 @@ impl Marcel {
     ) {
         let mut paths = self.selected_paths();
         if paths.is_empty() {
-            paths.push(self.directory.current_dir.clone());
+            // Nothing selected in the Trash describes nothing.
+            let Some(folder) = self.directory.folder() else {
+                return;
+            };
+            paths.push(folder.to_path_buf());
         }
         self.open_properties(paths, window, cx);
     }

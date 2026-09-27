@@ -55,7 +55,10 @@ use gpui_component::input::{InputEvent, InputState};
 
 use crate::{
     bookmarks::BookmarkStore,
-    browse::{directory_session::DirectorySession, entries::FileEntry, history::NavigationHistory},
+    browse::{
+        directory_session::DirectorySession, entries::FileEntry, history::NavigationHistory,
+        location::Location,
+    },
     config::{self, BrowserState},
     network::NetworkStore,
     operations::{OperationCoordinator, OperationEvent},
@@ -193,12 +196,12 @@ impl Marcel {
                 state_save_sender,
                 state_save_task,
             ),
-            history: NavigationHistory::new(start_dir),
+            history: NavigationHistory::new(Location::Folder(start_dir)),
             sidebar: SidebarState::new(&home_dir),
             picker: None,
         };
         this.start_places_load(home_dir, cx);
-        this.start_directory_load(true, cx);
+        this.start_load(true, cx);
         // Said once the window is up: the file is left as it is, and the
         // user should know why their settings will not stick this session.
         if let Some(reason) = state_unreadable {

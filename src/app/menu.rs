@@ -132,7 +132,7 @@ pub(super) fn menu_row(
 impl Marcel {
     fn entry_menu_items(&self, cx: &Context<Self>) -> Vec<MenuItem> {
         use BrowserCommand::*;
-        let trash = self.sidebar.browsing_trash;
+        let trash = self.directory.location.is_trash();
         let mut items = vec![command("Open", Some("Enter"), ActivateSelection)];
         // Shown only for a folder, and only where a second window makes
         // sense, rather than shown disabled beside every file.
@@ -187,7 +187,7 @@ impl Marcel {
             Action {
                 label: "Refresh",
                 checked: false,
-                run: |this, _, cx| this.start_directory_load(false, cx),
+                run: |this, _, cx| this.start_load(false, cx),
             },
             Separator,
             Action {
@@ -197,18 +197,23 @@ impl Marcel {
             },
             Separator,
             command("Open in Terminal", None, OpenTerminal),
-            Action {
+        ];
+        // The Trash has no location another program could open.
+        if self.directory.folder().is_some() {
+            items.push(Action {
                 label: "Copy Location",
                 checked: false,
                 run: |this, _, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                        this.directory.current_dir.display().to_string(),
-                    ));
+                    if let Some(folder) = this.directory.folder() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            folder.display().to_string(),
+                        ));
+                    }
                 },
-            },
-            command("Properties", Some("Ctrl+I"), ShowProperties),
-        ];
-        if self.sidebar.browsing_trash {
+            });
+        }
+        items.push(command("Properties", Some("Ctrl+I"), ShowProperties));
+        if self.directory.location.is_trash() {
             items.extend([Separator, command("Empty Trash…", None, EmptyTrash)]);
         }
         items

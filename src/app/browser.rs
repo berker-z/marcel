@@ -1,7 +1,7 @@
 //! The listing itself: the list and grid views over the same entries, and
 //! the empty-space surface around them that marquees start on.
 
-use std::ops::Range;
+use std::{ops::Range, path::Path};
 
 use gpui::prelude::*;
 use gpui::{
@@ -103,7 +103,7 @@ impl Marcel {
             Some(drag) if selected => drag.clone(),
             _ => FileDrag::single(&path, navigable),
         };
-        let dragging_enabled = !self.sidebar.browsing_trash && self.ui.rename.is_none();
+        let dragging_enabled = !self.directory.location.is_trash() && self.ui.rename.is_none();
         let busy = self.operations_busy(cx);
         let entry_hit_bounds = self.drag.entry_hit_bounds.clone();
         let entry_content_bounds = self.drag.entry_content_bounds.clone();
@@ -523,8 +523,9 @@ impl Marcel {
         let gesture_view = cx.entity();
         let directory_scroll = self.ui.directory_scroll.clone();
         // The Trash listing is not a folder anything can be dropped into.
-        let refuses_drops = self.operations_busy(cx) || self.sidebar.browsing_trash;
-        let current_dir = self.directory.current_dir.clone();
+        let current_dir = self.directory.folder().map(Path::to_path_buf);
+        let refuses_drops = self.operations_busy(cx) || current_dir.is_none();
+        let current_dir = current_dir.unwrap_or_default();
 
         let surface = div().relative().flex().flex_col().flex_1().min_h_0();
         let surface = accept_file_drops(

@@ -16,6 +16,7 @@ use crate::{
             ApplyDirectoryEvents, DirectoryEvent, LoadKind, ReconcileSelection, RescanDecision,
         },
         entries::{DirectoryUpdate, FileEntry, sort_entries, stream_directory},
+        location::{Location, TrashScope},
         watcher::{DirectoryWatcherUpdate, revalidate_paths, watch_directory},
     },
     desktop::icons::IconProvider,
@@ -95,14 +96,19 @@ impl Marcel {
         self.directory.clear_pending_reveal();
     }
 
-    pub(super) fn start_directory_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
-        if self.sidebar.browsing_trash {
-            self.start_trash_load(clear_filter, cx);
-            return;
-        }
+    /// Load whatever the window is at: stream a folder and watch it, or list
+    /// a Trash.
+    pub(super) fn start_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
         let kind = load_kind(clear_filter);
+        match self.directory.location.clone() {
+            Location::Folder(path) => self.start_folder_load(kind, path, cx),
+            Location::Trash(scope) => self.start_trash_load(kind, scope, cx),
+        }
+    }
+
+    fn start_folder_load(&mut self, kind: LoadKind, path: PathBuf, cx: &mut Context<Self>) {
         self.begin_listing(kind, cx);
-        let (ticket, path) = self.directory.begin_load(kind);
+        let ticket = self.directory.begin_load(kind);
         // Watch from the start of the enumeration, not its end: a change
         // arriving while a large directory streamed used to be lost for good.
         // Events that arrive while the stream owns the listing are deferred
@@ -193,7 +199,7 @@ impl Marcel {
     fn request_rescan(&mut self, cx: &mut Context<Self>) -> bool {
         match self.directory.schedule_rescan(Instant::now()) {
             RescanDecision::Now => {
-                self.start_directory_load(false, cx);
+                self.start_load(false, cx);
                 true
             }
             RescanDecision::After(delay) => {
@@ -203,11 +209,11 @@ impl Marcel {
                     let _ = this.update(cx, |this, cx| {
                         // A navigation meanwhile made this reload moot, and
                         // began a load of its own with a watcher of its own.
-                        if generation != this.directory.generation || this.sidebar.browsing_trash {
+                        if generation != this.directory.generation {
                             return;
                         }
                         this.directory.begin_scheduled_rescan(Instant::now());
-                        this.start_directory_load(false, cx);
+                        this.start_load(false, cx);
                     });
                 })
                 .detach();
@@ -217,11 +223,9 @@ impl Marcel {
         }
     }
 
-    pub(super) fn start_trash_load(&mut self, clear_filter: bool, cx: &mut Context<Self>) {
-        self.sidebar.browsing_trash = true;
-        let kind = load_kind(clear_filter);
+    fn start_trash_load(&mut self, kind: LoadKind, _scope: TrashScope, cx: &mut Context<Self>) {
         self.begin_listing(kind, cx);
-        let ticket = self.directory.begin_virtual_load(kind);
+        let ticket = self.directory.begin_load(kind);
         if kind == LoadKind::Navigate {
             self.sidebar.trash_records.clear();
         }
@@ -245,7 +249,7 @@ impl Marcel {
         let load = cx.spawn(async move |this, cx| {
             let result = load.await;
             let _ = this.update(cx, |this, cx| {
-                if ticket != this.directory.generation || !this.sidebar.browsing_trash {
+                if ticket != this.directory.generation {
                     return;
                 }
                 match result {
@@ -279,7 +283,7 @@ impl Marcel {
         unblock(cx, move || watch_directory(&watched_path, sender, watcher_cancelled)).detach();
 
         let task = pump(cx, receiver, move |this, update, cx| {
-            if ticket != this.directory.generation || path != this.directory.current_dir {
+            if ticket != this.directory.generation || this.directory.folder() != Some(&path) {
                 return false;
             }
             // While the load streams, the stream owns the listing: applying
@@ -400,38 +404,43 @@ impl Marcel {
         add_to_history: bool,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_to_revealing(path, Vec::new(), add_to_history, cx);
+        self.navigate(Location::Folder(path), Vec::new(), add_to_history, cx);
     }
 
-    fn navigate_to_revealing(
+    pub(super) fn navigate(
         &mut self,
-        path: PathBuf,
+        location: Location,
         reveal: Vec<PathBuf>,
         add_to_history: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.sidebar.browsing_trash && path == self.directory.current_dir {
+        if !self.can_visit(&location) {
+            return;
+        }
+        if location == self.directory.location {
             if !reveal.is_empty() {
                 self.set_filter_query(String::new(), cx);
                 self.directory.replace_pending_reveal(reveal);
                 self.preview.clear();
                 self.select_pending_loaded_entries(cx);
                 cx.notify();
+            } else if location.is_trash() {
+                // Clicking the Trash while in it has always re-read it.
+                self.start_load(false, cx);
             }
             return;
         }
         if add_to_history {
-            self.history.push(&path);
+            self.history.push(&location);
         }
-        self.show_directory(path, reveal, cx);
+        self.show_location(location, reveal, cx);
     }
 
-    fn show_directory(&mut self, path: PathBuf, reveal: Vec<PathBuf>, cx: &mut Context<Self>) {
-        self.sidebar.browsing_trash = false;
+    fn show_location(&mut self, location: Location, reveal: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.sidebar.trash_records.clear();
-        self.directory.set_directory(path);
+        self.directory.set_location(location);
         self.directory.pending_reveal = reveal;
-        self.start_directory_load(true, cx);
+        self.start_load(true, cx);
     }
 
     pub fn open_external_location(
@@ -441,27 +450,24 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_to_revealing(directory, reveal, true, cx);
+        self.navigate(Location::Folder(directory), reveal, true, cx);
         self.focus_browser(window, cx);
     }
 
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.history.go_back() {
-            self.show_directory(path, Vec::new(), cx);
+        if let Some(location) = self.history.go_back() {
+            self.show_location(location, Vec::new(), cx);
         }
     }
 
     pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.history.go_forward() {
-            self.show_directory(path, Vec::new(), cx);
+        if let Some(location) = self.history.go_forward() {
+            self.show_location(location, Vec::new(), cx);
         }
     }
 
     pub(super) fn go_up(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar.browsing_trash {
-            return;
-        }
-        if let Some(parent) = self.directory.current_dir.parent() {
+        if let Some(parent) = self.directory.folder().and_then(Path::parent) {
             self.navigate_to(parent.to_path_buf(), true, cx);
         }
     }
@@ -480,11 +486,12 @@ impl Marcel {
     ) {
         match event {
             OperationEvent::Applied { changes, reveal, origin } => {
-                let here = self.directory.current_dir.as_path();
+                let here = self.directory.folder();
                 let reveal = origin
                     .is_none_or(|origin| origin == Self::origin(window))
-                    .then(|| reveal.iter().find(|path| path.parent() == Some(here)).cloned())
-                    .flatten();
+                    .then(|| reveal.iter().find(|path| here.is_some() && path.parent() == here))
+                    .flatten()
+                    .cloned();
                 self.apply_directory_changes(changes.clone(), reveal, cx);
             }
             OperationEvent::TrashRemoved(backing_paths) => {
@@ -494,8 +501,8 @@ impl Marcel {
                 self.upsert_trash_entries(records.clone(), cx)
             }
             OperationEvent::TrashInvalidated => {
-                if self.sidebar.browsing_trash {
-                    self.start_trash_load(false, cx);
+                if self.directory.location.is_trash() {
+                    self.start_load(false, cx);
                 }
             }
         }
@@ -507,10 +514,9 @@ impl Marcel {
         reveal: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar.browsing_trash {
+        let Some(current_dir) = self.directory.folder().map(Path::to_path_buf) else {
             return;
-        }
-        let current_dir = self.directory.current_dir.clone();
+        };
         // Every path is re-stat'd before it is applied — the removed ones too.
         // An operation's `removed` can be stale by the time it lands: an
         // external process may have recreated the path, and applying the
@@ -539,9 +545,8 @@ impl Marcel {
         cx.spawn(async move |this, cx| {
             let events = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.sidebar.browsing_trash
-                    || generation != this.directory.generation
-                    || current_dir != this.directory.current_dir
+                if generation != this.directory.generation
+                    || this.directory.folder() != Some(current_dir.as_path())
                 {
                     return;
                 }
@@ -568,7 +573,7 @@ impl Marcel {
     }
 
     fn remove_trash_entries(&mut self, backing_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if !self.sidebar.browsing_trash || backing_paths.is_empty() {
+        if !self.directory.location.is_trash() || backing_paths.is_empty() {
             return;
         }
         for path in &backing_paths {
@@ -579,7 +584,7 @@ impl Marcel {
     }
 
     fn upsert_trash_entries(&mut self, records: Vec<TrashRecord>, cx: &mut Context<Self>) {
-        if !self.sidebar.browsing_trash || records.is_empty() {
+        if !self.directory.location.is_trash() || records.is_empty() {
             return;
         }
         let generation = self.directory.generation;
@@ -587,7 +592,7 @@ impl Marcel {
         cx.spawn(async move |this, cx| {
             let (entries, unreadable) = task.await;
             let _ = this.update(cx, |this, cx| {
-                if !this.sidebar.browsing_trash || generation != this.directory.generation {
+                if generation != this.directory.generation {
                     return;
                 }
                 // A record that cannot be shown is missing from Empty Trash
@@ -621,7 +626,7 @@ impl Marcel {
                 self.apply_selection_reconcile(reconcile, cx);
                 cx.notify();
             }
-            ApplyDirectoryEvents::RescanRequired => self.start_trash_load(false, cx),
+            ApplyDirectoryEvents::RescanRequired => self.start_load(false, cx),
         }
     }
 }

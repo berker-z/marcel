@@ -14,6 +14,7 @@ use gpui_component::{
 
 use crate::{
     bookmarks::Bookmark,
+    browse::location::Location,
     desktop::{
         icons::IconProvider,
         places::{Place, discover as discover_places},
@@ -63,7 +64,7 @@ impl Marcel {
                 .filter_map(|place| {
                     icon_provider
                         .icon_for_place(&place.label)
-                        .map(|icon| (place.path.clone(), icon))
+                        .map(|icon| (place.target.clone(), icon))
                 })
                 .collect();
             (places, icons)
@@ -237,29 +238,34 @@ impl Marcel {
     /// navigation surface is intentionally Marcel-owned.
     fn render_place(&self, index: usize, place: Place, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
-        let is_trash = place.is_trash();
-        let active = if is_trash {
-            self.sidebar.browsing_trash
-        } else {
-            !self.sidebar.browsing_trash && self.directory.current_dir == place.path
-        };
-        let icon = sidebar_icon(self.sidebar.place_icons.get(&place.path).cloned(), colors.primary);
-        let place_drop_bounds = self.sidebar.place_drop_bounds.clone();
-        let bounds_path = place.path.clone();
-        self.sidebar_row(("place", index), &place.path, active, !is_trash, cx)
-            .when(is_trash, |this| {
-                this.on_click(cx.listener(|this, _, _, cx| {
-                    this.start_trash_load(true, cx);
+        let active = self.directory.location == place.target;
+        let icon =
+            sidebar_icon(self.sidebar.place_icons.get(&place.target).cloned(), colors.primary);
+        let label = div().flex_none().text_base().child(place.label);
+        match place.target {
+            // A folder takes drops and navigates like a bookmark does.
+            Location::Folder(path) => {
+                let place_drop_bounds = self.sidebar.place_drop_bounds.clone();
+                let bounds_path = path.clone();
+                self.sidebar_row(("place", index), &path, active, true, cx)
+                    .child(icon)
+                    .child(label)
+                    .child(painted_bounds(move |bounds| {
+                        place_drop_bounds.borrow_mut().insert(bounds_path.clone(), bounds);
+                    }))
+                    .into_any_element()
+            }
+            // Dropping onto the Trash would need a trash operation of its
+            // own, not a move, so it takes none.
+            target @ Location::Trash(_) => self
+                .sidebar_row(("place", index), Path::new(""), active, false, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.navigate(target.clone(), Vec::new(), true, cx);
                 }))
-            })
-            .child(icon)
-            .child(div().flex_none().text_base().child(place.label))
-            .when(!is_trash, |this| {
-                this.child(painted_bounds(move |bounds| {
-                    place_drop_bounds.borrow_mut().insert(bounds_path.clone(), bounds);
-                }))
-            })
-            .into_any_element()
+                .child(icon)
+                .child(label)
+                .into_any_element(),
+        }
     }
 
     fn render_bookmark(
@@ -269,7 +275,7 @@ impl Marcel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors;
-        let active = self.directory.current_dir == bookmark.path;
+        let active = self.directory.folder() == Some(bookmark.path.as_path());
         let icon = sidebar_icon(
             self.bookmarks.read(cx).icon(&bookmark.path).map(Path::to_path_buf),
             colors.primary,
@@ -341,7 +347,7 @@ impl Marcel {
     /// point would otherwise be left in a directory that no longer exists.
     fn leave_volume(&mut self, volume: &Volume, cx: &mut Context<Self>) {
         if let Some(mount_point) = &volume.mount_point
-            && self.directory.current_dir.starts_with(mount_point)
+            && self.directory.folder().is_some_and(|folder| folder.starts_with(mount_point))
         {
             self.navigate_to(self.home_dir.clone(), true, cx);
         }
@@ -362,9 +368,11 @@ impl Marcel {
     fn render_volume(&self, index: usize, volume: Volume, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
         let store = self.volumes.read(cx);
-        let active = !self.sidebar.browsing_trash
-            && store.volume_containing(&self.directory.current_dir).map(|v| &v.device)
-                == Some(&volume.device);
+        let active = self
+            .directory
+            .folder()
+            .and_then(|folder| store.volume_containing(folder))
+            .is_some_and(|v| v.device == volume.device);
         let busy = store.is_busy(&volume);
         let icon = sidebar_icon(store.icon(&volume).map(Path::to_path_buf), colors.primary);
         let mount_point = volume.mount_point.clone();
@@ -528,16 +536,13 @@ impl Marcel {
         let muted = |text: &'static str| {
             div().px_3().py_1().text_xs().text_color(colors.muted_foreground).child(text)
         };
-        // A picker chooses from the filesystem; the Trash is where things
-        // are not. Hiding the place is simpler than refusing at confirm.
-        let is_picker = self.picker.is_some();
         let places = self
             .sidebar
             .places
             .clone()
             .into_iter()
             .enumerate()
-            .filter(|(_, place)| !is_picker || !place.is_trash())
+            .filter(|(_, place)| self.can_visit(&place.target))
             .map(|(index, place)| self.render_place(index, place, cx))
             .collect::<Vec<_>>();
         let (bookmarks, bookmarks_loading) = {

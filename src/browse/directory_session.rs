@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::browse::entries::{FileEntry, SortOrder, merge_sorted_entries, sort_entries};
+use crate::browse::location::Location;
 use crate::browse::remoteness::{self, Locality};
 use crate::browse::selection::SelectionModel;
 
@@ -57,7 +58,7 @@ pub enum RescanDecision {
 
 /// How the listing on screen relates to the last rescan of it.
 struct RescanBackoff {
-    directory: PathBuf,
+    location: Location,
     started: Instant,
 }
 
@@ -83,7 +84,9 @@ struct EntryIndex {
 }
 
 pub struct DirectorySession {
-    pub(crate) current_dir: PathBuf,
+    /// Where the window is. Everything that needs a directory asks
+    /// `location.as_folder()`, which the Trash answers with `None`.
+    pub(crate) location: Location,
     pub(crate) entries: Vec<FileEntry>,
     pub(crate) visible_entries: Vec<usize>,
     pub(crate) filter_query: String,
@@ -145,7 +148,7 @@ impl DirectorySession {
     pub fn new(current_dir: PathBuf) -> Self {
         Self {
             locality: remoteness::of(&current_dir),
-            current_dir,
+            location: Location::Folder(current_dir),
             entries: Vec::new(),
             visible_entries: Vec::new(),
             filter_query: String::new(),
@@ -173,15 +176,20 @@ impl DirectorySession {
         }
     }
 
-    /// Point the session at `directory`, deciding once whether it is a
+    /// Point the session at `location`, deciding once whether it is a
     /// network away.
     ///
     /// Classifying here rather than per file is the point: a grid of 500
     /// entries asks the question 500 times, and the answer is a property of
     /// the folder, not of anything in it.
-    pub fn set_directory(&mut self, directory: PathBuf) {
-        self.locality = remoteness::of(&directory);
-        self.current_dir = directory;
+    pub fn set_location(&mut self, location: Location) {
+        self.locality = location.as_folder().map_or(Locality::Local, remoteness::of);
+        self.location = location;
+    }
+
+    /// The folder shown, or `None` in the Trash.
+    pub fn folder(&self) -> Option<&Path> {
+        self.location.as_folder()
     }
 
     /// Replace the content filter and re-project the listing under it.
@@ -291,12 +299,7 @@ impl DirectorySession {
         ApplyDirectoryEvents::Applied(reconcile)
     }
 
-    pub fn begin_load(&mut self, kind: LoadKind) -> (u64, PathBuf) {
-        let generation = self.begin_virtual_load(kind);
-        (generation, self.current_dir.clone())
-    }
-
-    pub fn begin_virtual_load(&mut self, kind: LoadKind) -> u64 {
+    pub fn begin_load(&mut self, kind: LoadKind) -> u64 {
         self.cancel_background_work();
         self.generation = self.generation.wrapping_add(1);
         self.pending_refresh.clear();
@@ -360,7 +363,7 @@ impl DirectorySession {
         let since_last = self
             .last_rescan
             .as_ref()
-            .filter(|last| last.directory == self.current_dir)
+            .filter(|last| last.location == self.location)
             .map(|last| now.saturating_duration_since(last.started));
         if let Some(since_last) = since_last
             && since_last < RESCAN_BACKOFF
@@ -379,8 +382,7 @@ impl DirectorySession {
     }
 
     fn note_rescan(&mut self, now: Instant) {
-        self.last_rescan =
-            Some(RescanBackoff { directory: self.current_dir.clone(), started: now });
+        self.last_rescan = Some(RescanBackoff { location: self.location.clone(), started: now });
     }
 
     /// Fold a streamed batch into the listing.
@@ -976,7 +978,7 @@ mod tests {
         session.apply_events(vec![DirectoryEvent::Changed(file("b.txt"))]);
         assert!(session.entry(&path("b.txt")).is_some());
 
-        session.begin_virtual_load(LoadKind::Navigate);
+        session.begin_load(LoadKind::Navigate);
         assert!(session.entry(&path("b.txt")).is_none());
     }
 
@@ -1046,7 +1048,7 @@ mod tests {
 
         session.defer_refresh([path("stale.txt")]);
         session.defer_rescan();
-        session.begin_virtual_load(LoadKind::Navigate);
+        session.begin_load(LoadKind::Navigate);
         assert!(!session.take_pending_rescan());
         assert!(session.take_pending_refresh().is_empty());
     }
@@ -1201,7 +1203,7 @@ mod tests {
         assert_eq!(session.schedule_rescan(start), RescanDecision::Now);
         assert!(matches!(session.schedule_rescan(start), RescanDecision::After(_)));
 
-        session.current_dir = PathBuf::from("/elsewhere");
+        session.set_location(Location::Folder(PathBuf::from("/elsewhere")));
         session.begin_load(LoadKind::Navigate);
         assert_eq!(session.schedule_rescan(start), RescanDecision::Now);
     }

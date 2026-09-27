@@ -66,7 +66,7 @@ impl Marcel {
 
     /// Leave a share before it goes away, as with a drive.
     fn leave_mount(&mut self, mount: &Mount, cx: &mut Context<Self>) {
-        if mount.contains(&self.directory.current_dir) {
+        if self.directory.folder().is_some_and(|folder| mount.contains(folder)) {
             self.navigate_to(self.home_dir.clone(), true, cx);
         }
     }
@@ -206,7 +206,8 @@ impl Marcel {
             .filter_map(|(index, server)| {
                 let directory =
                     store.mount_for(&server.location.spec)?.directory_for(&server.location.path)?;
-                self.directory.current_dir.starts_with(&directory).then_some((index, directory))
+                let here = self.directory.folder()?;
+                here.starts_with(&directory).then_some((index, directory))
             })
             .max_by_key(|(_, directory)| directory.as_os_str().len())
             .map(|(index, _)| index)
@@ -354,7 +355,10 @@ impl Marcel {
         let colors = cx.theme().colors;
         let active_server = self.active_server(cx);
         let inside_unsaved = if active_server.is_none() {
-            self.network.read(cx).mount_containing(&self.directory.current_dir).cloned()
+            self.directory
+                .folder()
+                .and_then(|folder| self.network.read(cx).mount_containing(folder))
+                .cloned()
         } else {
             None
         };

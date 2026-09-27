@@ -5,8 +5,9 @@
 //! added to the browser appears in pickers without any code here. The other
 //! `self.picker` checks live in `edits::open_entry` (a file is an answer,
 //! not something to launch), `menu::activate_entry` (a click proposes a
-//! name), `actions` (Escape dismisses the dialog), and `sidebar` (no Trash
-//! place). Keep it that way so the list stays greppable.
+//! name), `actions` (Escape dismisses the dialog); the Trash is refused here, in
+//! `can_visit`, which the sidebar and navigation both ask. Keep it that way
+//! so the list stays greppable.
 
 use std::{
     path::{Path, PathBuf},
@@ -25,7 +26,7 @@ use gpui_component::{
 };
 
 use crate::{
-    browse::{directory_session::ContentFilter, entries::FileEntry},
+    browse::{directory_session::ContentFilter, entries::FileEntry, location::Location},
     desktop::picker::{PickerMode, PickerRequest, PickerResponse},
     fsops::validate_entry_name,
     names::{display_path_name, select_stem},
@@ -34,6 +35,13 @@ use crate::{
 use super::{Marcel, dialogs::Confirm, navigation::unblock, state::PickerState};
 
 impl Marcel {
+    /// Whether this window may go to `location`. A picker chooses from the
+    /// filesystem, and the Trash is where things are not, so a picker never
+    /// shows it and never goes there.
+    pub(super) fn can_visit(&self, location: &Location) -> bool {
+        self.picker.is_none() || !location.is_trash()
+    }
+
     /// A window that answers a file-chooser request.
     pub(crate) fn new_picker(
         request: PickerRequest,
@@ -150,19 +158,16 @@ impl Marcel {
         if picker.confirming {
             return;
         }
-        if self.sidebar.browsing_trash {
-            window.push_notification(
-                Notification::info("Restore the item first; the Trash cannot be chosen from"),
-                cx,
-            );
-            return;
-        }
         let mode = picker.mode.clone();
         let filter = picker.active_filter;
         let name_input = picker.name_input.clone();
         let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
             self.selected_paths().into_iter().partition(|path| self.is_navigable_entry(path));
-        let here = self.directory.current_dir.clone();
+        // A picker never reaches the Trash (`can_visit`), so there is always
+        // a folder here.
+        let Some(here) = self.directory.folder().map(Path::to_path_buf) else {
+            return;
+        };
 
         match mode {
             PickerMode::OpenFiles => {

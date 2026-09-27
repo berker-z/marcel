@@ -1,3 +1,4 @@
+use crate::browse::location::{Location, TrashScope};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -15,34 +16,24 @@ const USER_DIRS: [(&str, &str, &str); 8] = [
     ("VIDEOS", "Videos", "Videos"),
 ];
 
+/// One row of the Places section: a name and where it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
     pub label: String,
-    pub path: PathBuf,
-    pub kind: PlaceKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaceKind {
-    Filesystem,
-    Trash,
+    pub target: Location,
 }
 
 impl Place {
+    pub fn folder(label: impl Into<String>, path: PathBuf) -> Self {
+        Self { label: label.into(), target: Location::Folder(path) }
+    }
+
     pub fn home(path: PathBuf) -> Self {
-        Self { label: "Home".to_string(), path, kind: PlaceKind::Filesystem }
+        Self::folder("Home", path)
     }
 
     pub fn trash() -> Self {
-        Self {
-            label: "Trash".to_string(),
-            path: PathBuf::from("trash:///"),
-            kind: PlaceKind::Trash,
-        }
-    }
-
-    pub fn is_trash(&self) -> bool {
-        self.kind == PlaceKind::Trash
+        Self { label: "Trash".to_string(), target: Location::Trash(TrashScope::Home) }
     }
 }
 
@@ -72,7 +63,7 @@ fn build_places(home: &Path, config: Option<&str>, is_dir: impl Fn(&Path) -> boo
         };
 
         if is_dir(&path) && seen.insert(path.clone()) {
-            places.push(Place { label: label.to_string(), path, kind: PlaceKind::Filesystem });
+            places.push(Place::folder(label, path));
         }
     }
 
@@ -142,16 +133,8 @@ mod tests {
             places,
             vec![
                 Place::home(home.to_path_buf()),
-                Place {
-                    label: "Documents".to_string(),
-                    path: home.join("Documents"),
-                    kind: PlaceKind::Filesystem,
-                },
-                Place {
-                    label: "Pictures".to_string(),
-                    path: home.join("Pictures"),
-                    kind: PlaceKind::Filesystem,
-                },
+                Place::folder("Documents", home.join("Documents")),
+                Place::folder("Pictures", home.join("Pictures")),
                 Place::trash(),
             ]
         );
@@ -172,21 +155,9 @@ mod tests {
             places,
             vec![
                 Place::home(home.to_path_buf()),
-                Place {
-                    label: "Documents".to_string(),
-                    path: home.join("Work Notes"),
-                    kind: PlaceKind::Filesystem,
-                },
-                Place {
-                    label: "Downloads".to_string(),
-                    path: PathBuf::from("/data/downloads"),
-                    kind: PlaceKind::Filesystem,
-                },
-                Place {
-                    label: "Pictures".to_string(),
-                    path: home.join("Photos"),
-                    kind: PlaceKind::Filesystem,
-                },
+                Place::folder("Documents", home.join("Work Notes")),
+                Place::folder("Downloads", PathBuf::from("/data/downloads")),
+                Place::folder("Pictures", home.join("Photos")),
                 Place::trash(),
             ]
         );

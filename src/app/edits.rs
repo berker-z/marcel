@@ -76,7 +76,9 @@ impl Marcel {
         let Some(clipboard) = self.operations.read(cx).clipboard() else {
             return;
         };
-        let destination = self.directory.current_dir.clone();
+        let Some(destination) = self.directory.folder().map(Path::to_path_buf) else {
+            return;
+        };
         self.start_transfer(
             clipboard.paths.clone(),
             destination,
@@ -192,7 +194,8 @@ impl Marcel {
         if paths.is_empty() {
             return;
         }
-        let trash_records = self.sidebar.browsing_trash.then(|| self.selected_trash_records());
+        let trash_records =
+            self.directory.location.is_trash().then(|| self.selected_trash_records());
         if trash_records.as_ref().is_some_and(Vec::is_empty) {
             return;
         }
@@ -393,7 +396,9 @@ impl Marcel {
             NameDialog { title: "New Folder", input, action: "Create" },
             |_| Ok(()),
             |this, name, window, cx| {
-                let parent = this.directory.current_dir.clone();
+                let Some(parent) = this.directory.folder().map(Path::to_path_buf) else {
+                    return;
+                };
                 this.with_operations(window, cx, |ops, origin, cx| {
                     ops.start_create_directory(parent, name, origin, cx);
                 });
@@ -409,7 +414,9 @@ impl Marcel {
             NameDialog { title: "New File", input, action: "Create" },
             |_| Ok(()),
             |this, name, window, cx| {
-                let parent = this.directory.current_dir.clone();
+                let Some(parent) = this.directory.folder().map(Path::to_path_buf) else {
+                    return;
+                };
                 this.with_operations(window, cx, |ops, origin, cx| {
                     ops.start_create_file(parent, name, origin, cx);
                 });
@@ -428,7 +435,9 @@ impl Marcel {
             return;
         }
         self.ui.entry_menu = None;
-        let destination = self.directory.current_dir.clone();
+        let Some(destination) = self.directory.folder().map(Path::to_path_buf) else {
+            return;
+        };
         self.with_operations(window, cx, |ops, origin, cx| {
             ops.start_duplicate(sources, destination, origin, cx);
         });
@@ -445,7 +454,9 @@ impl Marcel {
             return;
         }
         self.ui.entry_menu = None;
-        let current = self.directory.current_dir.clone();
+        let Some(current) = self.directory.folder().map(Path::to_path_buf) else {
+            return;
+        };
         let home = self.home_dir.clone();
         let state = MoveTo::new(current.clone(), self.directory.show_hidden, window, cx);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
@@ -656,7 +667,10 @@ impl Marcel {
             },
             move |this, name, window, cx| {
                 let sources = sources.clone();
-                let destination = this.directory.current_dir.join(name);
+                let Some(destination) = this.directory.folder().map(|folder| folder.join(name))
+                else {
+                    return;
+                };
                 this.with_operations(window, cx, |ops, origin, cx| {
                     ops.start_compress(sources, destination, origin, cx);
                 });
@@ -705,7 +719,11 @@ impl Marcel {
                     // The click that came first already proposed the name; an
                     // activation from elsewhere (the folder preview) is about
                     // a file the name field cannot describe.
-                    if entry.path.parent() == Some(self.directory.current_dir.as_path()) {
+                    if entry
+                        .path
+                        .parent()
+                        .is_some_and(|parent| self.directory.folder() == Some(parent))
+                    {
                         self.confirm_picker(window, cx);
                     }
                 }
@@ -755,7 +773,9 @@ impl Marcel {
     }
 
     pub(super) fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let directory = self.directory.current_dir.clone();
+        let Some(directory) = self.directory.folder().map(Path::to_path_buf) else {
+            return;
+        };
         let task = unblock(cx, move || crate::desktop::terminal::open_terminal(&directory));
         cx.spawn_in(window, async move |this, window| {
             if let Err(error) = task.await {
@@ -785,17 +805,15 @@ impl Marcel {
 }
 
 /// The Places and Bookmarks a Move To dialog offers as one-click shortcuts:
-/// every place that is a folder, then every bookmark, without repeats.
-///
-/// The Trash is a place but not a folder. Its path is the `trash:///`
-/// sentinel, which a move would treat as a directory relative to the current
-/// one and fail on, item by item.
+/// every place that is a folder, then every bookmark, without repeats. The
+/// Trash is a place but not a folder, so it is not one.
 fn move_to_shortcuts(places: &[Place], bookmarks: &[Bookmark]) -> Vec<(String, PathBuf)> {
     let mut seen = HashSet::new();
     places
         .iter()
-        .filter(|place| !place.is_trash())
-        .map(|place| (place.label.clone(), place.path.clone()))
+        .filter_map(|place| {
+            place.target.as_folder().map(|path| (place.label.clone(), path.to_path_buf()))
+        })
         .chain(bookmarks.iter().map(|bookmark| (bookmark.label(), bookmark.path.clone())))
         .filter(|(_, path)| seen.insert(path.clone()))
         .collect()
@@ -967,20 +985,15 @@ mod tests {
         shortcuts.iter().map(|(label, _)| label.as_str()).collect()
     }
 
-    /// The Trash is somewhere things go, not somewhere they can be moved to:
-    /// its sentinel path is not a directory. A bookmark that repeats a place
-    /// is one chip, not two.
+    /// The Trash is somewhere things go, not somewhere they can be moved to.
+    /// A bookmark that repeats a place is one chip, not two.
     #[test]
     fn move_to_shortcuts_skip_the_trash_and_repeats() {
         let home = PathBuf::from("/home/me");
         let places = [
             Place::home(home.clone()),
             Place::trash(),
-            Place {
-                label: "Downloads".to_string(),
-                path: home.join("Downloads"),
-                kind: crate::desktop::places::PlaceKind::Filesystem,
-            },
+            Place::folder("Downloads", home.join("Downloads")),
         ];
         let bookmarks =
             [Bookmark { path: home.join("Downloads") }, Bookmark { path: home.join("Projects") }];

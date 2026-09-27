@@ -15,7 +15,10 @@ use gpui_component::{
     notification::Notification,
 };
 
-use crate::desktop::launch::{LocationTarget, resolve_location};
+use crate::{
+    browse::location::Location,
+    desktop::launch::{LocationTarget, resolve_location},
+};
 
 use super::{Marcel, navigation::unblock};
 
@@ -185,10 +188,11 @@ impl Marcel {
                 .into_any_element();
         }
 
-        let crumbs = if self.sidebar.browsing_trash {
-            vec![Breadcrumb { label: "Trash".to_string(), path: None }]
-        } else {
-            compact(self.mounted_breadcrumbs(cx), max_breadcrumbs)
+        let crumbs = match &self.directory.location {
+            Location::Folder(folder) => {
+                compact(self.mounted_breadcrumbs(folder, cx), max_breadcrumbs)
+            }
+            trash @ Location::Trash(_) => vec![Breadcrumb { label: trash.label(), path: None }],
         };
         let (go_to, edit) = (cx.weak_entity(), cx.weak_entity());
         crumb_bar(
@@ -210,8 +214,7 @@ impl Marcel {
     /// The crumbs for the current directory, starting at the drive or share
     /// it is on when it is on one: "wired / home / me" rather than the eight
     /// segments of the FUSE path, which is a place nobody chose.
-    fn mounted_breadcrumbs(&self, cx: &Context<Self>) -> Vec<Breadcrumb> {
-        let current = &self.directory.current_dir;
+    fn mounted_breadcrumbs(&self, current: &Path, cx: &Context<Self>) -> Vec<Breadcrumb> {
         let root = self
             .network
             .read(cx)
@@ -258,11 +261,8 @@ impl Marcel {
 
     pub(super) fn begin_location_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ui.location.begin();
-        let value = if self.sidebar.browsing_trash {
-            String::new()
-        } else {
-            self.directory.current_dir.display().to_string()
-        };
+        let value =
+            self.directory.folder().map(|folder| folder.display().to_string()).unwrap_or_default();
         let input = self.ui.location_input.clone();
         input.update(cx, |input, cx| input.set_value(value, window, cx));
         cx.notify();
@@ -311,7 +311,10 @@ impl Marcel {
             cx.notify();
             return;
         }
-        let current_dir = self.directory.current_dir.clone();
+        // A relative path typed in the Trash is taken from Home, since the
+        // Trash is not a folder anything is relative to.
+        let current_dir =
+            self.directory.folder().map_or_else(|| self.home_dir.clone(), Path::to_path_buf);
         let home_dir = self.home_dir.clone();
         let ticket = self.ui.location.bump();
         self.ui.location.resolving = true;

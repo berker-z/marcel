@@ -281,10 +281,9 @@ pub struct BookmarkMenu {
 
 pub struct SidebarState {
     pub places: Vec<Place>,
-    pub place_icons: HashMap<PathBuf, PathBuf>,
+    pub place_icons: HashMap<crate::browse::location::Location, PathBuf>,
     pub places_loading: bool,
     pub places_task: Option<Task<()>>,
-    pub browsing_trash: bool,
     pub trash_records: HashMap<PathBuf, TrashRecord>,
     /// How many Trash entries the last listing could not describe. Empty Trash
     /// must not offer to empty a Trash it has only partly seen.
@@ -306,7 +305,6 @@ impl SidebarState {
             place_icons: HashMap::new(),
             places_loading: true,
             places_task: None,
-            browsing_trash: false,
             trash_records: HashMap::new(),
             unreadable_trash_entries: 0,
             bookmark_insertion: None,
