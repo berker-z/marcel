@@ -92,8 +92,11 @@ fn in_table(path: &Path, table: &str) -> Locality {
         }
         // The deepest mount point that still contains the path is the one
         // serving it; a share under a local directory must not read as local.
+        // Of two mounts on the same point the later one is on top, as the
+        // kernel lists them in order: an automounted share is an `autofs`
+        // line followed by the `nfs4` or `cifs` one that actually serves it.
         let depth = mount_point.len();
-        if best.is_none_or(|(deepest, _)| depth > deepest) {
+        if best.is_none_or(|(deepest, _)| depth >= deepest) {
             best = Some((depth, classify(filesystem)));
         }
     }
@@ -166,6 +169,18 @@ mod tests {
         // thumbnailed and walked as if it were local.
         assert_eq!(locality("/home/me/work/report.pdf"), Locality::Remote);
         assert_eq!(locality("/home/me/notes.md"), Locality::Local);
+    }
+
+    /// `x-systemd.automount` leaves an `autofs` mount on the point and puts
+    /// the real one on top of it once something looks inside.
+    #[test]
+    fn an_automounted_share_reads_as_the_share_on_top_not_the_autofs_below() {
+        let table = "\
+28 1 254:2 / / rw,relatime shared:1 - ext4 /dev/root rw
+610 28 0:101 / /mnt/nas rw,relatime shared:600 - autofs systemd-1 rw,fd=45
+615 610 0:102 / /mnt/nas rw,relatime shared:605 - nfs4 nas:/export rw
+";
+        assert_eq!(in_table(&PathBuf::from("/mnt/nas/photos"), table), Locality::Remote);
     }
 
     #[test]
