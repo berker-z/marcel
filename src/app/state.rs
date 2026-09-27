@@ -270,6 +270,14 @@ pub struct NetworkMenu {
     pub position: Point<Pixels>,
 }
 
+/// A context menu open on a sidebar row.
+#[derive(Clone)]
+pub enum SidebarMenu {
+    Bookmark(BookmarkMenu),
+    Volume(VolumeMenu),
+    Network(NetworkMenu),
+}
+
 #[derive(Clone)]
 pub struct BookmarkMenu {
     pub index: usize,
@@ -294,9 +302,9 @@ pub struct SidebarState {
     pub trash_read_only: bool,
     /// The slot a dragged bookmark would land in, while one is over the list.
     pub bookmark_insertion: Option<usize>,
-    pub bookmark_menu: Option<BookmarkMenu>,
-    pub volume_menu: Option<VolumeMenu>,
-    pub network_menu: Option<NetworkMenu>,
+    /// The one context menu the sidebar has open, if any. One field rather
+    /// than one per kind, so opening a menu closes whichever was open.
+    pub menu: Option<SidebarMenu>,
     pub bookmark_region_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub bookmark_row_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     pub place_drop_bounds: Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>,
@@ -313,9 +321,7 @@ impl SidebarState {
             unreadable_trash_entries: 0,
             trash_read_only: false,
             bookmark_insertion: None,
-            bookmark_menu: None,
-            volume_menu: None,
-            network_menu: None,
+            menu: None,
             bookmark_region_bounds: Rc::new(Cell::new(None)),
             bookmark_row_bounds: Rc::new(RefCell::new(HashMap::new())),
             place_drop_bounds: Rc::new(RefCell::new(HashMap::new())),

@@ -73,9 +73,7 @@ impl Marcel {
     fn begin_listing(&mut self, kind: LoadKind, cx: &mut Context<Self>) {
         self.ui.rename = None;
         self.ui.entry_menu = None;
-        self.sidebar.bookmark_menu = None;
-        self.sidebar.volume_menu = None;
-        self.sidebar.network_menu = None;
+        self.sidebar.menu = None;
         self.drag.entry_content_bounds.borrow_mut().clear();
         if kind == LoadKind::Navigate {
             self.preview.reset_thumbnails();

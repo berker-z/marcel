@@ -299,6 +299,21 @@ impl NetworkStore {
         self.mounts.iter().find(|mount| spec.is_served_by(&mount.spec))
     }
 
+    /// Every connected share as a folder to go to, labelled as the sidebar
+    /// labels it: a saved server at the folder it was saved at, then the
+    /// shares connected some other way at their roots.
+    pub fn connected(&self) -> Vec<(String, PathBuf)> {
+        let saved = self.servers.iter().filter_map(|server| {
+            let mount = self.mount_serving(&server.address.spec)?;
+            Some((server.label(), mount.directory_for(&server.address.path)?))
+        });
+        let unsaved = self
+            .unsaved_mounts()
+            .into_iter()
+            .filter_map(|mount| Some((mount.name.clone(), mount.directory_for("")?)));
+        saved.chain(unsaved).collect()
+    }
+
     /// Mounts no saved server accounts for: connected by hand, or by
     /// another application.
     pub fn unsaved_mounts(&self) -> Vec<Mount> {

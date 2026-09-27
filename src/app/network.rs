@@ -26,7 +26,7 @@ use super::{
     menu::{clamp_to_window, menu_row, popover},
     pointer::painted_bounds,
     sidebar::{BOOKMARK_MENU_HEIGHT, BOOKMARK_MENU_WIDTH, sidebar_icon},
-    state::{NetworkMenu, NetworkTarget},
+    state::{NetworkMenu, NetworkTarget, SidebarMenu},
 };
 
 /// One row of the section, saved server or bare mount alike.
@@ -129,7 +129,7 @@ impl Marcel {
     }
 
     fn save_mount(&mut self, mount: &Mount, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar.network_menu = None;
+        self.sidebar.menu = None;
         let address = mount.address();
         let origin = Self::origin(window);
         let added = self
@@ -152,7 +152,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar.network_menu = None;
+        self.sidebar.menu = None;
         let origin = Self::origin(window);
         let removed = self
             .network
@@ -174,7 +174,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar.network_menu = None;
+        self.sidebar.menu = None;
         let input = cx.new(|cx| InputState::new(window, cx).default_value(server.label()));
         let address = server.address.clone();
         self.ask_name(
@@ -219,10 +219,10 @@ impl Marcel {
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 this.ui.entry_menu = None;
-                this.sidebar.bookmark_menu = None;
-                this.sidebar.volume_menu = None;
-                this.sidebar.network_menu =
-                    Some(NetworkMenu { target: target.clone(), position: event.position });
+                this.sidebar.menu = Some(SidebarMenu::Network(NetworkMenu {
+                    target: target.clone(),
+                    position: event.position,
+                }));
                 cx.notify();
             }),
         )
@@ -401,7 +401,9 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let menu = self.sidebar.network_menu.clone()?;
+        let Some(SidebarMenu::Network(menu)) = self.sidebar.menu.clone() else {
+            return None;
+        };
         let store = self.network.read(cx);
         // The menu names a server or a mount, not a slot: if the list moved
         // on since it opened, it no longer describes what a click would act
@@ -431,14 +433,14 @@ impl Marcel {
         Some(
             popover("network-context-menu", left, top, BOOKMARK_MENU_WIDTH, cx)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.sidebar.network_menu = None;
+                    this.sidebar.menu = None;
                     cx.notify();
                 }))
                 .when_some(disconnect, |this, mount| {
                     this.child(
                         menu_row(("network-menu-disconnect", 0), "Disconnect", true, cx).on_click(
                             cx.listener(move |this, _, window, cx| {
-                                this.sidebar.network_menu = None;
+                                this.sidebar.menu = None;
                                 this.disconnect_mount(mount.clone(), window, cx);
                             }),
                         ),

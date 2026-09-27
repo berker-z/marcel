@@ -27,7 +27,7 @@ use super::{
     menu::{clamp_to_window, menu_row, popover},
     navigation::unblock,
     pointer::{BookmarkDrag, FileDrag, accept_file_drops, painted_bounds},
-    state::{BookmarkMenu, VolumeMenu},
+    state::{BookmarkMenu, SidebarMenu, VolumeMenu},
 };
 
 /// Wide enough for the six buttons of the top bar's navigation cluster,
@@ -139,7 +139,7 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar.bookmark_menu = None;
+        self.sidebar.menu = None;
         let origin = Self::origin(window);
         let removed = self
             .bookmarks
@@ -159,7 +159,9 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let menu = self.sidebar.bookmark_menu.clone()?;
+        let Some(SidebarMenu::Bookmark(menu)) = self.sidebar.menu.clone() else {
+            return None;
+        };
         // The menu names a bookmark, not a slot: if another window changed the
         // list since it opened, the menu no longer describes what a click
         // would act on, so it goes away instead.
@@ -174,7 +176,7 @@ impl Marcel {
         Some(
             popover("bookmark-context-menu", left, top, BOOKMARK_MENU_WIDTH, cx)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.sidebar.bookmark_menu = None;
+                    this.sidebar.menu = None;
                     cx.notify();
                 }))
                 .child(menu_row(("bookmark-menu-remove", 0), "Remove Bookmark", true, cx).on_click(
@@ -295,13 +297,11 @@ impl Marcel {
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             this.ui.entry_menu = None;
-                            this.sidebar.volume_menu = None;
-                            this.sidebar.network_menu = None;
-                            this.sidebar.bookmark_menu = Some(BookmarkMenu {
+                            this.sidebar.menu = Some(SidebarMenu::Bookmark(BookmarkMenu {
                                 index,
                                 path: menu_path.clone(),
                                 position: event.position,
-                            });
+                            }));
                             cx.notify();
                         }),
                     )
@@ -390,10 +390,10 @@ impl Marcel {
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 this.ui.entry_menu = None;
-                this.sidebar.bookmark_menu = None;
-                this.sidebar.network_menu = None;
-                this.sidebar.volume_menu =
-                    Some(VolumeMenu { device: device.clone(), position: event.position });
+                this.sidebar.menu = Some(SidebarMenu::Volume(VolumeMenu {
+                    device: device.clone(),
+                    position: event.position,
+                }));
                 cx.notify();
             }),
         )
@@ -445,7 +445,9 @@ impl Marcel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let menu = self.sidebar.volume_menu.clone()?;
+        let Some(SidebarMenu::Volume(menu)) = self.sidebar.menu.clone() else {
+            return None;
+        };
         // UDisks2 re-reads the list on every change, so the menu names a
         // device and looks it up again rather than trusting an index.
         let volume =
@@ -470,13 +472,13 @@ impl Marcel {
         Some(
             popover("volume-context-menu", left, top, BOOKMARK_MENU_WIDTH, cx)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.sidebar.volume_menu = None;
+                    this.sidebar.menu = None;
                     cx.notify();
                 }))
                 .when_some(trash, |this, trash| {
                     this.child(menu_row(("volume-menu-trash", 2), "Open Trash", true, cx).on_click(
                         cx.listener(move |this, _, _, cx| {
-                            this.sidebar.volume_menu = None;
+                            this.sidebar.menu = None;
                             this.navigate(trash.clone(), Vec::new(), true, cx);
                         }),
                     ))
@@ -484,7 +486,7 @@ impl Marcel {
                 .when(volume.is_mounted(), |this| {
                     this.child(menu_row(("volume-menu-unmount", 0), "Unmount", true, cx).on_click(
                         cx.listener(move |this, _, window, cx| {
-                            this.sidebar.volume_menu = None;
+                            this.sidebar.menu = None;
                             this.unmount_volume(unmount.clone(), window, cx);
                         }),
                     ))
@@ -492,7 +494,7 @@ impl Marcel {
                 .when(volume.can_eject(), |this| {
                     this.child(menu_row(("volume-menu-eject", 1), "Eject", true, cx).on_click(
                         cx.listener(move |this, _, window, cx| {
-                            this.sidebar.volume_menu = None;
+                            this.sidebar.menu = None;
                             this.eject_volume(eject.clone(), window, cx);
                         }),
                     ))

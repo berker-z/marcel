@@ -460,8 +460,19 @@ impl Marcel {
         let home = self.home_dir.clone();
         let state = MoveTo::new(current.clone(), self.directory.show_hidden, window, cx);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
-        let shortcuts =
-            Rc::new(move_to_shortcuts(&self.sidebar.places, self.bookmarks.read(cx).bookmarks()));
+        let mounts = self
+            .volumes
+            .read(cx)
+            .volumes()
+            .iter()
+            .filter_map(|volume| Some((volume.name.clone(), volume.mount_point.clone()?)))
+            .chain(self.network.read(cx).connected())
+            .collect();
+        let shortcuts = Rc::new(move_to_shortcuts(
+            &self.sidebar.places,
+            self.bookmarks.read(cx).bookmarks(),
+            mounts,
+        ));
 
         // Typing a path: Enter resolves it into the crumbs, leaving the field
         // cancels. The subscription lives as long as the dialog's closure.
@@ -804,10 +815,15 @@ impl Marcel {
     }
 }
 
-/// The Places and Bookmarks a Move To dialog offers as one-click shortcuts:
-/// every place that is a folder, then every bookmark, without repeats. The
-/// Trash is a place but not a folder, so it is not one.
-fn move_to_shortcuts(places: &[Place], bookmarks: &[Bookmark]) -> Vec<(String, PathBuf)> {
+/// The one-click shortcuts a Move To dialog offers: every place that is a
+/// folder, every bookmark, then every mounted drive and connected share,
+/// without repeats. The Trash is a place but not a folder, so it is not one.
+/// A drive is what a move across filesystems is usually for.
+fn move_to_shortcuts(
+    places: &[Place],
+    bookmarks: &[Bookmark],
+    mounts: Vec<(String, PathBuf)>,
+) -> Vec<(String, PathBuf)> {
     let mut seen = HashSet::new();
     places
         .iter()
@@ -815,6 +831,7 @@ fn move_to_shortcuts(places: &[Place], bookmarks: &[Bookmark]) -> Vec<(String, P
             place.target.as_folder().map(|path| (place.label.clone(), path.to_path_buf()))
         })
         .chain(bookmarks.iter().map(|bookmark| (bookmark.label(), bookmark.path.clone())))
+        .chain(mounts)
         .filter(|(_, path)| seen.insert(path.clone()))
         .collect()
 }
@@ -998,9 +1015,10 @@ mod tests {
         let bookmarks =
             [Bookmark { path: home.join("Downloads") }, Bookmark { path: home.join("Projects") }];
 
-        let shortcuts = move_to_shortcuts(&places, &bookmarks);
+        let stick = (String::from("STICK"), PathBuf::from("/run/media/me/STICK"));
+        let shortcuts = move_to_shortcuts(&places, &bookmarks, vec![stick]);
 
-        assert_eq!(labels(&shortcuts), ["Home", "Downloads", "Projects"]);
+        assert_eq!(labels(&shortcuts), ["Home", "Downloads", "Projects", "STICK"]);
         assert!(shortcuts.iter().all(|(_, path)| path.is_absolute()));
     }
 
