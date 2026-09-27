@@ -2209,6 +2209,254 @@ fn cancelling_after_the_copy_keeps_both_copies_and_says_so() {
     assert!(destination.join("empty").is_dir());
 }
 
+/// A file rewritten in place, same size, while the copy was under way: the
+/// copy is of the old bytes, so the source is kept and the copy withdrawn.
+#[test]
+fn a_source_rewritten_during_a_move_is_kept_and_the_copy_withdrawn() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let notes = source.join("notes.txt");
+    let destination = sandbox.dir("stick");
+    let rewritten = notes.clone();
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |path| {
+        if path == rewritten {
+            // Same length, new bytes, same inode: what a database does.
+            let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+            file.write_all(b"NOTES").unwrap();
+        }
+    });
+    fault::cross_devices_once("project");
+
+    let outcome = mv(std::slice::from_ref(&source), &destination);
+    assert!(outcome.completed.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    let message = &outcome.failures[0].message;
+    assert!(message.contains("changed while it was copied"), "{message}");
+    assert!(message.contains("the copy was removed"), "{message}");
+    assert_eq!(read(&notes), b"NOTES", "the newest bytes are still at the source");
+    assert!(!destination.join("project").exists());
+    assert!(outcome.kept_copies.is_empty());
+}
+
+/// On FAT a link to a folder has nowhere to go. A copy drops it with a note;
+/// a move would delete the only place it exists, so it does not happen.
+#[test]
+fn a_move_to_fat_keeps_a_tree_whose_folder_links_it_cannot_carry() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    std::os::unix::fs::symlink("deep", source.join("shortcut")).unwrap();
+    let destination = sandbox.dir("stick");
+    let _fat = super::copy::fault::destination_refuses_metadata_do();
+    fault::cross_devices_once("project");
+
+    let outcome = mv(std::slice::from_ref(&source), &destination);
+    assert!(outcome.completed.is_empty(), "{outcome:?}");
+    let message = &outcome.failures[0].message;
+    assert!(message.contains("symbolic links to folders"), "{message}");
+    assert!(fs::symlink_metadata(source.join("shortcut")).unwrap().is_symlink());
+    assert_sample_tree(&source);
+    assert!(!destination.join("project").exists());
+}
+
+#[test]
+fn hardlinks_copied_to_fat_arrive_as_separate_files_with_a_note() {
+    let sandbox = Sandbox::new();
+    let first = sandbox.file("source/first.txt", b"shared bytes");
+    fs::hard_link(&first, sandbox.path("source/second.txt")).unwrap();
+    let destination = sandbox.dir("stick");
+    let _fat = super::copy::fault::destination_refuses_metadata_do();
+
+    let outcome = copy(&[sandbox.path("source")], &destination);
+    assert_clean(&outcome);
+    assert_eq!(read(destination.join("source/first.txt")), b"shared bytes");
+    assert_eq!(read(destination.join("source/second.txt")), b"shared bytes");
+    let note = outcome.describe_losses().expect("the report says what was dropped");
+    assert!(note.contains("hard links were stored as separate copies"), "{note}");
+}
+
+/// The copy is published and checked, and then the source cannot be removed.
+/// Both trees are whole; the second one is reported so the view shows it.
+#[test]
+fn a_source_that_cannot_be_removed_after_the_copy_leaves_a_reported_copy() {
+    if skip_as_root() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let home = sandbox.dir("home");
+    let source = sample_tree(&sandbox, "home/project");
+    let destination = sandbox.dir("stick");
+    // Sealed once the walk has started, so the copy is unaffected and only
+    // the removal meets it.
+    let sealed = home.clone();
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |_| seal(&sealed, true));
+    fault::cross_devices_once("project");
+
+    let outcome = mv(std::slice::from_ref(&source), &destination);
+    seal(&home, false);
+    assert!(outcome.completed.is_empty(), "{outcome:?}");
+    assert!(
+        outcome.failures[0].message.contains("could not remove the original"),
+        "{:?}",
+        outcome.failures
+    );
+    assert!(outcome.operation.is_none(), "no removal was journalled");
+    assert_sample_tree(&source);
+    assert_sample_tree(&destination.join("project"));
+    assert_eq!(outcome.kept_copies, vec![destination.join("project")]);
+    assert_eq!(
+        outcome.changes(TransferMode::Move).upserted,
+        vec![destination.join("project")],
+        "the view is told about the copy"
+    );
+}
+
+/// Replace, then a failure after the copy is published: the copy goes, and
+/// what it displaced comes back to where it was.
+#[test]
+fn a_replacing_move_that_fails_after_publishing_puts_the_displaced_item_back() {
+    if skip_as_root() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let home = sandbox.dir("home");
+    let source = sandbox.file("home/report.txt", b"new report");
+    let destination = sandbox.dir("stick");
+    let occupant = sandbox.file("stick/report.txt", b"old report");
+    let sealed = home.clone();
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |_| seal(&sealed, true));
+    fault::cross_devices_once("report.txt");
+
+    let outcome = replacing(std::slice::from_ref(&source), &destination);
+    seal(&home, false);
+    assert!(outcome.completed.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert_eq!(read(&occupant), b"old report", "the displaced item is back");
+    assert_eq!(read(&source), b"new report");
+    assert!(outcome.kept_copies.is_empty(), "{outcome:?}");
+    assert!(no_working_names(&destination), "nothing is left in quarantine or recovery");
+}
+
+#[test]
+fn cancelling_during_the_copy_of_a_move_is_reported_as_a_cancel() {
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let later = sandbox.file("home/later.txt", b"later");
+    let destination = sandbox.dir("stick");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let raise = Arc::clone(&cancelled);
+    let notes = source.join("notes.txt");
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |path| {
+        if path == notes {
+            raise.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
+    fault::cross_devices_once("project");
+
+    let sources = vec![source.clone(), later.clone()];
+    let outcome = transfer_paths(&sources, &destination, TransferMode::Move, cancelled);
+    assert!(outcome.failures.is_empty(), "cancelling is not a failure: {outcome:?}");
+    assert_eq!(outcome.cancelled, sources);
+    assert_sample_tree(&source);
+    assert!(later.exists());
+    assert!(!destination.join("project").exists());
+    assert!(no_working_names(&destination));
+}
+
+#[test]
+fn a_two_item_move_across_devices_keeps_the_first_when_the_second_fails() {
+    let sandbox = Sandbox::new();
+    let first = sample_tree(&sandbox, "home/first");
+    let second = sample_tree(&sandbox, "home/second");
+    std::os::unix::fs::symlink("deep", second.join("shortcut")).unwrap();
+    let destination = sandbox.dir("stick");
+    let _fat = super::copy::fault::destination_refuses_metadata_do();
+    fault::cross_devices_once("first");
+    fault::cross_devices_once("second");
+
+    let outcome = mv(&[first.clone(), second.clone()], &destination);
+    assert_eq!(outcome.completed.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(!first.exists());
+    assert_sample_tree(&destination.join("first"));
+    assert_sample_tree(&second);
+    assert!(!destination.join("second").exists());
+    let Some(OperationRecord::Move { transfers, .. }) = &outcome.operation else {
+        panic!("the first move keeps its record: {outcome:?}");
+    };
+    assert_eq!(transfers.len(), 1);
+}
+
+/// The copy back succeeds, and then the stick copy cannot be removed. The
+/// source is home again, which the outcome has to say rather than reporting
+/// that nothing happened.
+#[test]
+fn undo_whose_copy_back_lands_but_cannot_clear_the_stick_reports_the_source() {
+    if skip_as_root() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let stick = sandbox.dir("stick");
+    fault::cross_devices_once("project");
+    let operation = mv(std::slice::from_ref(&source), &stick).operation.unwrap();
+
+    let sealed = stick.clone();
+    let _hook = super::copy::fault::between_inspection_and_open_do(move |_| seal(&sealed, true));
+    let undone = undo_operation(&operation);
+    seal(&stick, false);
+    match undone {
+        MutationOutcome::Discarded { changes, error } => {
+            assert!(changes.upserted.contains(&source), "{changes:?}");
+            assert!(error.to_string().contains("could not remove the original"), "{error:#}");
+        }
+        other => panic!("expected a discarded outcome, got {other:?}"),
+    }
+    assert_sample_tree(&source);
+    assert_sample_tree(&stick.join("project"));
+}
+
+/// FAT keeps no modes, so the tree comes back from the stick with whatever
+/// the stick reported. Undo puts back the modes it left with.
+#[test]
+fn undo_of_a_move_to_fat_restores_the_modes_the_tree_left_with() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new();
+    let source = sample_tree(&sandbox, "home/project");
+    let script = sandbox.file("home/project/run.sh", b"#!/bin/sh\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o750)).unwrap();
+    let stick = sandbox.dir("stick");
+    let fat = super::copy::fault::destination_refuses_metadata_do();
+    fault::cross_devices_once("project");
+    let operation = mv(std::slice::from_ref(&source), &stick).operation.unwrap();
+    drop(fat);
+    let on_stick = fs::metadata(stick.join("project/run.sh")).unwrap().permissions().mode();
+    assert_ne!(on_stick & 0o777, 0o750, "the stick did not keep the mode");
+
+    let redo = recorded(undo_operation(&operation).unwrap());
+    assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o750);
+    assert_sample_tree(&source);
+    recorded(redo_operation(&redo).unwrap());
+    assert!(!source.exists(), "redo still validates after the modes were put back");
+}
+
+#[test]
+fn a_move_off_a_read_only_filesystem_is_refused_before_copying() {
+    use rustix::fs::StatVfsMountFlags;
+
+    // `/nix/store` is a read-only bind mount on NixOS, which is where this
+    // suite runs; elsewhere there is no read-only mount to borrow.
+    let store = Path::new("/nix/store");
+    let read_only = rustix::fs::statvfs(store)
+        .is_ok_and(|stats| stats.f_flag.contains(StatVfsMountFlags::RDONLY));
+    if !read_only {
+        eprintln!("skipping: no read-only mount at {}", store.display());
+        return;
+    }
+    let error = ensure_source_removable(&store.join("anything")).unwrap_err().to_string();
+    assert!(error.contains("read-only filesystem"), "{error}");
+}
+
 #[test]
 fn a_copy_that_does_not_match_its_source_is_refused_by_the_check() {
     let sandbox = Sandbox::new();

@@ -62,6 +62,39 @@ pub(super) struct CopiedItem {
     pub(super) undoable: bool,
     /// What the destination filesystem could not hold.
     pub(super) losses: BTreeSet<MetadataLoss>,
+    /// Every source entry as the walker found it, in walk order. Filled only
+    /// for a move, which has to show the source did not change under the copy
+    /// before it removes it.
+    pub(super) observed: Vec<ObservedSource>,
+}
+
+/// One source entry as the copier saw it before reading it.
+///
+/// The identity carries the ctime, which any write, chmod, or added or
+/// removed entry moves. Compared again just before a cross-device move
+/// removes its source, it tells "the copy is of this file" from "the copy is
+/// of what this file was a minute ago".
+#[derive(Clone, Debug)]
+pub(super) struct ObservedSource {
+    pub(super) path: PathBuf,
+    pub(super) identity: FileIdentity,
+    pub(super) len: u64,
+    pub(super) mode: u32,
+    pub(super) kind: SnapshotKind,
+}
+
+impl ObservedSource {
+    fn of(path: &Path, metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        Self {
+            path: path.to_path_buf(),
+            identity: FileIdentity::of(metadata),
+            len: metadata.len(),
+            mode: metadata.permissions().mode(),
+            kind: SnapshotKind::of(metadata.file_type()),
+        }
+    }
 }
 
 /// Something a copy could not carry across because the destination filesystem
@@ -83,6 +116,8 @@ pub enum MetadataLoss {
     LinksCopied,
     /// Links pointing at anything but a regular file were left out.
     LinksSkipped,
+    /// Files hardlinked to each other arrived as separate copies.
+    HardlinksCopied,
 }
 
 impl MetadataLoss {
@@ -93,6 +128,7 @@ impl MetadataLoss {
             Self::Timestamps => "timestamps were not kept",
             Self::LinksCopied => "symbolic links were replaced by copies of their targets",
             Self::LinksSkipped => "symbolic links to folders or missing targets were left out",
+            Self::HardlinksCopied => "hard links were stored as separate copies",
         }
     }
 }
@@ -125,7 +161,22 @@ pub(super) fn copy_one(
     progress: Option<&TransferProgress>,
     snapshot_limit: usize,
 ) -> Result<CopiedItem> {
-    let copied = copy_one_unsynced(source, destination, cancelled, progress, snapshot_limit)?;
+    let copied =
+        copy_one_unsynced(source, destination, cancelled, progress, snapshot_limit, false)?;
+    sync_directory(destination.parent().context("Copy destination has no parent directory")?);
+    Ok(copied)
+}
+
+/// [`copy_one`], also recording every source entry as it was read, for a
+/// move that has to check the source is still that before removing it.
+pub(super) fn copy_one_observed(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+    progress: Option<&TransferProgress>,
+    snapshot_limit: usize,
+) -> Result<CopiedItem> {
+    let copied = copy_one_unsynced(source, destination, cancelled, progress, snapshot_limit, true)?;
     sync_directory(destination.parent().context("Copy destination has no parent directory")?);
     Ok(copied)
 }
@@ -141,6 +192,7 @@ fn copy_one_unsynced(
     cancelled: &AtomicBool,
     progress: Option<&TransferProgress>,
     snapshot_limit: usize,
+    observe: bool,
 ) -> Result<CopiedItem> {
     // Prepare.
     ensure_unoccupied(destination)?;
@@ -156,6 +208,7 @@ fn copy_one_unsynced(
         created: SnapshotCollector::new(snapshot_limit),
         staged_directories: Vec::new(),
         losses: BTreeSet::new(),
+        observed: observe.then(Vec::new),
     };
     copier.copy_tree(source, &staged)?;
     // Commit. The staging directory is removed when `staging` drops, taking
@@ -165,7 +218,7 @@ fn copy_one_unsynced(
     })?;
     // Finalize: the copy is published. Re-reading identities can only cost
     // undo, because publication renames the staged root and bumps its ctime.
-    let Copier { sources, created, losses, .. } = copier;
+    let Copier { sources, created, losses, observed, .. } = copier;
     let mut created_snapshots = created.snapshots;
     rebase_snapshots(&mut created_snapshots, &staged, destination);
     let undoable = refresh_snapshot_identities(&mut created_snapshots);
@@ -175,6 +228,7 @@ fn copy_one_unsynced(
         overflowed: sources.overflowed || created.overflowed,
         undoable,
         losses,
+        observed: observed.unwrap_or_default(),
     })
 }
 
@@ -288,6 +342,8 @@ struct Copier<'a> {
     staged_directories: Vec<PathBuf>,
     /// What the destination could not hold, reported once for the tree.
     losses: BTreeSet<MetadataLoss>,
+    /// Every source entry in walk order, when the caller asked for it.
+    observed: Option<Vec<ObservedSource>>,
 }
 
 impl Copier<'_> {
@@ -386,6 +442,9 @@ impl Copier<'_> {
         #[cfg(test)]
         fault::between_inspection_and_open(&source);
         self.sources.push(&source, &metadata);
+        if let Some(observed) = &mut self.observed {
+            observed.push(ObservedSource::of(&source, &metadata));
+        }
         let kind = metadata.file_type();
         if let Some(progress) = self.progress {
             progress.set_current_path(Some(source.clone()));
@@ -488,17 +547,28 @@ impl Copier<'_> {
         if metadata.nlink() > 1
             && let Some(existing) = self.hardlinks.get(&identity)
         {
-            fs::hard_link(existing, destination).with_context(|| {
-                format!(
-                    "Could not preserve hardlink “{}” at “{}”",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
-            if let Some(progress) = self.progress {
-                progress.complete_bytes(metadata.len());
+            match hard_link_or_refusal(existing, destination) {
+                Ok(()) => {
+                    if let Some(progress) = self.progress {
+                        progress.complete_bytes(metadata.len());
+                    }
+                    return Ok(());
+                }
+                // FAT and exFAT have no hard links. The bytes are what the
+                // user is carrying, so they arrive as a second copy.
+                Err(error) if filesystem_cannot_hold(&error) => {
+                    self.losses.insert(MetadataLoss::HardlinksCopied);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Could not preserve hardlink “{}” at “{}”",
+                            source.display(),
+                            destination.display()
+                        )
+                    });
+                }
             }
-            return Ok(());
         }
 
         copy_file_cancellable(input, source, destination, self.cancelled, self.progress)?;
@@ -528,7 +598,7 @@ pub(super) mod fault {
     }
 
     /// Make every destination behave like FAT until the guard drops: `chmod`,
-    /// `setxattr`, and `symlink` answer `EPERM`.
+    /// `utimensat`, `setxattr`, `symlink`, and `link` answer `EPERM`.
     ///
     /// A real vfat image needs root to mount, so the tests that care about
     /// what a stick can hold run on the ordinary temp directory with the
@@ -767,7 +837,7 @@ pub(super) fn preserve_metadata(
         has_times = true;
     }
     if has_times {
-        match fs::File::open(destination).and_then(|file| file.set_times(times)) {
+        match set_times_or_refusal(destination, times) {
             Ok(()) => {}
             Err(error) if filesystem_cannot_hold(&error) => {
                 losses.insert(MetadataLoss::Timestamps);
@@ -791,6 +861,22 @@ fn set_permissions_or_refusal(destination: &Path, permissions: fs::Permissions) 
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     fs::set_permissions(destination, permissions)
+}
+
+fn set_times_or_refusal(destination: &Path, times: fs::FileTimes) -> io::Result<()> {
+    #[cfg(test)]
+    if fault::destination_refuses_metadata() {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    fs::File::open(destination).and_then(|file| file.set_times(times))
+}
+
+fn hard_link_or_refusal(existing: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if fault::destination_refuses_metadata() {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    fs::hard_link(existing, destination)
 }
 
 fn symlink_or_refusal(target: &Path, destination: &Path) -> io::Result<()> {
@@ -1019,7 +1105,7 @@ pub(super) fn merge_directories(
             } else {
                 0
             };
-            match copy_one_unsynced(from, to, cancelled, progress, remaining / 2) {
+            match copy_one_unsynced(from, to, cancelled, progress, remaining / 2, false) {
                 Ok(copied) => {
                     touched.extend(to.parent());
                     losses.extend(copied.losses);

@@ -25,15 +25,19 @@ use super::{
         ConflictPolicy, ConflictRequest, ConflictResponse, describe_occupant, unique_name_in,
     },
     copy::{
-        MergeStop, MetadataLoss, copy_one, describe_losses, ensure_not_self_containing,
-        merge_directories,
+        MergeStop, MetadataLoss, ObservedSource, copy_one, copy_one_observed, describe_losses,
+        ensure_not_self_containing, merge_directories,
     },
     delete::delete_paths,
+    identity::FileIdentity,
     journal::{
-        MoveRecord, OperationRecord, PathSnapshot, UNDO_SNAPSHOT_LIMIT, rebase_snapshots,
-        refresh_snapshot_identities, snapshot_tree_within,
+        MoveRecord, OperationRecord, PathSnapshot, SnapshotKind, UNDO_SNAPSHOT_LIMIT,
+        rebase_snapshots, refresh_snapshot_identities, snapshot_tree_within,
     },
-    local::{ensure_unoccupied, rename_no_replace},
+    local::{
+        CWD, PathContext as _, ensure_unoccupied, open_directory_at, rename_no_replace,
+        sorted_child_names,
+    },
     mutations::validate_entry_os_name,
     quarantine::{
         REPLACEMENT_UNDO_BYTE_LIMIT, ReplacedItem, erase_replacement_quarantine,
@@ -92,6 +96,10 @@ pub struct TransferOutcome {
     pub undo_unavailable: bool,
     /// What the destination filesystem could not hold, across every item.
     pub losses: BTreeSet<MetadataLoss>,
+    /// Copies a failed cross-device move published and could not take back.
+    /// Their sources are among `failures`, whole; these are the second copy,
+    /// which the view has to show although nothing completed.
+    pub kept_copies: Vec<PathBuf>,
 }
 
 impl TransferOutcome {
@@ -117,7 +125,11 @@ impl TransferOutcome {
                 TransferMode::Move => self.completed.iter().map(|t| t.source.clone()).collect(),
                 TransferMode::Copy => Vec::new(),
             },
-            upserted: self.completed_destinations(),
+            upserted: self
+                .completed_destinations()
+                .into_iter()
+                .chain(self.kept_copies.iter().cloned())
+                .collect(),
         }
     }
 
@@ -427,6 +439,7 @@ impl<'a> Transfer<'a> {
         let mut replaced_bytes: u64 = 0;
         let mut replacement_undo_unavailable = false;
         let mut losses: BTreeSet<MetadataLoss> = BTreeSet::new();
+        let mut kept_copies = Vec::new();
         let fail = |failures: &mut Vec<PathFailure>, source: &Path, message: String| {
             failures.push(PathFailure::new(source, message));
         };
@@ -554,24 +567,26 @@ impl<'a> Transfer<'a> {
                     } else {
                         copy_remaining(&copied_sources, &copied_created, &merged_created)
                     };
-                    copy_one(source, &target, &cancelled, progress, remaining / 2).map(|copied| {
-                        losses.extend(copied.losses);
-                        if copied.overflowed || !copied.undoable {
-                            copied_sources.give_up();
-                            copied_created.give_up();
-                            // Giving up empties the ledger of every earlier
-                            // copy too, so the items those copies displaced
-                            // can no longer be put back: their destinations
-                            // stay occupied by copies undo no longer knows.
-                            for item in replaced.drain(..) {
-                                erase_replacement_quarantine(&item);
+                    copy_one(source, &target, &cancelled, progress, remaining / 2)
+                        .map_err(MoveFailure::from)
+                        .map(|copied| {
+                            losses.extend(copied.losses);
+                            if copied.overflowed || !copied.undoable {
+                                copied_sources.give_up();
+                                copied_created.give_up();
+                                // Giving up empties the ledger of every earlier
+                                // copy too, so the items those copies displaced
+                                // can no longer be put back: their destinations
+                                // stay occupied by copies undo no longer knows.
+                                for item in replaced.drain(..) {
+                                    erase_replacement_quarantine(&item);
+                                }
+                            } else {
+                                copied_sources.extend(copied.sources);
+                                copied_created.extend(copied.created);
                             }
-                        } else {
-                            copied_sources.extend(copied.sources);
-                            copied_created.extend(copied.created);
-                        }
-                        !copied_created.unavailable
-                    })
+                            !copied_created.unavailable
+                        })
                 }
                 TransferMode::Move => {
                     let remaining = if move_undo_unavailable {
@@ -624,17 +639,48 @@ impl<'a> Transfer<'a> {
                     completed
                         .push(CompletedTransfer { source: source.clone(), destination: target });
                 }
-                Err(error) => {
+                Err(MoveFailure { error, mut copy_kept }) => {
+                    // A cross-device move that stopped after publishing left
+                    // its copy on the destination. When it displaced
+                    // something there, the copy has to go first, or the
+                    // displaced item has nowhere to return to; the source is
+                    // whole, so nothing is lost by removing it.
+                    if copy_kept && displaced.is_some() {
+                        let removal = delete_paths(
+                            std::slice::from_ref(&target),
+                            Arc::new(TransferProgress::default()),
+                        );
+                        copy_kept = !removal.failures.is_empty();
+                    }
                     // The transfer failed, so put back what it displaced rather
                     // than leaving the destination empty. When even that fails
                     // the quarantine holds the user's only copy, so it leaves
                     // undo storage for recovery storage before this message is
                     // written.
-                    let mut message = error.to_string();
+                    let mut message = format!("{error:#}");
+                    let mut unrestored = false;
                     if let Some(item) = displaced
-                        && let Err(unrestored) = restore_replaced_items(std::slice::from_ref(&item))
+                        && let Err(remaining) = restore_replaced_items(std::slice::from_ref(&item))
                     {
-                        message.push_str(&format!("; {}", preserve_unrestored(unrestored)));
+                        message.push_str(&format!("; {}", preserve_unrestored(remaining)));
+                        unrestored = true;
+                    }
+                    if copy_kept {
+                        kept_copies.push(target);
+                    }
+                    // Cancelling during the copy is an answer, not a fault,
+                    // the same as for a merge: nothing was published and the
+                    // source is exactly as it was. Only a displaced item that
+                    // could not go back is still worth a failure.
+                    if !copy_kept && cancelled.load(Ordering::Acquire) {
+                        let first_unattempted = if unrestored {
+                            fail(&mut failures, source, message);
+                            index + 1
+                        } else {
+                            index
+                        };
+                        cancelled_sources.extend(sources[first_unattempted..].iter().cloned());
+                        break;
                     }
                     fail(&mut failures, source, message);
                 }
@@ -681,6 +727,7 @@ impl<'a> Transfer<'a> {
             cancelled: cancelled_sources,
             undo_unavailable,
             losses,
+            kept_copies,
         }
     }
 }
@@ -712,6 +759,26 @@ pub(super) struct MovedItem {
     pub(super) losses: BTreeSet<MetadataLoss>,
 }
 
+/// Why a move did not happen, and whether it left a copy behind.
+///
+/// A rename either happens or it does not. A cross-device move has a point
+/// in the middle, after its copy is published and before the source goes,
+/// where it can still stop, and a stop there leaves two whole trees. The
+/// caller has to know which, to show the copy and to avoid restoring
+/// something displaced onto a destination the copy now occupies.
+#[derive(Debug)]
+pub(super) struct MoveFailure {
+    pub(super) error: anyhow::Error,
+    /// The copy is at the destination, and the source is whole beside it.
+    pub(super) copy_kept: bool,
+}
+
+impl From<anyhow::Error> for MoveFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self { error, copy_kept: false }
+    }
+}
+
 /// Move one entry: a rename when the filesystem allows one, otherwise a copy
 /// followed by removal of the source.
 ///
@@ -726,7 +793,7 @@ fn move_one(
     snapshot_limit: usize,
     cancelled: &AtomicBool,
     progress: Option<&TransferProgress>,
-) -> Result<MovedItem> {
+) -> Result<MovedItem, MoveFailure> {
     ensure_unoccupied(destination)?;
     ensure_not_self_containing(source, destination, "move")?;
     // Prepare: walk the tree before the rename, not after, and treat the walk
@@ -741,7 +808,7 @@ fn move_one(
         Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
             return move_across_devices(source, destination, snapshot_limit, cancelled, progress);
         }
-        Err(error) => return Err(move_error(&error, source, destination)),
+        Err(error) => return Err(move_error(&error, source, destination).into()),
     }
     // Finalize: a same-filesystem rename preserves every descendant's identity
     // but bumps the renamed root's ctime, so refresh before recording.
@@ -752,6 +819,7 @@ fn move_one(
             destination: destination.to_path_buf(),
             expected_state,
             crossed_devices: false,
+            source_modes: Vec::new(),
         })
     });
     Ok(MovedItem { record, losses: BTreeSet::new() })
@@ -764,65 +832,174 @@ fn move_one(
 /// read-back (`yazi-scheduler/src/file/file.rs`; `g_file_move` falling back to
 /// `g_file_copy` and `g_file_delete`). Marcel's copy already fsyncs every file
 /// and publishes the tree with one rename, so the copy half is `copy_one`
-/// unchanged. The published tree is then checked against the source by kind
-/// and size before the source goes, because the source is the only copy until
-/// that check passes. Removal is the permanent-delete path, one rename into
+/// unchanged. Before the source goes, two checks: the published tree against
+/// the source by kind and size, and the source against what the copier read,
+/// by identity and ctime, so a file rewritten in place during the copy (a
+/// database, a VM image, an editor's save) is not deleted for a copy of its
+/// older self. Removal is the permanent-delete path, one rename into
 /// quarantine and then an erase, so the source disappears at once rather than
 /// leaf by leaf.
 ///
+/// A tree with links the destination could not hold at all (to folders, or
+/// to nothing) is not moved: the copy would be missing them and the source is
+/// the only place they exist. A copy still drops them, with a note.
+///
 /// The record describes the *destination* tree, which is what undo has to
 /// validate and copy back; a rename's record describes the same tree by the
-/// same paths, so the journal does not care which way it was made.
+/// same paths, so the journal does not care which way it was made. When the
+/// destination could not hold permissions, the record also carries the
+/// source's modes, so undo does not hand back a `0600` key as whatever the
+/// stick reported.
 pub(super) fn move_across_devices(
     source: &Path,
     destination: &Path,
     snapshot_limit: usize,
     cancelled: &AtomicBool,
     progress: Option<&TransferProgress>,
-) -> Result<MovedItem> {
+) -> Result<MovedItem, MoveFailure> {
+    ensure_source_removable(source)?;
     // The move was budgeted as one item; it is about to be a tree of them.
     // The one item stays on the books and is completed by the caller.
     if let Some(progress) = progress {
         measure_entry(source, cancelled, progress);
     }
-    let copied = copy_one(source, destination, cancelled, progress, snapshot_limit)?;
+    let copied = copy_one_observed(source, destination, cancelled, progress, snapshot_limit)?;
     // From here the destination is published. Anything that goes wrong now
     // has to say which copy survived.
+    if copied.losses.contains(&MetadataLoss::LinksSkipped) {
+        return Err(withdraw_copy(
+            destination,
+            anyhow::anyhow!(
+                "Could not move “{}”: it holds symbolic links to folders or to nothing, which the destination cannot store",
+                source.display()
+            ),
+        ));
+    }
     if let Err(error) = verify_copied_tree(source, destination) {
-        let removal =
-            delete_paths(&[destination.to_path_buf()], Arc::new(TransferProgress::default()));
-        let kept = if removal.failures.is_empty() {
-            "the original is untouched and the copy was removed"
-        } else {
-            "the original is untouched and the copy was left in place"
-        };
-        bail!("Could not verify the copy of “{}”: {error}; {kept}", source.display());
+        return Err(withdraw_copy(
+            destination,
+            anyhow::anyhow!("Could not verify the copy of “{}”: {error:#}", source.display()),
+        ));
+    }
+    if let Err(error) = ensure_source_unchanged(source, &copied.observed) {
+        return Err(withdraw_copy(
+            destination,
+            error.context(format!("Could not move “{}”", source.display())),
+        ));
     }
     // A cancel that arrives between the copy and the removal is honoured by
     // stopping, not by deleting: both copies stand, and the report says so.
     if cancelled.load(Ordering::Acquire) {
-        bail!(
-            "Operation cancelled after “{}” was copied to “{}”; both copies were kept",
-            source.display(),
-            destination.display()
-        );
+        return Err(MoveFailure {
+            error: anyhow::anyhow!(
+                "Operation cancelled after “{}” was copied to “{}”; both copies were kept",
+                source.display(),
+                destination.display()
+            ),
+            copy_kept: true,
+        });
     }
     let removal = delete_paths(&[source.to_path_buf()], Arc::new(TransferProgress::default()));
     if let Some(failure) = removal.failures.into_iter().next() {
-        bail!(
-            "Copied “{}” to “{}” but could not remove the original: {}",
-            source.display(),
-            destination.display(),
-            failure.message
-        );
+        return Err(MoveFailure {
+            error: anyhow::anyhow!(
+                "Copied “{}” to “{}” but could not remove the original: {}",
+                source.display(),
+                destination.display(),
+                failure.message
+            ),
+            copy_kept: true,
+        });
     }
+    let source_modes = if copied.losses.contains(&MetadataLoss::Permissions) {
+        copied
+            .observed
+            .iter()
+            .filter(|seen| seen.kind != SnapshotKind::Symlink)
+            .map(|seen| (seen.path.clone(), seen.mode))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let record = (!copied.overflowed && copied.undoable).then(|| MoveRecord {
         source: source.to_path_buf(),
         destination: destination.to_path_buf(),
         expected_state: copied.created,
         crossed_devices: true,
+        source_modes,
     });
     Ok(MovedItem { record, losses: copied.losses })
+}
+
+/// Refuse a cross-device move whose source cannot be removed afterwards.
+///
+/// The kernel answers `EXDEV` before it looks at whether the source's
+/// filesystem is writable, so without this a move off a read-only stick
+/// copied the whole tree and only then failed, leaving a duplicate the user
+/// did not ask for.
+pub(super) fn ensure_source_removable(source: &Path) -> Result<()> {
+    use rustix::fs::StatVfsMountFlags;
+
+    let parent = source.parent().context("Source has no parent directory")?;
+    if let Ok(stats) = rustix::fs::statvfs(parent)
+        && stats.f_flag.contains(StatVfsMountFlags::RDONLY)
+    {
+        bail!(
+            "Cannot move “{}”: it is on a read-only filesystem, so it could be copied but not removed",
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+/// Remove a published copy the move has decided not to keep, and say which
+/// copies are left.
+fn withdraw_copy(destination: &Path, error: anyhow::Error) -> MoveFailure {
+    let removal = delete_paths(&[destination.to_path_buf()], Arc::new(TransferProgress::default()));
+    let copy_kept = !removal.failures.is_empty();
+    let kept = if copy_kept {
+        "the original is untouched and the copy was left in place"
+    } else {
+        "the original is untouched and the copy was removed"
+    };
+    MoveFailure { error: anyhow::anyhow!("{error:#}; {kept}"), copy_kept }
+}
+
+/// Walk the source again in the copier's order and refuse unless every entry
+/// is still the object the copier read, unchanged since.
+///
+/// A regular file rewritten in place keeps its inode and, if the writer is
+/// careful, its size; its ctime is what moves. A directory gains or loses an
+/// entry and its ctime moves too, and the walk then disagrees on count or
+/// name. Anything that differs means the copy is of something the source no
+/// longer is, and the source is kept.
+pub(super) fn ensure_source_unchanged(source: &Path, observed: &[ObservedSource]) -> Result<()> {
+    let changed = |path: &Path| anyhow::anyhow!("“{}” changed while it was copied", path.display());
+    let mut expected = observed.iter();
+    let mut pending = vec![source.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Some(seen) = expected.next() else {
+            return Err(changed(&path));
+        };
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            return Err(changed(&path));
+        };
+        if seen.path != path
+            || FileIdentity::of(&metadata) != seen.identity
+            || metadata.len() != seen.len
+        {
+            return Err(changed(&path));
+        }
+        if metadata.is_dir() {
+            let opened = open_directory_at(CWD, &path).at("Could not read", &path)?;
+            let children = sorted_child_names(&opened).at("Could not read", &path)?;
+            pending.extend(children.into_iter().rev().map(|child| path.join(child)));
+        }
+    }
+    match expected.next() {
+        Some(gone) => Err(changed(&gone.path)),
+        None => Ok(()),
+    }
 }
 
 /// Check a published copy against its source: every entry present, of the

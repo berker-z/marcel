@@ -218,7 +218,7 @@ pub(super) enum SnapshotKind {
 }
 
 impl SnapshotKind {
-    fn of(file_type: fs::FileType) -> Self {
+    pub(super) fn of(file_type: fs::FileType) -> Self {
         use std::os::unix::fs::FileTypeExt as _;
 
         if file_type.is_dir() {
@@ -269,6 +269,9 @@ pub struct MoveRecord {
     /// then has to copy back rather than rename back, which costs what the
     /// move cost and cannot be rolled back with a rename either.
     pub(super) crossed_devices: bool,
+    /// Each source entry's mode, when the destination could not hold modes.
+    /// Undo puts them back on the tree it copies home.
+    pub(super) source_modes: Vec<(PathBuf, u32)>,
 }
 
 /// The outcome of a mutation that has already committed to the filesystem.

@@ -195,12 +195,31 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                     // The copy back describes itself as a move from the
                     // destination to the source; the journal wants it the
                     // way the original was recorded, so redo can repeat it.
-                    Some(Ok(moved)) => Ok(moved.record.map(|record| MoveRecord {
-                        source: record.destination,
-                        destination: record.source,
-                        ..record
-                    })),
-                    Some(Err(error)) => Err(error.to_string()),
+                    Some(Ok(moved)) => {
+                        let modes_restored = restore_source_modes(&transfer.source_modes);
+                        Ok(moved.record.and_then(|mut record| {
+                            // Putting the modes back moved the ctimes the
+                            // record was taken with.
+                            (!modes_restored
+                                || refresh_snapshot_identities(&mut record.expected_state))
+                            .then(|| MoveRecord {
+                                source: record.destination,
+                                destination: record.source,
+                                source_modes: Vec::new(),
+                                ..record
+                            })
+                        }))
+                    }
+                    // The copy back is at the source and the stick copy is
+                    // still there too. That is not "nothing happened": the
+                    // view has to show the source again, and the record no
+                    // longer describes the disk.
+                    Some(Err(failure)) if failure.copy_kept => {
+                        let mut changes = partial_undo_changes(&undone);
+                        changes.upserted.push(transfer.source.clone());
+                        return MutationOutcome::discarded(changes, failure.error);
+                    }
+                    Some(Err(failure)) => Err(format!("{:#}", failure.error)),
                     None => rename_no_replace(&transfer.destination, &transfer.source)
                         .map(|()| {
                             let mut expected_state = transfer.expected_state.clone();
@@ -214,6 +233,7 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                                 destination: transfer.destination.clone(),
                                 expected_state,
                                 crossed_devices: false,
+                                source_modes: Vec::new(),
                             })
                         })
                         .map_err(|error| {
@@ -272,6 +292,7 @@ pub fn undo_operation(operation: &OperationRecord) -> MutationOutcome {
                             destination: transfer.destination.clone(),
                             expected_state: Vec::new(),
                             crossed_devices: transfer.crossed_devices,
+                            source_modes: Vec::new(),
                         });
                     }
                 }
@@ -410,7 +431,7 @@ fn redo_transfer(sources: &[PathBuf], destination: &Path, mode: TransferMode) ->
     }
 
     let failure = outcome.summarize_failures();
-    if outcome.completed.is_empty() {
+    if outcome.completed.is_empty() && outcome.kept_copies.is_empty() {
         // Nothing reached the destination, so the record still describes the
         // disk and the user can retry.
         return MutationOutcome::unchanged(anyhow::anyhow!("{failure}"));
@@ -434,6 +455,22 @@ fn redo_transfer(sources: &[PathBuf], destination: &Path, mode: TransferMode) ->
             anyhow::anyhow!("{failure}; rollback also failed: {rollback_error}"),
         ),
     }
+}
+
+/// Give a tree copied home from a filesystem without modes the modes it left
+/// with. Returns whether anything was changed.
+///
+/// Deepest first, so a folder whose own mode denies its owner access is
+/// closed only after everything inside it is set. A mode that cannot be put
+/// back is left as the copy has it: the tree is home and whole, and a wider
+/// mode on one file is not a reason to fail an undo that already committed.
+fn restore_source_modes(modes: &[(PathBuf, u32)]) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for (path, mode) in modes.iter().rev() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777));
+    }
+    !modes.is_empty()
 }
 
 fn rollback_undone_moves(undone: &[MoveRecord]) -> Result<()> {
