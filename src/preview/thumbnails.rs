@@ -155,13 +155,23 @@ fn load_or_create_in(
     // A thumbnail the file already carries is used when it is big enough.
     // A failure to read one is not the file's verdict: the full decode below
     // runs and reports it properly if the file really is broken.
-    let embedded = if heif::has_extension(decode_source) {
+    let is_heif = heif::is_heif(decode_source);
+    let embedded = if is_heif {
         heif::embedded_thumbnail(decode_source, THUMBNAIL_EDGE).ok().flatten()
     } else {
         None
     };
     let (image, orientation) = match embedded {
         Some(image) => (DynamicImage::ImageRgba8(image), Orientation::NoTransforms),
+        None if is_heif => {
+            let bounds = heif::Bounds {
+                max_edge: MAX_SOURCE_DIMENSION,
+                max_pixels: MAX_SOURCE_PIXELS,
+                max_bytes: MAX_DECODE_BYTES,
+            };
+            let image = heif::decode(decode_source, bounds, cancelled)?;
+            (DynamicImage::ImageRgba8(image), Orientation::NoTransforms)
+        }
         None => decode_bounded(decode_source)?,
     };
     check_cancelled(cancelled)?;
@@ -198,8 +208,8 @@ fn load_or_create_in(
 }
 
 /// The whole picture at `path`, within the source limits, and the rotation
-/// its EXIF asks for. HEIC and AVIF come through libheif's hook, already
-/// turned, so theirs is always `NoTransforms`.
+/// its EXIF asks for. HEIC and AVIF do not come through here; see
+/// [`heif::decode`].
 fn decode_bounded(path: &Path) -> Result<(DynamicImage, Orientation)> {
     let mut limits = Limits::no_limits();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
@@ -365,6 +375,44 @@ mod tests {
             let decoded = image::open(&thumbnail).unwrap();
             assert_eq!((decoded.width(), decoded.height()), expected, "{name}");
         }
+    }
+
+    /// A ten-bit AVIF has no embedded thumbnail, so it is decoded whole, and
+    /// its colours have to survive that. It came out nearly black when the
+    /// samples went through `image`'s sixteen-bit path unscaled.
+    #[test]
+    fn thumbnails_a_ten_bit_avif_in_its_own_colours() {
+        let sandbox = Sandbox::new();
+        let cache = sandbox.path("cache");
+        let source = sandbox.path("photo.avif");
+        std::fs::copy(crate::preview::fixture("photo.avif"), &source).unwrap();
+
+        let thumbnail = load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &no_cancel()).unwrap();
+        let decoded = image::open(&thumbnail).unwrap().to_rgba8();
+        let top_left = decoded.get_pixel(0, 0).0;
+        assert!(top_left[0] > 200 && top_left[2] < 60, "top-left is red, got {top_left:?}");
+    }
+
+    /// Named as a JPEG, still a HEIC: the content decides the decoder.
+    #[test]
+    fn a_heic_with_the_wrong_extension_still_thumbnails() {
+        let sandbox = Sandbox::new();
+        let cache = sandbox.path("cache");
+        let source = sandbox.path("IMG_0001.jpg");
+        std::fs::copy(crate::preview::fixture("rotated.heic"), &source).unwrap();
+
+        let thumbnail = load_or_create_in(&source, MAX_SOURCE_BYTES, &cache, &no_cancel()).unwrap();
+        let decoded = image::open(&thumbnail).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (96, 128));
+    }
+
+    #[test]
+    fn a_heif_larger_than_the_bounds_is_refused_before_decoding() {
+        let bounds = heif::Bounds { max_edge: 25_000, max_pixels: 1_000, max_bytes: u64::MAX };
+        let error = heif::decode(&crate::preview::fixture("photo.avif"), bounds, &no_cancel())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("too large"), "{error}");
     }
 
     /// The flag is the listing's: once it is set the tile is gone and the

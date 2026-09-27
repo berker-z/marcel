@@ -76,6 +76,17 @@ pub fn prepare_bytes(bytes: &[u8]) -> Result<Arc<RenderImage>> {
 }
 
 fn decode_bounded_still(path: &Path, cancelled: &AtomicBool) -> Result<Frame> {
+    if heif::is_heif(path) {
+        let bounds = heif::Bounds {
+            max_edge: MAX_SOURCE_DIMENSION,
+            max_pixels: MAX_SOURCE_PIXELS,
+            max_bytes: MAX_DECODE_BYTES,
+        };
+        let image = DynamicImage::ImageRgba8(heif::decode(path, bounds, cancelled)?);
+        let mut image = bound_preview_dimensions(image).to_rgba8();
+        rgba_to_bgra(&mut image);
+        return Ok(Frame::new(image));
+    }
     let mut limits = Limits::no_limits();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
@@ -343,6 +354,11 @@ mod tests {
         let output =
             prepare(&crate::preview::fixture("photo.avif"), &AtomicBool::new(false)).unwrap();
         assert_eq!((output.size(0).width.0, output.size(0).height.0), (64, 48));
+        // The fixture is a red-to-blue gradient from the top. Ten-bit
+        // samples read as sixteen-bit ones made the red row nearly black.
+        let bgra = output.as_bytes(0).unwrap();
+        let (blue, red) = (bgra[0], bgra[2]);
+        assert!(red > 200 && blue < 60, "top-left is red, got BGRA {:?}", &bgra[..4]);
     }
 
     #[test]

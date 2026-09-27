@@ -1,20 +1,38 @@
 //! HEIC and AVIF, through libheif.
 //!
-//! The `image` crate has no decoder for either and is not getting one, so
-//! libheif registers itself as a decoding hook: an `ImageReader` that sniffs
-//! a HEIF brand hands the file to libheif, and every other path through
-//! `image` works unchanged. The one thing done here directly is the
-//! embedded thumbnail, which the hook has no way to ask for.
+//! The `image` crate has no decoder for either and is not getting one.
+//! libheif registers itself as a decoding hook, so `image` can read a HEIF
+//! file's dimensions like any other. Pixels are decoded here instead, with
+//! [`decode`], for two reasons the hook cannot answer:
+//!
+//! - For a picture deeper than eight bits (most AVIF, and HEIC from recent
+//!   phones) the hook asks libheif for 16-bit samples and copies them as
+//!   they come. libheif leaves them at their own depth, 0..1023 for ten
+//!   bits, and `image` reads the buffer as 0..65535, so the picture came
+//!   out nearly black. Asking libheif for 8-bit RGBA lets it do the scaling.
+//! - `image`'s allocation limit never sees what the hook allocates, so the
+//!   size has to be checked before the decode.
 //!
 //! libheif applies the container's own rotation and mirroring when it
-//! decodes, and the hook reports no EXIF orientation. Nothing downstream
-//! rotates a HEIF image a second time.
+//! decodes, and reports no EXIF orientation. Nothing downstream rotates a
+//! HEIF image a second time.
 
-use std::{fs::File, io::BufReader, path::Path, sync::OnceLock};
+use std::{
+    fs::File,
+    io::{BufReader, Read as _},
+    path::Path,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use image::RgbaImage;
-use libheif_rs::{ColorSpace, HeifContext, ImageHandle, LibHeif, RgbChroma, StreamReader};
+use libheif_rs::{
+    ColorSpace, DecodingOptions, FileTypeResult, HeifContext, ImageHandle, LibHeif, RgbChroma,
+    StreamReader,
+};
 
 use crate::fsops::local::open_regular_file;
 
@@ -52,6 +70,55 @@ fn library() -> &'static LibHeif {
 
 pub fn has_extension(path: &Path) -> bool {
     super::has_extension(path, EXTENSIONS)
+}
+
+/// Whether the file at `path` is a HEIF libheif can decode, going by its
+/// first bytes rather than its name, so a HEIC saved as `.jpg` still takes
+/// this path.
+pub fn is_heif(path: &Path) -> bool {
+    let mut head = [0; 64];
+    let Ok(mut file) = open_regular_file(path) else {
+        return false;
+    };
+    let read = file.read(&mut head).unwrap_or(0);
+    matches!(libheif_rs::check_file_type(&head[..read]), FileTypeResult::Supported)
+}
+
+/// What a caller will let one decode cost.
+#[derive(Clone, Copy, Debug)]
+pub struct Bounds {
+    pub max_edge: u32,
+    pub max_pixels: u64,
+    /// The RGBA buffer's size: the budget `image`'s `max_alloc` would apply
+    /// to any other format.
+    pub max_bytes: u64,
+}
+
+/// The primary picture, decoded by libheif to 8-bit RGBA, refused before
+/// anything is decoded when it is larger than `bounds` allow.
+///
+/// libheif cannot be interrupted once it starts (the bindings expose no
+/// cancel callback), so `cancelled` is checked on the way in and on the way
+/// out.
+pub fn decode(path: &Path, bounds: Bounds, cancelled: &AtomicBool) -> Result<RgbaImage> {
+    let context = read_context(open_regular_file(path)?)?;
+    let primary = context.primary_image_handle()?;
+    let (width, height) = (primary.width(), primary.height());
+    if width > bounds.max_edge || height > bounds.max_edge {
+        bail!("image dimensions exceed the {}-pixel edge limit", bounds.max_edge);
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > bounds.max_pixels || pixels * 4 > bounds.max_bytes {
+        bail!("image is too large to decode ({width}×{height})");
+    }
+    if cancelled.load(Ordering::Acquire) {
+        bail!("decoding was cancelled");
+    }
+    let image = decode_rgba(&primary)?;
+    if cancelled.load(Ordering::Acquire) {
+        bail!("decoding was cancelled");
+    }
+    Ok(image)
 }
 
 /// The smallest thumbnail stored in the file whose longer edge reaches
@@ -97,7 +164,9 @@ fn same_shape(primary: &ImageHandle, thumbnail: &ImageHandle) -> bool {
 }
 
 fn decode_rgba(handle: &ImageHandle) -> Result<RgbaImage> {
-    let image = library().decode(handle, ColorSpace::Rgb(RgbChroma::Rgba), None)?;
+    let mut options = DecodingOptions::new().context("libheif could not allocate options")?;
+    options.set_convert_hdr_to_8bit(true);
+    let image = library().decode(handle, ColorSpace::Rgb(RgbChroma::Rgba), Some(options))?;
     let planes = image.planes();
     let plane = planes.interleaved.context("libheif returned planar pixels for RGBA")?;
     let row = plane.width as usize * 4;
