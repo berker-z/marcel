@@ -23,7 +23,9 @@ use crate::{
     fsops::{
         DirectoryChanges, RECOVERY_REMNANT_PREFIX, is_quarantine_from_another_boot,
         process_is_running, reclaim_abandoned_quarantines,
-        trash::{TrashRecord, list_trash_records, unreadable_trash_warning},
+        trash::{
+            TrashRecord, drive_trash_dirs, home_trash, list_trash_records, unreadable_trash_warning,
+        },
     },
     operations::OperationEvent,
 };
@@ -226,7 +228,7 @@ impl Marcel {
         }
     }
 
-    fn start_trash_load(&mut self, kind: LoadKind, _scope: TrashScope, cx: &mut Context<Self>) {
+    fn start_trash_load(&mut self, kind: LoadKind, scope: TrashScope, cx: &mut Context<Self>) {
         self.begin_listing(kind, cx);
         let ticket = self.directory.begin_load(kind);
         if kind == LoadKind::Navigate {
@@ -235,7 +237,8 @@ impl Marcel {
         let order = self.directory.sort;
 
         let load = unblock(cx, move || {
-            let listing = list_trash_records()?;
+            let listing = list_trash_records(&trash_dirs(&scope)?)?;
+            let read_only = listing.read_only;
             let (presented, unpresentable) = trash_entries(listing.records);
             let mut unreadable = listing.unreadable;
             unreadable.extend(unpresentable);
@@ -246,7 +249,7 @@ impl Marcel {
                 entries.push(entry);
             }
             sort_entries(&mut entries, order);
-            anyhow::Ok((entries, by_backing, unreadable))
+            anyhow::Ok((entries, by_backing, unreadable, read_only))
         });
 
         let load = cx.spawn(async move |this, cx| {
@@ -256,8 +259,9 @@ impl Marcel {
                     return;
                 }
                 match result {
-                    Ok((entries, records, unreadable)) => {
+                    Ok((entries, records, unreadable, read_only)) => {
                         this.sidebar.trash_records = records;
+                        this.sidebar.trash_read_only = read_only;
                         let reconcile = this.directory.merge_batch(entries);
                         this.apply_selection_reconcile(reconcile, cx);
                         this.finish_directory_load(cx);
@@ -268,7 +272,7 @@ impl Marcel {
                     }
                     Err(error) => {
                         this.sidebar.trash_records.clear();
-                        let reconcile = this.directory.fail_load(error.to_string());
+                        let reconcile = this.directory.fail_load(format!("{error:#}"));
                         this.apply_selection_reconcile(reconcile, cx);
                     }
                 }
@@ -615,8 +619,18 @@ impl Marcel {
         if !self.directory.location.is_trash() || records.is_empty() {
             return;
         }
+        // Every window hears about every trashing; only the records in the
+        // Trash this window shows belong in it.
+        let Location::Trash(scope) = self.directory.location.clone() else {
+            return;
+        };
         let generation = self.directory.generation;
-        let task = unblock(cx, move || trash_entries(records));
+        let task = unblock(cx, move || {
+            let dirs = trash_dirs(&scope).unwrap_or_default();
+            let records =
+                records.into_iter().filter(|record| dirs.iter().any(|dir| record.is_in(dir)));
+            trash_entries(records.collect())
+        });
         cx.spawn(async move |this, cx| {
             let (entries, unreadable) = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -657,6 +671,14 @@ impl Marcel {
             ApplyDirectoryEvents::RescanRequired => self.start_load(false, cx),
         }
     }
+}
+
+/// The directories a Trash place reads.
+fn trash_dirs(scope: &TrashScope) -> anyhow::Result<Vec<PathBuf>> {
+    Ok(match scope {
+        TrashScope::Home => vec![home_trash()?],
+        TrashScope::Drive(topdir) => drive_trash_dirs(topdir),
+    })
 }
 
 /// The Trash entries `records` can be shown as, and a line for each record

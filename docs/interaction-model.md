@@ -247,9 +247,11 @@ labels share the semantic small text size; shortcut hints use the extra-small
 size as secondary metadata.
 
 Trash is the bottom-most item in Places and shows the valid top-level entries
-of the freedesktop home Trash only. Items trashed on another drive still go to
-that drive's `.Trash-<uid>`, as the specification says, but the view does not
-merge those in. Trashed directories
+of the freedesktop home Trash. Items trashed on another drive go to that
+drive's `.Trash-<uid>` (or `.Trash/<uid>`), as the specification says, and
+that Trash is its own place, opened from the drive's context menu and emptied
+on its own; a read-only drive's Trash lists but cannot be emptied. The views
+are not merged, so one drive's Trash cannot fail another's. Trashed directories
 are previewable but nested virtual Trash navigation is not part of the first
 slice. Internal drag is disabled in this view: manipulating a backing path
 directly would orphan its `.trashinfo` record.

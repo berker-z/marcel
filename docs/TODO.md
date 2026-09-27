@@ -98,11 +98,6 @@ Small, and none of them blocks the tag.
   `servers` file: done in Sprint 30 ([`sprints/030-network.md`](sprints/030-network.md)).
   Left from it: polling for FUSE mounts (shared with `ntfs-3g` above),
   browsing `smb://` and `network://`, and a password prompt seen live.
-- **A drive's own Trash.** Items trashed on a drive go to its `.Trash-<uid>`,
-  and the Trash place shows only the home Trash (a union view let a
-  read-only NTFS partition's Trash break Empty Trash for everything). Once
-  the session's Undo is gone they have no place in Marcel's UI; give each
-  drive its Trash, reachable while browsing that drive.
 - **Search.** Recursive find by name, riding `stream_directory`'s ticketed
   cancellation, shown as a location.
 - Create Link, the last greyed context-menu item.

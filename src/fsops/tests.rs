@@ -2643,14 +2643,18 @@ fn trash_on_another_filesystem_uses_its_own_trash_directory() {
     let uid = rustix::process::getuid().as_raw();
     let backing = outcome.records[0].backing_path().to_path_buf();
     assert!(backing.starts_with(root.join(format!(".Trash-{uid}"))), "{}", backing.display());
-    assert!(
-        !super::trash::list_trash_records()
+    let lists = |dirs: &[PathBuf]| {
+        super::trash::list_trash_records(dirs)
             .unwrap()
             .records
             .iter()
-            .any(|record| record.original_path() == file),
-        "the Trash view is the home Trash, not a merge of every drive's"
+            .any(|record| record.original_path() == file)
+    };
+    assert!(
+        !lists(&[super::trash::home_trash().unwrap()]),
+        "the home Trash is not a merge of every drive's"
     );
+    assert!(lists(&super::trash::drive_trash_dirs(&root)), "the drive's own Trash lists it");
 
     let restored = super::trash::restore_trash_records(&outcome.records).unwrap();
     assert_eq!(restored.records.len(), 1);

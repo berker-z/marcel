@@ -22,6 +22,9 @@ pub enum Location {
 pub enum TrashScope {
     /// The user's own, `~/.local/share/Trash`.
     Home,
+    /// The Trash at the top of the drive mounted here, where items trashed
+    /// on that drive go (`.Trash-<uid>`, or `.Trash/<uid>`).
+    Drive(PathBuf),
 }
 
 impl Location {
@@ -44,6 +47,10 @@ impl Location {
         match self {
             Self::Folder(path) => path.display().to_string(),
             Self::Trash(TrashScope::Home) => "Trash".to_string(),
+            Self::Trash(TrashScope::Drive(topdir)) => match topdir.file_name() {
+                Some(name) => format!("Trash on {}", name.to_string_lossy()),
+                None => "Trash on /".to_string(),
+            },
         }
     }
 }
@@ -62,5 +69,10 @@ mod tests {
         assert_eq!(trash.as_folder(), None);
         assert!(trash.is_trash());
         assert_eq!(trash.label(), "Trash");
+
+        let drive = Location::Trash(TrashScope::Drive("/run/media/me/STICK".into()));
+        assert_eq!(drive.as_folder(), None);
+        assert_eq!(drive.label(), "Trash on STICK");
+        assert_ne!(drive, trash, "each Trash is its own place");
     }
 }

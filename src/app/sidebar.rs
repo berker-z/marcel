@@ -14,7 +14,7 @@ use gpui_component::{
 
 use crate::{
     bookmarks::Bookmark,
-    browse::location::Location,
+    browse::location::{Location, TrashScope},
     desktop::{
         icons::IconProvider,
         places::{Place, discover as discover_places},
@@ -453,7 +453,16 @@ impl Marcel {
         if !volume.is_mounted() && !volume.can_eject() {
             return None;
         }
-        let rows = usize::from(volume.is_mounted()) + usize::from(volume.can_eject());
+        // A drive's Trash holds what was trashed on it, which the home Trash
+        // does not show. A picker never goes to a Trash.
+        let trash = volume
+            .mount_point
+            .clone()
+            .map(|topdir| Location::Trash(TrashScope::Drive(topdir)))
+            .filter(|trash| self.can_visit(trash));
+        let rows = usize::from(trash.is_some())
+            + usize::from(volume.is_mounted())
+            + usize::from(volume.can_eject());
         let height = BOOKMARK_MENU_HEIGHT + 30.0 * (rows as f32 - 1.0);
         let (left, top) = clamp_to_window(menu.position, (BOOKMARK_MENU_WIDTH, height), window);
         let unmount = volume.clone();
@@ -464,6 +473,14 @@ impl Marcel {
                     this.sidebar.volume_menu = None;
                     cx.notify();
                 }))
+                .when_some(trash, |this, trash| {
+                    this.child(menu_row(("volume-menu-trash", 2), "Open Trash", true, cx).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.sidebar.volume_menu = None;
+                            this.navigate(trash.clone(), Vec::new(), true, cx);
+                        }),
+                    ))
+                })
                 .when(volume.is_mounted(), |this| {
                     this.child(menu_row(("volume-menu-unmount", 0), "Unmount", true, cx).on_click(
                         cx.listener(move |this, _, window, cx| {

@@ -240,7 +240,12 @@ impl Marcel {
             DeletePermanently => {
                 !busy && self.has_selection() && (!trash || self.selection_has_trash_records())
             }
-            EmptyTrash => trash && !busy && !self.sidebar.trash_records.is_empty(),
+            EmptyTrash => {
+                trash
+                    && !busy
+                    && !self.sidebar.trash_read_only
+                    && !self.sidebar.trash_records.is_empty()
+            }
             UndoFileOperation => operations.can_undo(),
             RedoFileOperation => operations.can_redo(),
             ToggleSidebar => true,

@@ -50,6 +50,11 @@ impl TrashRecord {
         &self.backing_path
     }
 
+    /// Whether this entry is in the Trash directory `trash_dir`.
+    pub fn is_in(&self, trash_dir: &Path) -> bool {
+        self.info_path.starts_with(trash_dir)
+    }
+
     fn from_item(item: trash::TrashItem) -> Result<Self> {
         let info_path = PathBuf::from(&item.id);
         let backing_path = backing_path_from_info(&info_path)?;
@@ -113,8 +118,9 @@ impl TrashOutcome {
 
 pub fn path_overlaps_system_trash(path: &Path) -> Result<bool> {
     ensure_home_trash();
-    let roots = trash::os_limited::trash_folders().context("Could not resolve the system Trash")?;
-    Ok(roots.iter().any(|root| paths_overlap_trash_root(path, root)))
+    let home_trash = home_trash_dir().context("Neither XDG_DATA_HOME nor HOME is set")?;
+    let sites = TrashSites::discover(&home_trash)?;
+    Ok(sites.protected_roots(path).iter().any(|root| paths_overlap_trash_root(path, root)))
 }
 
 /// What one enumeration of the system Trash found.
@@ -126,6 +132,10 @@ pub fn path_overlaps_system_trash(path: &Path) -> Result<bool> {
 pub struct TrashListing {
     pub records: Vec<TrashRecord>,
     pub unreadable: Vec<String>,
+    /// The Trash is on a filesystem mounted read-only: it can be looked at
+    /// and restored from, since restoring moves things off it only where
+    /// its drive allows, but not emptied.
+    pub read_only: bool,
 }
 
 /// One sentence naming what a Trash listing could not describe, if anything.
@@ -141,24 +151,137 @@ pub fn unreadable_trash_warning(unreadable: &[String]) -> Option<String> {
     })
 }
 
-/// The entries of the home Trash. The crate also lists the `.Trash-<uid>` of
-/// every mounted drive, and items trashed on a drive still go there, but the
-/// view is not a merge of them: a drive's Trash lives and fails with its drive.
-pub fn list_trash_records() -> Result<TrashListing> {
-    ensure_home_trash();
-    let home_trash = home_trash_dir().context("Neither XDG_DATA_HOME nor HOME is set")?;
-    let home_trash = canonicalize_or_parents(&home_trash);
+/// The entries of the Trash directories given, and nothing else.
+///
+/// One Trash is one place: the home Trash, or the Trash of one drive. The
+/// `trash` crate's `list` reads every mounted drive's Trash on the way to
+/// any of them, so one read-only drive broke Empty Trash for everything and
+/// one stalled network mount could hang the listing. This reads only
+/// `dirs`, from their `info/` directories, the way the crate reads each one.
+pub fn list_trash_records(dirs: &[PathBuf]) -> Result<TrashListing> {
     let mut listing = TrashListing::default();
-    for item in trash::os_limited::list().context("Could not inspect the system Trash")? {
-        if !canonicalize_or_parents(Path::new(&item.id)).starts_with(&home_trash) {
-            continue;
-        }
-        match TrashRecord::from_item(item) {
-            Ok(record) => listing.records.push(record),
-            Err(error) => listing.unreadable.push(error.to_string()),
+    for dir in dirs {
+        let (items, unreadable) = read_trash_dir(dir)
+            .with_context(|| format!("Could not read the Trash at “{}”", dir.display()))?;
+        listing.unreadable.extend(unreadable);
+        listing.read_only |= is_read_only_filesystem(dir);
+        for item in items {
+            match TrashRecord::from_item(item) {
+                Ok(record) => listing.records.push(record),
+                Err(error) => listing.unreadable.push(error.to_string()),
+            }
         }
     }
     Ok(listing)
+}
+
+/// The home Trash, `$XDG_DATA_HOME/Trash`, created if nothing has trashed
+/// anything yet.
+pub fn home_trash() -> Result<PathBuf> {
+    ensure_home_trash();
+    home_trash_dir().context("Neither XDG_DATA_HOME nor HOME is set")
+}
+
+/// The Trash directories of the drive mounted at `topdir`: the per-user
+/// directory inside a shared `.Trash`, when that is a real sticky directory,
+/// and `.Trash-<uid>`. The specification allows both, and a drive used from
+/// more than one system can have both.
+pub fn drive_trash_dirs(topdir: &Path) -> Vec<PathBuf> {
+    let uid = rustix::process::getuid().as_raw();
+    let mut dirs = Vec::with_capacity(2);
+    let shared = topdir.join(".Trash");
+    if is_valid_shared_trash(&shared) {
+        dirs.push(shared.join(uid.to_string()));
+    }
+    dirs.push(topdir.join(format!(".Trash-{uid}")));
+    dirs
+}
+
+/// Every entry in one Trash directory, and a line for each `.trashinfo` that
+/// does not say where its item came from. A Trash that does not exist yet is
+/// empty.
+fn read_trash_dir(trash_dir: &Path) -> io::Result<(Vec<trash::TrashItem>, Vec<String>)> {
+    let info = trash_dir.join("info");
+    let entries = match fs::read_dir(&info) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        Err(error) => return Err(error),
+    };
+    let topdir = trash_topdir(trash_dir);
+    let mut items = Vec::new();
+    let mut unreadable = Vec::new();
+    for entry in entries.flatten() {
+        let info_path = entry.path();
+        if info_path.extension() != Some(OsStr::new("trashinfo"))
+            || !entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            continue;
+        }
+        // Removed by someone else since the directory was read: not an entry.
+        let Ok(text) = fs::read_to_string(&info_path) else {
+            continue;
+        };
+        let original = trashinfo_original_path(&text, topdir);
+        let parts = original.as_deref().and_then(|path| Some((path.file_name()?, path.parent()?)));
+        let Some((name, parent)) = parts else {
+            unreadable.push(format!("“{}” does not say where it came from", info_path.display()));
+            continue;
+        };
+        items.push(trash::TrashItem {
+            id: info_path.clone().into_os_string(),
+            name: name.to_os_string(),
+            original_parent: parent.to_path_buf(),
+            time_deleted: -1,
+        });
+    }
+    Ok((items, unreadable))
+}
+
+/// The top of the drive a Trash directory belongs to, which a relative
+/// `Path=` in its `.trashinfo` files is relative to: the parent of
+/// `.Trash-<uid>`, the grandparent of `.Trash/<uid>`. The home Trash writes
+/// absolute paths, and gets `/`.
+fn trash_topdir(trash_dir: &Path) -> &Path {
+    let name = trash_dir.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    let parent = trash_dir.parent();
+    if name.starts_with(".Trash-") {
+        return parent.unwrap_or(Path::new("/"));
+    }
+    match parent {
+        Some(shared) if shared.file_name() == Some(OsStr::new(".Trash")) => {
+            shared.parent().unwrap_or(Path::new("/"))
+        }
+        _ => Path::new("/"),
+    }
+}
+
+/// The `Path=` of a `.trashinfo`, percent-decoded one component at a time as
+/// the `trash` crate does (a decoded `/` must not become a separator), and
+/// joined to `topdir` when relative.
+fn trashinfo_original_path(text: &str, topdir: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "Path").then(|| value.trim())
+    })?;
+    let path: PathBuf = Path::new(value)
+        .iter()
+        .map(|part| {
+            let bytes = percent_encoding::percent_decode(part.as_encoded_bytes()).collect();
+            std::ffi::OsString::from_vec(bytes)
+        })
+        .collect();
+    Some(if path.is_relative() { topdir.join(path) } else { path })
+}
+
+/// Whether `path`'s filesystem is mounted read-only.
+fn is_read_only_filesystem(path: &Path) -> bool {
+    use rustix::fs::StatVfsMountFlags;
+
+    rustix::fs::statvfs(path).is_ok_and(|stats| stats.f_flag.contains(StatVfsMountFlags::RDONLY))
 }
 
 pub fn purge_trash_records(
@@ -269,11 +392,7 @@ pub struct NoTrash {
 
 /// Whether the filesystem holding `path`'s directory is mounted read-only.
 fn is_on_read_only_filesystem(path: &Path) -> bool {
-    use rustix::fs::StatVfsMountFlags;
-
-    path.parent()
-        .and_then(|parent| rustix::fs::statvfs(parent).ok())
-        .is_some_and(|stats| stats.f_flag.contains(StatVfsMountFlags::RDONLY))
+    path.parent().is_some_and(is_read_only_filesystem)
 }
 
 /// Why these paths cannot go to any Trash, if they cannot, found before an
@@ -288,14 +407,6 @@ pub fn trash_unavailable_for(paths: &[PathBuf]) -> Option<NoTrash> {
 
 pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
     ensure_home_trash();
-    let trash_roots = match trash::os_limited::trash_folders() {
-        Ok(roots) => roots,
-        Err(error) => {
-            return TrashOutcome::all_failed(paths, || {
-                format!("Could not resolve the system Trash: {error}")
-            });
-        }
-    };
     let sites = match home_trash_dir()
         .context("Neither XDG_DATA_HOME nor HOME is set")
         .and_then(|home_trash| TrashSites::discover(&home_trash))
@@ -307,11 +418,22 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
             });
         }
     };
-    let existing_ids = match trash::os_limited::list() {
+    // Only the Trash directories these paths will land in are read, before
+    // and after, to tell the new entries from the old; the rest of the
+    // system's Trashes are none of this operation's business.
+    let destinations =
+        paths.iter().map(|path| sites.trash_for(path)).collect::<std::collections::BTreeSet<_>>();
+    let read_entries = |destinations: &std::collections::BTreeSet<PathBuf>| {
+        destinations.iter().try_fold(Vec::new(), |mut items, dir| {
+            items.extend(read_trash_dir(dir)?.0);
+            io::Result::Ok(items)
+        })
+    };
+    let existing_ids = match read_entries(&destinations) {
         Ok(items) => items.into_iter().map(|item| item.id).collect::<HashSet<_>>(),
         Err(error) => {
             return TrashOutcome::all_failed(paths, || {
-                format!("Could not inspect the system Trash: {error}")
+                format!("Could not inspect the Trash: {error}")
             });
         }
     };
@@ -319,7 +441,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
     let mut successful = Vec::new();
     let mut failures = Vec::new();
     for path in paths {
-        if trash_roots.iter().any(|root| paths_overlap_trash_root(path, root)) {
+        if sites.protected_roots(path).iter().any(|root| paths_overlap_trash_root(path, root)) {
             failures.push(PathFailure::new(
                 path,
                 format!(
@@ -365,7 +487,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
         return TrashOutcome { records: Vec::new(), completed, failures, undo_unavailable: false };
     }
 
-    let new_items = match trash::os_limited::list() {
+    let new_items = match read_entries(&destinations) {
         Ok(items) => {
             items.into_iter().filter(|item| !existing_ids.contains(&item.id)).collect::<Vec<_>>()
         }
@@ -478,6 +600,21 @@ impl TrashSites {
             .iter()
             .find(|mount| path.starts_with(mount))
             .map_or(Path::new("/"), PathBuf::as_path)
+    }
+
+    /// Every Trash `path` could be inside or contain, found without touching
+    /// any mount but the ones involved: the home Trash, the Trashes at the top
+    /// of `path`'s own drive, and those of any drive mounted below `path`.
+    fn protected_roots(&self, path: &Path) -> Vec<PathBuf> {
+        let uid = self.uid;
+        let at = |topdir: &Path| [topdir.join(".Trash"), topdir.join(format!(".Trash-{uid}"))];
+        let resolved = resolve_parent_of(path);
+        let mut roots = vec![self.home_trash.clone()];
+        roots.extend(at(self.topdir_of(&resolved)));
+        for mount in self.mounts.iter().filter(|mount| mount.starts_with(&resolved)) {
+            roots.extend(at(mount));
+        }
+        roots
     }
 
     /// The Trash directory the crate will rename `path` into.
@@ -912,6 +1049,78 @@ mod tests {
         let original_parent = sandbox.dir("original");
         let record = seeded_record(&sandbox, "Trash", &original_parent, "note.txt");
         (sandbox, original_parent, record)
+    }
+
+    /// A listing reads the Trash directories it is given and nothing else,
+    /// so a second Trash beside it, or any other drive's, is not in it.
+    #[test]
+    fn a_listing_reads_only_the_trash_it_is_given() {
+        let sandbox = Sandbox::new();
+        let original_parent = sandbox.dir("original");
+        let home = seeded_record(&sandbox, "home/Trash", &original_parent, "mine.txt");
+        seeded_record(&sandbox, "stick/.Trash-4242", &original_parent, "theirs.txt");
+
+        let listing = list_trash_records(&[sandbox.path("home/Trash")]).unwrap();
+        assert_eq!(listing.records, vec![home]);
+        assert!(listing.unreadable.is_empty());
+        assert!(!listing.read_only);
+
+        let missing = list_trash_records(&[sandbox.path("nowhere/.Trash-4242")]).unwrap();
+        assert!(missing.records.is_empty(), "a Trash nothing has used yet is empty");
+    }
+
+    /// A drive's Trash may write paths relative to the top of the drive, and
+    /// percent-encodes what would not survive the format.
+    #[test]
+    fn a_drive_trash_path_is_read_relative_to_its_drive() {
+        let topdir = Path::new("/run/media/me/STICK");
+        assert_eq!(trash_topdir(&topdir.join(".Trash-1000")), topdir);
+        assert_eq!(trash_topdir(&topdir.join(".Trash/1000")), topdir);
+        assert_eq!(trash_topdir(Path::new("/home/me/.local/share/Trash")), Path::new("/"));
+
+        let info = "[Trash Info]\nPath=Photos/Summer%202024/beach.jpg\nDeletionDate=x\n";
+        assert_eq!(
+            trashinfo_original_path(info, topdir),
+            Some(topdir.join("Photos/Summer 2024/beach.jpg"))
+        );
+        let absolute = "[Trash Info]\nPath=/home/me/a%2Fb\n";
+        assert_eq!(
+            trashinfo_original_path(absolute, topdir),
+            Some(PathBuf::from("/home/me").join("a/b")),
+            "a decoded slash stays inside its component"
+        );
+        assert_eq!(trashinfo_original_path("[Trash Info]\nDeletionDate=x\n", topdir), None);
+    }
+
+    #[test]
+    fn an_entry_that_does_not_say_where_it_came_from_is_reported() {
+        let sandbox = Sandbox::new();
+        sandbox.file("Trash/info/lost.trashinfo", "[Trash Info]\nDeletionDate=x\n");
+        sandbox.file("Trash/files/lost", b"payload");
+        let listing = list_trash_records(&[sandbox.path("Trash")]).unwrap();
+        assert!(listing.records.is_empty());
+        assert_eq!(listing.unreadable.len(), 1, "{:?}", listing.unreadable);
+        assert!(listing.unreadable[0].contains("lost.trashinfo"), "{:?}", listing.unreadable);
+    }
+
+    /// A delete must not reach into a Trash, and must not take one with it.
+    /// The Trashes it checks are the home one, its own drive's, and those of
+    /// any drive mounted below it; no other mount is looked at.
+    #[test]
+    fn a_path_is_checked_against_the_trashes_it_could_touch() {
+        let sandbox = Sandbox::new();
+        let sites = sites(&sandbox, &["media/stick", "media/stick/inner", "elsewhere"]);
+        let media = sandbox.path("media").canonicalize().unwrap();
+        let stick = media.join("stick");
+
+        let roots = sites.protected_roots(&stick.join("photo.jpg"));
+        assert!(roots.contains(&stick.join(".Trash-4242")));
+        assert!(roots.contains(&stick.join(".Trash")));
+        assert!(!roots.iter().any(|root| root.starts_with(sandbox.path("elsewhere"))));
+
+        let roots = sites.protected_roots(&media);
+        assert!(roots.contains(&stick.join(".Trash-4242")), "a drive mounted below is protected");
+        assert!(roots.contains(&stick.join("inner/.Trash-4242")));
     }
 
     #[test]

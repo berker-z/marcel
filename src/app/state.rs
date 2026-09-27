@@ -289,6 +289,9 @@ pub struct SidebarState {
     /// How many Trash entries the last listing could not describe. Empty Trash
     /// must not offer to empty a Trash it has only partly seen.
     pub unreadable_trash_entries: usize,
+    /// The Trash shown is on a read-only drive: it lists, but cannot be
+    /// emptied.
+    pub trash_read_only: bool,
     /// The slot a dragged bookmark would land in, while one is over the list.
     pub bookmark_insertion: Option<usize>,
     pub bookmark_menu: Option<BookmarkMenu>,
@@ -308,6 +311,7 @@ impl SidebarState {
             places_task: None,
             trash_records: HashMap::new(),
             unreadable_trash_entries: 0,
+            trash_read_only: false,
             bookmark_insertion: None,
             bookmark_menu: None,
             volume_menu: None,

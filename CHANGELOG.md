@@ -100,7 +100,7 @@ file arrives as the file, hard links as separate copies, and Undo puts the
 original permissions back. A tree with links to folders is copied without
 them but not moved, since the original is the only place they exist, and
 nothing is moved off a read-only drive. Trashing something on a drive uses
-that drive's own Trash, which the Trash place does not show yet. Where no
+that drive's own Trash, which Open Trash in the drive's menu shows. Where no
 Trash can exist (a network share) Marcel offers to delete permanently
 instead, and on a read-only drive it says the drive is read-only.
 
@@ -154,7 +154,9 @@ Open With… asks the desktop's application chooser, Open in Terminal starts a
 terminal in the folder (through `xdg-terminal-exec` when it is installed,
 handing it the folder only on a release that understands `--dir`), and the Trash is a place in the sidebar where items
 show Restore instead of Move to Trash and the empty-space menu offers Empty
-Trash. It is the home Trash alone, not a union of every drive's.
+Trash. It is the home Trash; a drive's own Trash opens from the drive's
+menu, and each is emptied on its own. Back and Forward go through a Trash
+like any folder.
 
 ### Appearance
 
