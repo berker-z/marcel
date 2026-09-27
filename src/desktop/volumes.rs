@@ -73,6 +73,17 @@ impl Volume {
     }
 }
 
+/// Device changes from one subscription; see [`VolumeMonitor::watch`].
+pub struct VolumeWatch(smol::stream::Boxed<()>);
+
+impl VolumeWatch {
+    pub async fn next(&mut self) -> Result<()> {
+        use smol::stream::StreamExt as _;
+
+        self.0.next().await.ok_or_else(|| anyhow!("UDisks2 stopped sending changes"))
+    }
+}
+
 /// A connection to UDisks2, or the reason there is none.
 pub struct VolumeMonitor {
     connection: zbus::Connection,
@@ -103,11 +114,15 @@ impl VolumeMonitor {
         Ok(volumes_from(&objects, &self.user, &self.home))
     }
 
-    /// Resolve once anything UDisks2 publishes has changed: a device added
-    /// or removed, or a property (a mount point, a label) updated. The next
-    /// `snapshot` says what changed; the signal payloads are not inspected,
-    /// because re-reading a few dozen objects is cheaper than tracking them.
-    pub async fn changed(&self) -> Result<()> {
+    /// Everything UDisks2 publishes that could change the list: a device
+    /// added or removed, a property (a mount point, a label) updated, or the
+    /// daemon itself restarting. The next `snapshot` says what changed; the
+    /// signal payloads are not inspected, because re-reading a few dozen
+    /// objects is cheaper than tracking them.
+    ///
+    /// Subscribed once and kept, and taken before the first `snapshot`, so a
+    /// stick plugged in between a snapshot and a fresh subscription is seen.
+    pub async fn watch(&self) -> Result<VolumeWatch> {
         use smol::stream::StreamExt as _;
 
         let added = self.objects.receive_interfaces_added().await?.map(|_| ());
@@ -120,8 +135,10 @@ impl VolumeMonitor {
             .build();
         let properties =
             zbus::MessageStream::for_match_rule(rule, &self.connection, None).await?.map(|_| ());
-        let mut any = added.race(removed).race(properties);
-        any.next().await.ok_or_else(|| anyhow!("UDisks2 stopped sending changes"))
+        let dbus = zbus::fdo::DBusProxy::new(&self.connection).await?;
+        let restarted =
+            dbus.receive_name_owner_changed_with_args(&[(0, UDISKS)]).await?.map(|_| ());
+        Ok(VolumeWatch(added.race(removed).race(properties).race(restarted).boxed()))
     }
 
     /// Mount a volume as the calling user, returning where it landed and

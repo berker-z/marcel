@@ -16,7 +16,7 @@ mod prompts;
 pub use crate::desktop::gvfs::{Mount, ShareAddress, ShareId, UriError};
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::Write as _,
     path::{Path, PathBuf},
     sync::Arc,
@@ -76,15 +76,13 @@ pub fn load(path: &Path) -> Result<LoadedServers> {
             // The file holds URIs, which is what Marcel writes; the bare-host
             // shorthand the Connect dialog takes would make any stray word
             // here a server.
-            let Ok(location) =
-                ShareAddress::parse(uri).ok().filter(|_| uri.contains("://")).ok_or(())
-            else {
+            let Ok(address) = ShareAddress::parse_uri(uri) else {
                 rejected += 1;
                 return None;
             };
             // A duplicate of a server already loaded is not user data at
             // risk; collapsing it loses nothing.
-            seen.insert(location.clone()).then_some(Server { address: location, name })
+            seen.insert(address.clone()).then_some(Server { address, name })
         })
         .collect();
     Ok(LoadedServers { servers, rejected })
@@ -119,6 +117,9 @@ pub fn save(path: &Path, servers: &[Server]) -> Result<()> {
 /// Network section is back before the user has finished wondering.
 const GVFS_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long a connection runs before Marcel mentions it can be cancelled.
+const STILL_CONNECTING_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 struct GlobalNetwork(Entity<NetworkStore>);
 
 impl Global for GlobalNetwork {}
@@ -142,6 +143,9 @@ pub struct NetworkStore {
     /// Specs whose mount or unmount is in flight, so a row can show it and a
     /// second click does not start a second call.
     busy: Vec<MountSpec>,
+    /// Connections in flight, by what they connect, each with the sender
+    /// that cancels it.
+    connecting: HashMap<MountSpec, async_channel::Sender<()>>,
     loading: bool,
     /// Why the saved list must not be modified, when it must not be; see
     /// `BookmarkStore::read_only`.
@@ -199,7 +203,18 @@ impl NetworkStore {
             let mut client = client;
             loop {
                 let _ = this.update(cx, |this, _| this.client = Some(Arc::clone(&client)));
+                // Subscribed before the first list, and kept: see `watch`.
+                let mut watch = match client.watch().await {
+                    Ok(watch) => Some(watch),
+                    Err(error) => {
+                        eprintln!("Marcel could not watch network shares: {error:#}");
+                        None
+                    }
+                };
                 let restart = loop {
+                    let Some(changes) = watch.as_mut() else {
+                        break None;
+                    };
                     match client.mounts().await {
                         Ok(mounts) => {
                             if this
@@ -214,7 +229,7 @@ impl NetworkStore {
                         }
                         Err(error) => eprintln!("Marcel could not list network shares: {error:#}"),
                     }
-                    match client.changed().await {
+                    match changes.next().await {
                         Ok(GvfsChange::Mounts) => continue,
                         // Every mount record names a backend of the daemon
                         // that has just gone, and so does the subscription
@@ -265,6 +280,7 @@ impl NetworkStore {
             servers: Vec::new(),
             icon: None,
             busy: Vec::new(),
+            connecting: HashMap::new(),
             loading: true,
             read_only: None,
             _load_task: Some(load_task),
@@ -398,13 +414,27 @@ impl NetworkStore {
         };
         let (prompts, incoming) = async_channel::unbounded();
         prompts::serve(incoming, origin, cx);
+        let (cancel, cancelled) = async_channel::bounded::<()>(1);
+        self.connecting.insert(location.spec.clone(), cancel);
+        self.warn_if_still_connecting(&location, origin, cx);
         cx.spawn(async move |this, cx| {
-            let result = match client.mount(&location.spec, prompts).await {
-                Ok(()) => {
-                    client.mounts().await.map_err(|error| MountError::Failed(format!("{error:#}")))
+            let connect = async {
+                match client.mount(&location.spec, prompts).await {
+                    Ok(()) => client
+                        .mounts()
+                        .await
+                        .map_err(|error| MountError::Failed(format!("{error:#}"))),
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
             };
+            // Cancel drops the mount call, which takes the exported
+            // MountOperation off the bus with it; GVfs gives up on its own
+            // when nothing is left to answer it.
+            let stop = async {
+                let _ = cancelled.recv().await;
+                Err(MountError::Cancelled)
+            };
+            let result = smol::future::or(connect, stop).await;
             let outcome = this.update(cx, |this, cx| {
                 this.finish(&location.spec, cx);
                 result.map(|mounts| {
@@ -496,7 +526,46 @@ impl NetworkStore {
 
     fn finish(&mut self, spec: &MountSpec, cx: &mut Context<Self>) {
         self.busy.retain(|busy| busy != spec);
+        self.connecting.remove(spec);
         cx.notify();
+    }
+
+    /// Stop a connection in flight. Whatever GVfs was waiting for (a
+    /// server that does not answer, a prompt nobody will see) is abandoned,
+    /// and the row can be clicked again.
+    pub fn cancel_connect(&mut self, share: &ShareId) {
+        if let Some(cancel) = self.connecting.remove(share.spec()) {
+            let _ = cancel.try_send(());
+        }
+    }
+
+    /// Whether a connection to `share` is in flight and can be cancelled.
+    pub fn is_connecting(&self, share: &ShareId) -> bool {
+        self.connecting.keys().any(|spec| spec == share.spec() || spec.is_served_by(share.spec()))
+    }
+
+    /// Say so once if a connection is still going after a minute: a server
+    /// that drops packets never refuses, and a row that says "…" forever
+    /// gives no hint that it can be cancelled.
+    fn warn_if_still_connecting(
+        &self,
+        location: &ShareAddress,
+        origin: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let spec = location.spec.clone();
+        let label = location.label();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(STILL_CONNECTING_AFTER).await;
+            let waiting = this.read_with(cx, |this, _| this.connecting.contains_key(&spec));
+            if waiting.unwrap_or(false) {
+                let report = Report::Warning(format!(
+                    "Still connecting to “{label}”; click ✕ on its row to stop"
+                ));
+                surface::deliver(origin, Some(report), cx);
+            }
+        })
+        .detach();
     }
 
     fn refuse(&self, reason: String, origin: AnyWindowHandle, cx: &mut Context<Self>) {

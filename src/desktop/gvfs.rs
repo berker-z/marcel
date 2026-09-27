@@ -697,7 +697,7 @@ impl std::fmt::Display for MountError {
 
 impl std::error::Error for MountError {}
 
-/// What [`GvfsClient::changed`] woke for.
+/// What a [`GvfsWatch`] woke for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GvfsChange {
     /// A share was connected or disconnected: the list needs re-reading.
@@ -706,6 +706,17 @@ pub enum GvfsChange {
     /// record held anywhere is stale, and the connection to the old daemon's
     /// signals is worth nothing, so the caller starts over.
     DaemonReplaced,
+}
+
+/// Mount and daemon changes from one subscription; see [`GvfsClient::watch`].
+pub struct GvfsWatch(smol::stream::Boxed<GvfsChange>);
+
+impl GvfsWatch {
+    pub async fn next(&mut self) -> Result<GvfsChange> {
+        use smol::stream::StreamExt as _;
+
+        self.0.next().await.ok_or_else(|| anyhow!("GVfs stopped sending changes"))
+    }
 }
 
 /// A connection to GVfs's daemon, or the reason there is none.
@@ -764,8 +775,7 @@ impl GvfsClient {
         Ok(infos.into_iter().map(mount_from).collect())
     }
 
-    /// Resolve once a mount has come or gone, or the daemon behind the name
-    /// has been replaced.
+    /// Changes to the mounts, and replacement of the daemon behind the name.
     ///
     /// The second case is why this reports which happened. A `Mount` records
     /// the unique bus name of the backend serving it (`:1.227769`), and a
@@ -775,7 +785,13 @@ impl GvfsClient {
     /// whether the share is still mounted. Nothing in the tracker's own
     /// signals says this has happened, so the bus's `NameOwnerChanged` is
     /// what has to say it.
-    pub async fn changed(&self) -> Result<GvfsChange> {
+    ///
+    /// Subscribed once and kept, and taken before the first
+    /// [`mounts`](Self::mounts): a share mounted between a list and a fresh
+    /// subscription would otherwise go unseen until something else changed,
+    /// and subscribing anew after every change cost three match rules and a
+    /// proxy each time.
+    pub async fn watch(&self) -> Result<GvfsWatch> {
         use smol::stream::StreamExt as _;
 
         let mounted = self.tracker.receive_signal("Mounted").await?.map(|_| GvfsChange::Mounts);
@@ -785,8 +801,7 @@ impl GvfsClient {
             .receive_name_owner_changed_with_args(&[(0, DAEMON)])
             .await?
             .map(|_| GvfsChange::DaemonReplaced);
-        let mut any = mounted.race(unmounted).race(replaced);
-        any.next().await.ok_or_else(|| anyhow!("GVfs stopped sending changes"))
+        Ok(GvfsWatch(mounted.race(unmounted).race(replaced).boxed()))
     }
 
     /// Connect a share. Returns once the backend has it mounted, however
@@ -850,10 +865,7 @@ impl GvfsClient {
     }
 
     /// Export a fresh `MountOperation` for one call.
-    async fn operation(
-        &self,
-        prompts: Sender<Prompt>,
-    ) -> Result<ExportedOperation<'_>, MountError> {
+    async fn operation(&self, prompts: Sender<Prompt>) -> Result<ExportedOperation, MountError> {
         let number = self.next_operation.fetch_add(1, Ordering::Relaxed);
         let path = ObjectPath::try_from(format!("{OPERATION_PATH}/{number}"))
             .map_err(|error| MountError::Failed(format!("{error:#}")))?;
@@ -864,7 +876,12 @@ impl GvfsClient {
             .at(path.clone(), operation)
             .await
             .map_err(|error| MountError::Failed(format!("Could not answer GVfs: {error:#}")))?;
-        Ok(ExportedOperation { client: self, path: path.into(), cancelled })
+        Ok(ExportedOperation {
+            connection: self.connection.clone(),
+            path: path.into(),
+            cancelled,
+            removed: false,
+        })
     }
 }
 
@@ -927,28 +944,51 @@ fn names_a_missing_peer(error_name: &str) -> bool {
 }
 
 /// A `MountOperation` on the bus for the span of one call.
-struct ExportedOperation<'a> {
-    client: &'a GvfsClient,
+struct ExportedOperation {
+    connection: zbus::Connection,
     path: OwnedObjectPath,
     cancelled: Arc<AtomicBool>,
+    removed: bool,
 }
 
-impl ExportedOperation<'_> {
+impl ExportedOperation {
     /// The `(so)` a backend calls back to.
     fn source(&self) -> (String, OwnedObjectPath) {
-        let name =
-            self.client.connection.unique_name().map(|name| name.to_string()).unwrap_or_default();
+        let name = self.connection.unique_name().map(|name| name.to_string()).unwrap_or_default();
         (name, self.path.clone())
     }
 
-    async fn finish(self, result: zbus::Result<()>) -> Result<(), MountError> {
-        let _ =
-            self.client.connection.object_server().remove::<MountOperation, _>(&self.path).await;
+    async fn finish(mut self, result: zbus::Result<()>) -> Result<(), MountError> {
+        let _ = self.connection.object_server().remove::<MountOperation, _>(&self.path).await;
+        self.removed = true;
         match result {
             Ok(()) => Ok(()),
             Err(_) if self.cancelled.load(Ordering::Relaxed) => Err(MountError::Cancelled),
             Err(error) => Err(MountError::Failed(describe(&error))),
         }
+    }
+}
+
+/// An operation dropped without `finish` (an early `?`, or a mount future
+/// the caller stopped waiting for) still leaves the bus. Left exported, it
+/// would keep its prompt channel open, and the task showing that channel's
+/// prompts would wait forever.
+impl Drop for ExportedOperation {
+    fn drop(&mut self) {
+        if self.removed {
+            return;
+        }
+        let connection = self.connection.clone();
+        let path = self.path.clone();
+        self.connection
+            .executor()
+            .spawn(
+                async move {
+                    let _ = connection.object_server().remove::<MountOperation, _>(&path).await;
+                },
+                "marcel-unexport-mount-operation",
+            )
+            .detach();
     }
 }
 

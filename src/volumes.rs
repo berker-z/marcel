@@ -13,7 +13,9 @@ use std::{
     sync::Arc,
 };
 
-use gpui::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Task};
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, Global, Task, WeakEntity,
+};
 
 use crate::{
     desktop::{
@@ -22,6 +24,12 @@ use crate::{
     },
     surface::{self, Report},
 };
+
+/// How long to wait before asking for UDisks2 again after losing it, doubling
+/// up to [`UDISKS_RECONNECT_LIMIT`] while it stays away. It is a system
+/// service, so it is usually back within a second of a restart.
+const UDISKS_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const UDISKS_RECONNECT_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 struct GlobalVolumes(Entity<VolumeStore>);
 
@@ -58,7 +66,7 @@ impl VolumeStore {
     fn start(home: PathBuf, cx: &mut Context<Self>) -> Self {
         let user = std::env::var("USER").unwrap_or_default();
         let watch = cx.spawn(async move |this, cx| {
-            let monitor = match VolumeMonitor::connect(user, home).await {
+            let mut monitor = match VolumeMonitor::connect(user.clone(), home.clone()).await {
                 Ok(monitor) => Arc::new(monitor),
                 // No system bus, or nothing on it: a container, a BSD one day.
                 // The sidebar has no Devices section and nothing else changes.
@@ -67,38 +75,34 @@ impl VolumeStore {
                     return;
                 }
             };
-            let _ = this.update(cx, |this, _| this.monitor = Some(Arc::clone(&monitor)));
             loop {
-                match monitor.snapshot().await {
-                    Ok(volumes) => {
-                        let icons = {
-                            let volumes = volumes.clone();
-                            cx.background_executor()
-                                .spawn(smol::unblock(move || icons_for(&volumes)))
-                                .await
-                        };
-                        if this
-                            .update(cx, |this, cx| {
-                                this.volumes = volumes;
-                                this.icons = icons;
-                                cx.notify();
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Err(error) => eprintln!("Marcel could not list drives: {error:#}"),
-                }
-                if let Err(error) = monitor.changed().await {
-                    eprintln!("Marcel stopped watching drives: {error:#}");
-                    let _ = this.update(cx, |this, cx| {
+                let _ = this.update(cx, |this, _| this.monitor = Some(Arc::clone(&monitor)));
+                let stopped = watch_volumes(&monitor, &this, cx).await;
+                let Err(error) = stopped else {
+                    // The store is gone.
+                    return;
+                };
+                eprintln!("Marcel stopped watching drives: {error:#}");
+                // The list belongs to a connection that no longer works; the
+                // section comes back when UDisks2 does.
+                if this
+                    .update(cx, |this, cx| {
                         this.monitor = None;
                         this.volumes.clear();
                         cx.notify();
-                    });
+                    })
+                    .is_err()
+                {
                     return;
                 }
+                let mut delay = UDISKS_RECONNECT_DELAY;
+                monitor = loop {
+                    cx.background_executor().timer(delay).await;
+                    match VolumeMonitor::connect(user.clone(), home.clone()).await {
+                        Ok(monitor) => break Arc::new(monitor),
+                        Err(_) => delay = (delay * 2).min(UDISKS_RECONNECT_LIMIT),
+                    }
+                };
             }
         });
         Self {
@@ -276,4 +280,35 @@ fn icons_for(volumes: &[Volume]) -> HashMap<PathBuf, PathBuf> {
             provider.icon_for_volume(volume.removable).map(|icon| (volume.device.clone(), icon))
         })
         .collect()
+}
+
+/// Keep `this` in step with UDisks2 until the connection fails, which is
+/// the `Err`, or the store is dropped, which is the `Ok`.
+async fn watch_volumes(
+    monitor: &VolumeMonitor,
+    this: &WeakEntity<VolumeStore>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    // Subscribed before the first snapshot: see `VolumeMonitor::watch`.
+    let mut changes = monitor.watch().await?;
+    loop {
+        match monitor.snapshot().await {
+            Ok(volumes) => {
+                let icons = {
+                    let volumes = volumes.clone();
+                    cx.background_executor().spawn(smol::unblock(move || icons_for(&volumes))).await
+                };
+                let updated = this.update(cx, |this, cx| {
+                    this.volumes = volumes;
+                    this.icons = icons;
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    return Ok(());
+                }
+            }
+            Err(error) => eprintln!("Marcel could not list drives: {error:#}"),
+        }
+        changes.next().await?;
+    }
 }

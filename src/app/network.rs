@@ -14,11 +14,12 @@ use gpui_component::{
     ActiveTheme as _, WindowExt as _,
     button::ButtonVariant,
     dialog::DialogButtonProps,
+    h_flex,
     input::{Input, InputState},
     notification::Notification,
 };
 
-use crate::network::{Mount, Server, ShareAddress};
+use crate::network::{Mount, Server, ShareAddress, ShareId};
 
 use super::{
     Marcel,
@@ -198,6 +199,7 @@ impl Marcel {
     fn network_row(&self, row: NetworkRow, cx: &mut Context<Self>) -> AnyElement {
         let NetworkRow { id, label, address, directory, active, busy, target, mount } = row;
         let on_disconnect = mount;
+        let share = address.id();
         let colors = cx.theme().colors;
         let icon =
             sidebar_icon(self.network.read(cx).icon().map(Path::to_path_buf), colors.primary);
@@ -239,7 +241,13 @@ impl Marcel {
                 .child(label),
         )
         .when(busy, |this| {
-            this.child(div().text_xs().text_color(colors.muted_foreground).child("…"))
+            // A connection can be stopped; a disconnection is GVfs's to
+            // finish, and says so through its own prompts.
+            if self.network.read(cx).is_connecting(&share) {
+                this.child(cancel_connect_button(("network-cancel", id.1), share.clone(), cx))
+            } else {
+                this.child(div().text_xs().text_color(colors.muted_foreground).child("…"))
+            }
         })
         .when_some(on_disconnect.filter(|_| !busy), |this, mount| {
             this.child(
@@ -347,14 +355,16 @@ impl Marcel {
                 self.render_server(index, server, active_server == Some(index), cx)
             })
             .collect();
-        rows.extend(pending.into_iter().map(|share| {
+        rows.extend(pending.into_iter().enumerate().map(|(index, share)| {
             let label = share.label();
-            div()
+            h_flex()
                 .px_3()
                 .py_1()
+                .gap_1()
                 .text_xs()
                 .text_color(colors.muted_foreground)
-                .child(format!("Connecting to {label}…"))
+                .child(div().flex_1().min_w_0().child(format!("Connecting to {label}…")))
+                .child(cancel_connect_button(("network-pending-cancel", index), share, cx))
                 .into_any_element()
         }));
         if loading {
@@ -476,4 +486,28 @@ impl Marcel {
                 .into_any_element(),
         )
     }
+}
+
+/// The ✕ that stops a connection in flight.
+fn cancel_connect_button(
+    id: (&'static str, usize),
+    share: ShareId,
+    cx: &mut Context<Marcel>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    div()
+        .id(id)
+        .flex_none()
+        .px_1()
+        .rounded(cx.theme().radius)
+        .text_color(colors.muted_foreground)
+        .hover(|this| this.text_color(colors.sidebar_accent_foreground))
+        .cursor_pointer()
+        .child("✕")
+        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            if !event.is_right_click() {
+                this.network.update(cx, |store, _| store.cancel_connect(&share));
+                cx.stop_propagation();
+            }
+        }))
 }
