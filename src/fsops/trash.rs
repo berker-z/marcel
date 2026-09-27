@@ -140,10 +140,18 @@ pub fn unreadable_trash_warning(unreadable: &[String]) -> Option<String> {
     })
 }
 
+/// The entries of the home Trash. The crate also lists the `.Trash-<uid>` of
+/// every mounted drive, and items trashed on a drive still go there, but the
+/// view is not a merge of them: a drive's Trash lives and fails with its drive.
 pub fn list_trash_records() -> Result<TrashListing> {
     ensure_home_trash();
+    let home_trash = home_trash_dir().context("Neither XDG_DATA_HOME nor HOME is set")?;
+    let home_trash = canonicalize_or_parents(&home_trash);
     let mut listing = TrashListing::default();
     for item in trash::os_limited::list().context("Could not inspect the system Trash")? {
+        if !canonicalize_or_parents(Path::new(&item.id)).starts_with(&home_trash) {
+            continue;
+        }
         match TrashRecord::from_item(item) {
             Ok(record) => listing.records.push(record),
             Err(error) => listing.unreadable.push(error.to_string()),
@@ -248,12 +256,30 @@ fn ensure_trash_dir(trash_dir: &Path) {
     let _ = create_private_dir_all(trash_dir);
 }
 
-/// Why these paths cannot go to any Trash, if they cannot: the sentence
-/// `trash_paths` would fail them with, found before an operation starts so
-/// the window can offer a permanent delete instead. `None` when there is a
-/// Trash for every one of them, or when that cannot be told yet, in which
-/// case the operation itself reports.
-pub fn trash_unavailable_for(paths: &[PathBuf]) -> Option<String> {
+/// Why a path cannot go to any Trash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoTrash {
+    /// The sentence `trash_paths` would fail it with.
+    pub reason: String,
+    /// Nothing can be removed there at all, so a permanent delete is not an
+    /// alternative worth offering.
+    pub read_only: bool,
+}
+
+/// Whether the filesystem holding `path`'s directory is mounted read-only.
+fn is_on_read_only_filesystem(path: &Path) -> bool {
+    use rustix::fs::StatVfsMountFlags;
+
+    path.parent()
+        .and_then(|parent| rustix::fs::statvfs(parent).ok())
+        .is_some_and(|stats| stats.f_flag.contains(StatVfsMountFlags::RDONLY))
+}
+
+/// Why these paths cannot go to any Trash, if they cannot, found before an
+/// operation starts so the window can offer a permanent delete instead.
+/// `None` when there is a Trash for every one of them, or when that cannot be
+/// told yet, in which case the operation itself reports.
+pub fn trash_unavailable_for(paths: &[PathBuf]) -> Option<NoTrash> {
     ensure_home_trash();
     let sites = home_trash_dir().and_then(|home_trash| TrashSites::discover(&home_trash).ok())?;
     paths.iter().find_map(|path| sites.no_trash_reason(path))
@@ -316,7 +342,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> TrashOutcome {
             failures.push(PathFailure::new(path, refusal));
             continue;
         }
-        if let Some(reason) = sites.no_trash_reason(path) {
+        if let Some(NoTrash { reason, .. }) = sites.no_trash_reason(path) {
             failures.push(PathFailure::new(
                 path,
                 format!("Could not move “{}” to Trash: {reason}", path.display()),
@@ -467,24 +493,30 @@ impl TrashSites {
         topdir.join(format!(".Trash-{}", self.uid))
     }
 
-    /// Why `path` has no Trash to go to, if it has none: the directory the
-    /// crate would rename it into does not exist and cannot be made.
+    /// Why `path` has no Trash to go to, if it has none.
     ///
-    /// Every GVfs share is one FUSE filesystem rooted at `/run/user/<uid>/gvfs`,
-    /// and that root is a listing of mounts that refuses a `mkdir`, so a file
-    /// on a share can never be trashed; a read-only stick is the other case.
-    /// Making the directory here is what the crate would do a moment later,
-    /// so a successful attempt changes nothing about what follows.
-    fn no_trash_reason(&self, path: &Path) -> Option<String> {
+    /// A read-only filesystem comes first: nothing can leave it, by Trash or
+    /// otherwise, so offering a permanent delete there would only fail a
+    /// second time. Otherwise it is the directory the crate would rename into
+    /// not existing and not being creatable. Every GVfs share is one FUSE
+    /// filesystem rooted at `/run/user/<uid>/gvfs`, and that root is a listing
+    /// of mounts that refuses a `mkdir`, so a file on a share can never be
+    /// trashed. Making the directory here is what the crate would do a moment
+    /// later, so a successful attempt changes nothing about what follows.
+    fn no_trash_reason(&self, path: &Path) -> Option<NoTrash> {
+        if is_on_read_only_filesystem(path) {
+            return Some(NoTrash { reason: "the filesystem is read-only".into(), read_only: true });
+        }
         let trash = self.trash_for(path);
         if trash.is_dir() {
             return None;
         }
         // The OS error adds nothing a person can act on: ENOENT at a FUSE
-        // root and EROFS on a stick both mean the same thing here.
-        create_private_dir_all(&trash)
-            .err()
-            .map(|_| "no Trash exists on this filesystem and one cannot be created".to_string())
+        // root means the same thing as any other refusal here.
+        create_private_dir_all(&trash).err().map(|_| NoTrash {
+            reason: "no Trash exists on this filesystem and one cannot be created".into(),
+            read_only: false,
+        })
     }
 
     /// Why `path` must not be handed to the crate, if its rename would cross
@@ -1084,7 +1116,7 @@ mod tests {
         let share = sandbox.path("share").canonicalize().unwrap();
         fs::set_permissions(&share, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let reason = sites.no_trash_reason(&share.join("photo.jpg")).expect("must refuse");
+        let reason = sites.no_trash_reason(&share.join("photo.jpg")).expect("must refuse").reason;
         assert!(reason.contains("cannot be created"), "{reason}");
         assert!(!share.join(".Trash-4242").exists());
 
@@ -1092,6 +1124,22 @@ mod tests {
         assert_eq!(sites.no_trash_reason(&share.join("photo.jpg")), None);
         assert!(share.join(".Trash-4242").is_dir(), "a Trash the mount allows is made on the spot");
         assert_eq!(sites.no_trash_reason(&sandbox.path("home/report.pdf")), None);
+    }
+
+    /// A read-only mount has no Trash and no permanent delete either, and
+    /// says so before anything tries to create a directory on it.
+    #[test]
+    fn a_read_only_mount_is_named_as_read_only() {
+        let store = Path::new("/nix/store");
+        if !is_on_read_only_filesystem(&store.join("anything")) {
+            eprintln!("skipping: no read-only mount at {}", store.display());
+            return;
+        }
+        let sandbox = Sandbox::new();
+        let sites = sites(&sandbox, &[]);
+        let refusal = sites.no_trash_reason(&store.join("anything")).expect("must refuse");
+        assert!(refusal.read_only);
+        assert_eq!(refusal.reason, "the filesystem is read-only");
     }
 
     /// The deciding comparison is between devices, because a mount table

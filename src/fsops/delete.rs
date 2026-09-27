@@ -241,9 +241,17 @@ fn stage_root(
                 )),
             },
         });
-    staging.with_context(|| {
-        format!("Could not safely stage “{}” for permanent deletion", original.display())
-    })?;
+    if let Err(error) = staging {
+        // Staging is the first write, so a read-only mount fails here with
+        // nothing yet touched. Say that, rather than something about staging.
+        if is_read_only_refusal(&error) {
+            bail!("Cannot delete “{}”: it is on a read-only filesystem", original.display());
+        }
+        return Err(error.context(format!(
+            "Could not safely stage “{}” for permanent deletion",
+            original.display()
+        )));
+    }
     Ok(quarantine)
 }
 
@@ -507,6 +515,15 @@ fn top_level_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     unique
 }
 
+/// Whether a staging failure is the filesystem being mounted read-only. The
+/// rename's error reaches here as the bare `io::Error`, converted without
+/// context, so it can be looked at directly.
+fn is_read_only_refusal(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::ReadOnlyFilesystem)
+}
+
 fn reserve_quarantine_path(original: &Path) -> Result<PathBuf> {
     let parent = original.parent().context("Delete target has no parent")?;
     let name = original.file_name().context("Delete target has no name")?;
@@ -548,6 +565,17 @@ mod tests {
 
     fn key(path: &Path) -> ObjectKey {
         ObjectKey::of(&fs::symlink_metadata(path).unwrap())
+    }
+
+    /// `EROFS` from the staging rename is what a read-only mount answers. It
+    /// reaches the check as the rename built it: an `io::Error` from the raw
+    /// errno, converted to `anyhow` with no context in between.
+    #[test]
+    fn a_read_only_mount_is_recognised_in_the_staging_error() {
+        let read_only: anyhow::Error = io::Error::from(rustix::io::Errno::ROFS).into();
+        assert!(is_read_only_refusal(&read_only));
+        let denied: anyhow::Error = io::Error::from(rustix::io::Errno::ACCESS).into();
+        assert!(!is_read_only_refusal(&denied));
     }
 
     /// Removing one hard link moves the shared inode's ctime, which used to

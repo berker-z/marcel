@@ -95,9 +95,9 @@ that unmounts it and powers it off. A move to another filesystem is a copy,
 a check of the copy, and a removal of the original, journalled as one
 operation, so it undoes as one. Metadata a FAT or NTFS destination cannot
 hold is dropped and reported once, and a symbolic link to a file arrives as
-the file. Trashing something on a drive uses that drive's own Trash; where
-no Trash can exist (a network share, a read-only stick) Marcel offers to
-delete permanently instead.
+the file. Trashing something on a drive uses that drive's own Trash, which
+the Trash place does not show; where no Trash can exist (a network share, a
+read-only stick) Marcel offers to delete permanently instead.
 
 A Network section connects shares through GVfs: Add… under it and the
 location bar take `sftp://`, `smb://`, `ftp://`, and `dav://` addresses, or
@@ -142,7 +142,7 @@ Open With… asks the desktop's application chooser, Open in Terminal starts a
 terminal in the folder (through `xdg-terminal-exec` when it is installed,
 handing it the folder only on a release that understands `--dir`), and the Trash is a place in the sidebar where items
 show Restore instead of Move to Trash and the empty-space menu offers Empty
-Trash.
+Trash. It is the home Trash alone, not a union of every drive's.
 
 ### Appearance
 

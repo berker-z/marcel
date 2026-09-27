@@ -246,8 +246,10 @@ they retain their ordinary label and use only the muted disabled style. Menu
 labels share the semantic small text size; shortcut hints use the extra-small
 size as secondary metadata.
 
-Trash is the bottom-most item in Places and aggregates valid top-level entries
-from the freedesktop home and mounted-volume Trash roots. Trashed directories
+Trash is the bottom-most item in Places and shows the valid top-level entries
+of the freedesktop home Trash only. Items trashed on another drive still go to
+that drive's `.Trash-<uid>`, as the specification says, but the view does not
+merge those in. Trashed directories
 are previewable but nested virtual Trash navigation is not part of the first
 slice. Internal drag is disabled in this view: manipulating a backing path
 directly would orphan its `.trashinfo` record.

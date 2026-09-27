@@ -2371,12 +2371,12 @@ fn trash_on_another_filesystem_uses_its_own_trash_directory() {
     let backing = outcome.records[0].backing_path().to_path_buf();
     assert!(backing.starts_with(root.join(format!(".Trash-{uid}"))), "{}", backing.display());
     assert!(
-        super::trash::list_trash_records()
+        !super::trash::list_trash_records()
             .unwrap()
             .records
             .iter()
             .any(|record| record.original_path() == file),
-        "the Trash view lists every Trash, this one included"
+        "the Trash view is the home Trash, not a merge of every drive's"
     );
 
     let restored = super::trash::restore_trash_records(&outcome.records).unwrap();

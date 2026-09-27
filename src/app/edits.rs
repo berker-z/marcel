@@ -108,7 +108,21 @@ impl Marcel {
                 None => this.with_operations(window, cx, |ops, origin, cx| {
                     ops.start_trash(paths, origin, cx);
                 }),
-                Some(reason) => this.offer_permanent_delete_instead(paths, reason, window, cx),
+                // A read-only mount can give nothing up, so there is no
+                // alternative to offer, only the reason.
+                Some(no_trash) if no_trash.read_only => {
+                    let subject = match paths.as_slice() {
+                        [only] => format!("“{}”", display_path_name(only)),
+                        _ => format!("these {} items", paths.len()),
+                    };
+                    this.report(
+                        Report::Error(format!("Cannot remove {subject}: {}", no_trash.reason)),
+                        cx,
+                    );
+                }
+                Some(no_trash) => {
+                    this.offer_permanent_delete_instead(paths, no_trash.reason, window, cx)
+                }
             });
         })
         .detach();
