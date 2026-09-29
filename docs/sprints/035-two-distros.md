@@ -68,6 +68,13 @@ a CI job that builds it on Arch.
       install check pass, and the thin-LTO link goes through on LLD from
       `.cargo/config.toml`. Both variants still point every activation file
       at their own wrapper.
-- [ ] The Arch job passes on a `ci.yml` dispatch.
+- [x] The Arch job passes on a `ci.yml` dispatch (run 36553946162, `ac48911`):
+      489 tests inside makepkg, installed with pacman. Its first run found
+      `check()` moving `HOME` out from under Cargo's fetched sources, and the
+      same dispatch found the aarch64 Nix test binary unable to load
+      `libheif.so.1` (probably broken since libheif landed on Sep 26, the
+      first aarch64 build since); the package now puts libheif on the
+      library path itself. namcap's two errors (hicolor-icon-theme, the
+      license directory name) are fixed and the job uploads a `.SRCINFO`.
 - [ ] By hand on the release build: a picker comes up through `desktop.conf`
       with the environment variables unset.
