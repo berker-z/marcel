@@ -217,3 +217,7 @@ jobs:
         with:
           name: srcinfo
           path: packaging/arch/.SRCINFO
+          # A leading dot counts as hidden, and hidden files are skipped by
+          # default.
+          include-hidden-files: true
+          if-no-files-found: error
