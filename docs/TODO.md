@@ -3,7 +3,8 @@
 What is left, in the order it is likely to happen. Sprint documents under
 [`sprints/`](sprints/) turn items from here into bounded work with acceptance
 checks; the latest finished one is
-[Sprint 34](sprints/034-network-and-devices-hardening.md).
+[Sprint 34](sprints/034-network-and-devices-hardening.md), and
+[Sprint 35](sprints/035-two-distros.md) is under way.
 Finished work is recorded there and in [`../CHANGELOG.md`](../CHANGELOG.md),
 not here.
 
@@ -61,6 +62,10 @@ Still open, and needing hardware or hands:
 - A fresh screenshot for the README and the AppStream file. The current one
   is from 2026-08-18, before sorting, the Trash view, audio, video, drives,
   and network shares.
+- The Arch package ([Sprint 35](sprints/035-two-distros.md)): the `arch` job
+  green on the same `ci.yml` dispatch, and on the release build, a file
+  dialog answered through `desktop.conf` with the `MARCEL_CLAIM_*` variables
+  unset.
 - `scripts/check_version.sh v0.1.0`, then `git tag -s v0.1.0`, push, and a
   GitHub release with the changelog entry. The rest of the gate is in
   [`release.md`](release.md#v010-release-gate).
@@ -123,23 +128,10 @@ maintainer entry and `passthru.updateScript`). AppImage and Flatpak wait
 for real users; Flatpak also costs the portal backend and D-Bus activation,
 and Flathub's policy currently blocks the submission regardless.
 
-First, before any of those: get the packaging out of Nix. The program is
-portable already (no build script, no store paths, the font compiled in and
-the icons read from `share/marcel/icons/nordzy` beside the executable,
-`7zz` found beside the exe or on `PATH`, Poppler on `PATH`), but the two
-desktop entries exist only as `makeDesktopItem` calls in `nix/package.nix`,
-the D-Bus and portal files live under `nix/` with `@marcel@` substitution,
-and the install layout (`libexec/marcel/7zz`, `share/marcel/icons`, hicolor,
-metainfo) is written down nowhere but `postInstall`. Move them to a
-`packaging/` directory as plain files with a `Makefile` (`install PREFIX=
-DESTDIR=`), have `nix/package.nix` call that same target so the two cannot
-drift, add a `packaging/arch/PKGBUILD` (`cargo build --release`, `make
-install`, `depends` on fontconfig, freetype2, wayland, libxkbcommon, libxcb,
-poppler, 7zip), and a "Building without Nix" paragraph in the README with
-the `pacman` line. About a day. The Home Manager switches have no Arch
-equivalent as options: there, the package installs the service and portal
-files unconditionally and the user's `portals.conf` and `xdg-mime` decide,
-as with every other file manager.
+Getting the packaging out of Nix was [Sprint 35](sprints/035-two-distros.md):
+the data files are plain files under `packaging/`, the `Makefile` is the
+install layout both packages use, and `packaging/arch/PKGBUILD` is what goes
+to the AUR once it has a real checksum.
 
 Still to do for the package itself: a clean-environment smoke test that
 launches Marcel, lists a fixture folder, renders one PDF, extracts one

@@ -257,13 +257,65 @@ pub struct BusRoles {
 }
 
 impl BusRoles {
-    pub fn from_environment() -> Self {
-        Self {
+    /// The roles this instance takes: the ones the environment asks for, plus
+    /// the ones switched on in [`DESKTOP_FILE`].
+    ///
+    /// The Nix variants set the variables on their wrappers. A distribution
+    /// package has no wrapper, and a variable set in a shell profile does not
+    /// reach a Marcel started by the launcher or by D-Bus, so the file is how
+    /// it turns them on. Marcel only reads the file; it never writes one.
+    pub fn configured() -> Self {
+        let from_environment = Self {
             file_manager: std::env::var_os(CLAIM_FILE_MANAGER_ENV).is_some(),
             file_chooser: std::env::var_os(file_chooser::CLAIM_FILE_CHOOSER_ENV).is_some(),
+        };
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return from_environment;
+        };
+        match crate::config::read_own_file(&crate::config::path(&home, DESKTOP_FILE)) {
+            Ok(Some(contents)) => from_environment.or(Self::parse(&contents)),
+            Ok(None) => from_environment,
+            Err(error) => {
+                eprintln!("{error:#}; taking no desktop roles from it");
+                from_environment
+            }
+        }
+    }
+
+    /// Read `desktop.conf`: `file_manager1=true`, `file_chooser=true`.
+    /// Anything it does not understand is reported and skipped, since a
+    /// typo there should not cost the user the role they did spell right.
+    fn parse(contents: &str) -> Self {
+        let mut roles = Self::default();
+        for line in contents.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                eprintln!("{DESKTOP_FILE}: ignoring a line with no '=': {line:?}");
+                continue;
+            };
+            let on =
+                matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            match key.trim() {
+                "file_manager1" => roles.file_manager = on,
+                "file_chooser" => roles.file_chooser = on,
+                other => eprintln!("{DESKTOP_FILE}: ignoring unknown key {other:?}"),
+            }
+        }
+        roles
+    }
+
+    fn or(self, other: Self) -> Self {
+        Self {
+            file_manager: self.file_manager || other.file_manager,
+            file_chooser: self.file_chooser || other.file_chooser,
         }
     }
 }
+
+/// The file under `$XDG_CONFIG_HOME/marcel` that turns the bus roles on.
+pub const DESKTOP_FILE: &str = "desktop.conf";
 
 #[derive(Clone)]
 struct ApplicationService {
@@ -278,7 +330,7 @@ struct FileManagerService {
 }
 
 pub async fn acquire_or_forward(initial_uris: Option<Vec<String>>) -> InstanceStartup {
-    acquire_or_forward_with_roles(initial_uris, BusRoles::from_environment()).await
+    acquire_or_forward_with_roles(initial_uris, BusRoles::configured()).await
 }
 
 async fn acquire_or_forward_with_roles(
@@ -625,6 +677,29 @@ mod tests {
         assert!(
             DesktopRequest::ShowItemProperties(vec![PathBuf::from("/folder/file")])
                 .may_reuse_a_window()
+        );
+    }
+
+    #[test]
+    fn desktop_conf_turns_on_only_the_roles_it_names() {
+        let both = BusRoles::parse("# roles\nfile_manager1 = true\nfile_chooser=yes\n");
+        assert_eq!(both, BusRoles { file_manager: true, file_chooser: true });
+
+        let chooser = BusRoles::parse("file_chooser=1\nfile_manager1=false\n");
+        assert_eq!(chooser, FILE_CHOOSER_ROLE);
+
+        // A typo costs the line it is on, not the rest of the file.
+        let past_typos = BusRoles::parse("file_choser=true\nnonsense\nfile_manager1=on\n");
+        assert_eq!(past_typos, FILE_MANAGER_ROLE);
+
+        assert_eq!(BusRoles::parse(""), BusRoles::default());
+    }
+
+    #[test]
+    fn the_file_adds_to_the_environment_and_never_takes_a_role_away() {
+        assert_eq!(
+            FILE_MANAGER_ROLE.or(BusRoles::parse("file_chooser=true\nfile_manager1=false")),
+            BusRoles { file_manager: true, file_chooser: true }
         );
     }
 

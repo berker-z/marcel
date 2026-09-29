@@ -20,7 +20,7 @@ symlinkJoin {
         --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
     done
 
-    install -Dm644 ${./org.freedesktop.FileManager1.service} \
+    install -Dm644 ${../packaging/org.freedesktop.FileManager1.service} \
       "$out/share/dbus-1/services/org.freedesktop.FileManager1.service"
     substituteInPlace \
       "$out/share/dbus-1/services/org.freedesktop.FileManager1.service" \

@@ -40,7 +40,7 @@ jobs:
       - name: Validate AppStream metadata
         run: |
           nix run nixpkgs#appstream -- validate --no-net --explain \
-            nix/io.github.berker_z.Marcel.metainfo.xml
+            packaging/io.github.berker_z.Marcel.metainfo.xml
 
   lint:
     name: fmt and clippy

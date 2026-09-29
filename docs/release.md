@@ -90,7 +90,7 @@ Rust 1.97/LLVM 21 thin-LTO build was observed terminating in `libLLVM.so` with
 a segmentation fault despite adequate disk, inode, and memory headroom and no
 kernel OOM event. Increasing rustc's worker-thread stack to 16 MiB allowed that
 package build to complete initially; a recurrence led to the current
-`RUST_MIN_STACK=33554432` in `nix/package.nix`. This is a worker-thread stack
+`RUST_MIN_STACK=33554432`, now in `.cargo/config.toml` so every build gets it. This is a worker-thread stack
 setting, not a cap on compiler RAM. If the crash returns, capture the failing
 crate and LLVM pass rather than increasing it again without evidence.
 
@@ -217,15 +217,15 @@ Marcel outside them or for debugging.
 | `MARCEL_THEME` | The palette to start with, by the name shown in Settings (`nord`, `tokyo-night`, ...; `src/theme.rs` lists them). A theme chosen in Settings is saved to `state.conf` and wins over this. |
 | `MARCEL_ICON_THEME` | A freedesktop icon theme name to use ahead of Marcel's bundled Nordzy subset and the desktop's theme. |
 | `MARCEL_FONT_FAMILY` | An installed font family to use for the interface instead of the bundled Marcel Iosevka subset. |
-| `MARCEL_CLAIM_FILE_MANAGER1` | Set (to anything) to also own `org.freedesktop.FileManager1` on the session bus. The `file-manager1-service` variant sets it. If another file manager owns the name, Marcel says so on stderr and carries on. |
-| `MARCEL_CLAIM_FILE_CHOOSER` | Set (to anything) to also own `org.freedesktop.impl.portal.desktop.marcel`, the portal backend name. The `file-chooser-portal` variant sets it. Same fallback as above. |
+| `MARCEL_CLAIM_FILE_MANAGER1` | Set (to anything) to also own `org.freedesktop.FileManager1` on the session bus. The `file-manager1-service` variant sets it. `file_manager1=true` in `~/.config/marcel/desktop.conf` does the same without a wrapper. If another file manager owns the name, Marcel says so on stderr and carries on. |
+| `MARCEL_CLAIM_FILE_CHOOSER` | Set (to anything) to also own `org.freedesktop.impl.portal.desktop.marcel`, the portal backend name. The `file-chooser-portal` variant sets it. `file_chooser=true` in `desktop.conf` does the same. Same fallback as above. |
 | `MARCEL_7ZZ` | Path to the 7-Zip executable. Without it Marcel looks for `libexec/marcel/7zz` beside its own `bin/`, then `7zz` and `7z` on `PATH`. A value that is not an executable file is an error, not a fallback. |
 | `MARCEL_ENABLE_RAR` | `1`, `true`, `yes`, or `on` enables RAR and CBR extraction. Off by default because the free `7zz` cannot read them; set it only with a 7-Zip that can. |
 | `MARCEL_ASSET_DIR` | A directory holding `icons/nordzy`, looked at before `share/marcel/icons/nordzy` beside the executable and before the source tree. For running an uninstalled build against installed assets. |
 
 Three more are read only by the test suite: `MARCEL_TEST_DBUS_SESSION_CONFIG`
 names the `dbus-daemon` configuration the private-bus test starts a session
-with (`nix/test-session.conf`; the dev shell and the package set it),
+with (`packaging/test-session.conf`; the dev shell and the package set it),
 `MARCEL_PRIVATE_BUS_TEST_CHILD` marks the re-executed test binary as the
 child half of that test, and `MARCEL_TEST_REQUIRE_7ZZ=1` makes the archive
 tests that need a real `7zz` fail instead of skipping when there is none
@@ -247,7 +247,7 @@ The icon name should remain `io.github.berker_z.Marcel`.
 
 ### AppStream metadata
 
-The package installs `nix/io.github.berker_z.Marcel.metainfo.xml` to
+The package installs `packaging/io.github.berker_z.Marcel.metainfo.xml` to
 `share/metainfo/`. It validates clean under `appstreamcli` 1.1.3, and the
 package's own install check re-validates the installed copy along with both
 desktop entries, so a broken edit fails the build rather than shipping. CI
@@ -401,15 +401,18 @@ discover automatically.
 
 ### Arch Linux, CachyOS, and related distributions
 
-Publish a stable source package named `marcel-rs` in the Arch User Repository.
-The AUR stores the `PKGBUILD` and related packaging files, not the built
-application. It should download the signed release tag, verify its checksum,
-build with Cargo, and install the complete desktop integration contract.
+`packaging/arch/PKGBUILD` builds `marcel-rs` from the release tag's tarball:
+Arch's rustc, pacman's libraries, `make install` for the layout. The `arch`
+job in `ci.yml` builds it from the checked-out tree in an `archlinux`
+container, runs the test suite in its `check()`, installs the package, and
+inspects what landed (`packaging/arch/ci.sh`, which runs the same under any
+local Docker or Podman). It needs a real `sha256sums` entry, filled in with
+`updpkgsums` once the tag exists, before it goes to the AUR.
 
-This makes the ordinary user experience:
+Once it is there, the ordinary user experience is:
 
 ```sh
-yay -S marcel
+yay -S marcel-rs
 ```
 
 or the equivalent operation with another AUR helper. CachyOS, EndeavourOS, and
@@ -489,34 +492,44 @@ the live requirements before doing any submission work.
 ## One installation contract
 
 Packaging formats should not independently invent where Marcel's resources
-live. Define one staged installation tree and convert it into the different
-artifacts:
+live. The top-level `Makefile` is that contract: `nix/package.nix` calls
+`make install-data`, the PKGBUILD calls `make install`, and the data files
+themselves are plain files under `packaging/`. It stages this tree:
 
 ```text
 usr/
 ├── bin/marcel-rs
-├── libexec/marcel/7zz
+├── libexec/marcel/7zz                  (only with SEVENZIP=; Nix sets it)
 └── share/
-    ├── applications/io.github.berker_z.Marcel.desktop
+    ├── applications/io.github.berker_z.Marcel.desktop, marcel.desktop
     ├── dbus-1/services/io.github.berker_z.Marcel.service
+    ├── dbus-1/services/org.freedesktop.impl.portal.desktop.marcel.service  (PORTAL=1)
     ├── dbus-1/interfaces/org.freedesktop.FileManager1.xml
+    ├── xdg-desktop-portal/portals/marcel.portal                          (PORTAL=1)
     ├── icons/hicolor/.../apps/io.github.berker_z.Marcel.*
+    ├── marcel/icons/nordzy/
+    ├── marcel/org.freedesktop.FileManager1.service   (for copying, not active)
     ├── metainfo/io.github.berker_z.Marcel.metainfo.xml
-    └── licenses/...
+    └── licenses/marcel/
 ```
 
-The package may additionally expose a complete wrapped variant with the generic
-`org.freedesktop.FileManager1.service`. That variant must route both branded and
-generic activation through its wrapper so every launch requests both names;
-installing the ordinary application must not take the generic name
-automatically.
+The portal files are harmless to install: the frontend only uses Marcel when
+`portals.conf` names it, and Marcel only answers when it was told to claim the
+name, by `MARCEL_CLAIM_FILE_CHOOSER` or by `file_chooser=true` in
+`~/.config/marcel/desktop.conf`. Nix leaves them out (`PORTAL=0`) because its
+portal variant installs its own copies, pointing at its wrapper.
 
-The AppImage, Debian, and RPM jobs should begin from this same staged contract.
-Nix and AUR build from source independently but install equivalent files.
+The generic `org.freedesktop.FileManager1.service` is never installed where
+D-Bus reads it. On Arch, Nautilus's package owns that path; everywhere, taking
+the name has to be something the user asked for. The Home Manager module
+writes it to `~/.local/share/dbus-1/services`, and on Arch the user copies
+it there.
+
+The AppImage, Debian, and RPM jobs should begin from this same `Makefile`.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` is the hosted gate Sprint 16 asks for. It has four
+`.github/workflows/ci.yml` is the hosted gate Sprint 16 asks for. It has five
 jobs:
 
 - `quality` runs `cargo fmt --check`, Clippy with `-D warnings`, and
@@ -532,6 +545,12 @@ jobs:
   service, icons, and the private `7zz`, and asserts that the default package
   installs no `org.freedesktop.FileManager1` service.
 - `flake` runs `nix flake check`.
+- `arch` builds `packaging/arch/PKGBUILD` from the checked-out tree in an
+  `archlinux:base-devel` container: pacman's libraries, Arch's rustc, makepkg's
+  flags, the whole test suite in `check()`, then `pacman -U` and a look at what
+  was installed, including that nothing claims `org.freedesktop.FileManager1`.
+  It is the one job that would notice the build depending on something only the
+  dev shell or the derivation supplies.
 
 **What runs when.** Nothing runs on an ordinary push. The whole workflow
 fires on `v*` tags and on manual `workflow_dispatch`. A pull request gets
@@ -551,7 +570,7 @@ not have.
 
 So the triggers follow the value. A tag is when the artifact matters, and
 `workflow_dispatch` covers everything else: first-time setup, checking a
-packaging change before tagging, and any one-off. `package` and `flake`
+packaging change before tagging, and any one-off. `package`, `flake`, and `arch`
 reclaim runner disk before starting, because the default hosted image does not
 leave enough for a GPUI build.
 
@@ -560,7 +579,7 @@ not be caught by anything hosted. The local gate is the only thing standing
 between a mistake and the tag, which is why it is not optional.
 
 The `quality` job needs `dbus-run-session` and a session bus configuration with
-no system includes; see `nix/test-session.conf` for why. The dev shell provides
+no system includes; see `packaging/test-session.conf` for why. The dev shell provides
 both, and `7zz` for the archive tests. Those tests skip on a machine without
 7-Zip, which is fine locally and not in CI, so the job and the package's
 `preCheck` set `MARCEL_TEST_REQUIRE_7ZZ=1` to turn that skip into a failure.
@@ -646,6 +665,8 @@ Before creating the first tag:
     `~/.ssh`), and one restart cycle for `state.conf`.
 - [ ] Take a fresh screenshot for the README and the AppStream file.
 - [ ] Run the release-only Nix build and flake check.
+- [ ] Run the `arch` job (a `ci.yml` dispatch builds it with the rest), then
+      `updpkgsums` in `packaging/arch` against the pushed tag.
 - [ ] Install and launch from a clean committed revision.
 - [ ] Exercise a minimal-environment smoke test covering directory browsing,
       baseline icons/fonts, one PDF, one free archive, desktop metadata, and

@@ -989,16 +989,23 @@ mod tests {
         extract_archive_with(&fake, archive, no_cancel(), &mut ConflictPolicy::refusing())
     }
 
-    /// The real 7-Zip, when the environment has one.
+    /// The real 7-Zip, when the environment has one, found under the names
+    /// Marcel itself looks for: `7zz`, then `7z`, which is what Arch's
+    /// `7zip` package installs.
     ///
     /// Without it the tests that need it pass without testing anything, which
     /// a CI run should not be allowed to call green: `MARCEL_TEST_REQUIRE_7ZZ=1`
     /// turns the skip into a failure.
     fn official_backend() -> Option<(SevenZipBackend, PathBuf)> {
-        let Some(program) = find_on_path("7zz", env::var_os("PATH").as_deref()) else {
+        let path = env::var_os("PATH");
+        let Some(program) =
+            ["7zz", "7z"].into_iter().find_map(|name| find_on_path(name, path.as_deref()))
+        else {
             let required = env::var_os("MARCEL_TEST_REQUIRE_7ZZ").is_some_and(|value| value == "1");
-            assert!(!required, "MARCEL_TEST_REQUIRE_7ZZ=1 is set but no 7zz is on PATH");
-            eprintln!("skipping: no 7zz on PATH; set MARCEL_TEST_REQUIRE_7ZZ=1 to fail instead");
+            assert!(!required, "MARCEL_TEST_REQUIRE_7ZZ=1 is set but no 7zz or 7z is on PATH");
+            eprintln!(
+                "skipping: no 7zz or 7z on PATH; set MARCEL_TEST_REQUIRE_7ZZ=1 to fail instead"
+            );
             return None;
         };
         Some((SevenZipBackend::from_program(program.clone()), program))

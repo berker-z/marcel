@@ -56,7 +56,10 @@ check "Cargo.lock" Cargo.lock \
 check "nix/package.nix" nix/package.nix \
 	's/^  version = "(.+)";$/\1/p'
 
-check "AppStream newest release" nix/io.github.berker_z.Marcel.metainfo.xml \
+check "packaging/arch/PKGBUILD" packaging/arch/PKGBUILD \
+	's/^pkgver=(.+)$/\1/p'
+
+check "AppStream newest release" packaging/io.github.berker_z.Marcel.metainfo.xml \
 	's/.*<release version="([^"]+)".*/\1/p'
 
 if [ -f CHANGELOG.md ]; then
@@ -113,7 +116,7 @@ fi
 # why this only fails when a tag was asked for; without one it is a reminder.
 echo
 release_date="$(sed -nE 's/.*<release version="[^"]+" date="([0-9]{4}-[0-9]{2}-[0-9]{2})".*/\1/p' \
-	nix/io.github.berker_z.Marcel.metainfo.xml | head -n 1)"
+	packaging/io.github.berker_z.Marcel.metainfo.xml | head -n 1)"
 head_date="$(git log -1 --format=%cs HEAD 2>/dev/null || true)"
 if [ -z "$release_date" ]; then
 	report "AppStream newest release date" "NOT FOUND"

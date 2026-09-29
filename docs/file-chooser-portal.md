@@ -27,7 +27,7 @@ naming `marcel` is enough once the portal file is installed, and a second entry
 after it would only ever be consulted if Marcel's portal file were missing,
 not if Marcel failed to answer.
 
-`nix/marcel.portal` is three lines: the bus name and the one interface. It
+`packaging/marcel.portal` is three lines: the bus name and the one interface. It
 used to carry `UseIn=Hyprland;` as well, the pre-1.17 way of saying which
 desktops a backend was for. xdg-desktop-portal 1.17 replaced that with
 `portals.conf` and deprecated the key, and a backend that still sets it is

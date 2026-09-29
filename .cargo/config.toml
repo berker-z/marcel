@@ -1,0 +1,23 @@
+# Build settings every Marcel build needs, whoever runs Cargo. They used to
+# live in `nix/package.nix`, which left a plain `cargo build --release` on any
+# other distribution to rediscover both failures.
+
+# Link with LLD rather than GNU ld. ld.bfd fails the thin-LTO release link
+# with `.eh_frame_hdr refers to overlapping FDEs`, a long-standing interaction
+# between LTO output and its exception-table merging, not anything wrong with
+# the objects. LLD merges the same input without complaint. Turning thin-LTO
+# off would also clear it, but that trades an optimization for one linker.
+#
+# A `RUSTFLAGS` variable replaces this list rather than adding to it, and
+# makepkg sets one, so the PKGBUILD repeats the flag.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[env]
+# rustc's worker-thread stack. The thin-LTO build has crashed in libLLVM
+# (`SimplifyCFGPass`, in `gpui_linux`) with the default and again with
+# 16 MiB; 32 MiB is the size rustc itself names in the failure, and it changes
+# no optimization. If it comes back, capture the crate and the LLVM pass
+# rather than doubling this again: a stack that large usually means one
+# function is being inlined into something enormous.
+RUST_MIN_STACK = "33554432"

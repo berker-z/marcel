@@ -1,0 +1,12 @@
+# The desktop identifier Marcel had before it had a reverse-DNS one. Hidden,
+# and with no MimeType: an association offer on both entries made some Open
+# With lists show Marcel twice.
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Marcel
+GenericName=File Manager
+Comment=Compatibility desktop identifier for Marcel
+Icon=io.github.berker_z.Marcel
+Exec=marcel-rs %U
+NoDisplay=true

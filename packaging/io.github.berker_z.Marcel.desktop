@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Marcel
+GenericName=File Manager
+Comment=Browse files with a fast, persistent preview pane
+Icon=io.github.berker_z.Marcel
+Exec=marcel-rs %U
+DBusActivatable=true
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+Keywords=files;folders;explorer;manager;

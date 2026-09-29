@@ -90,7 +90,7 @@ jobs:
       - name: Validate AppStream metadata
         run: |
           nix run nixpkgs#appstream -- validate --no-net --explain \
-            nix/io.github.berker_z.Marcel.metainfo.xml
+            packaging/io.github.berker_z.Marcel.metainfo.xml
 
       # On a tag, the tag name goes along too: without it a `v0.1.1` tag on a
       # `0.1.0` tree passed, because the script only compared the files with
@@ -186,3 +186,27 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
 
       - run: nix flake check --accept-flake-config --max-jobs 1 --cores 2 --print-build-logs
+
+  # The AUR package, built the way an Arch user would build it: pacman's
+  # libraries, Arch's rustc, makepkg's flags, no Nix anywhere. The flake jobs
+  # above cannot notice a dependency the dev shell supplies quietly, or a
+  # build setting that only the derivation carries; this one does. The
+  # script builds the PKGBUILD from this checkout, runs the test suite in
+  # its `check()`, installs the package, and inspects what landed.
+  arch:
+    name: arch package
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Build, test, and install the PKGBUILD
+        run: |
+          docker run --rm -v "$PWD:/src" archlinux:base-devel \
+            /src/packaging/arch/ci.sh

@@ -195,6 +195,14 @@ D-Bus service file, and the licenses, and carries a private free `7zz` for
 archives. RAR and CBR extraction are off by default because the decoder is
 not free.
 
+A PKGBUILD for Arch, in `packaging/arch`, builds the release against Arch's
+own libraries and installs the same files through the same `Makefile`. The
+Home Manager switches become a few lines in the README there: `xdg-mime` for
+the directory handler, a copied activation file for FileManager1, and a
+portals config for the file dialog. `~/.config/marcel/desktop.conf`
+(`file_manager1=true`, `file_chooser=true`) takes the D-Bus names that the
+Nix wrappers claim through environment variables.
+
 ### Known gaps
 
 No search. A folder on a network share, or on an `ntfs-3g` mount, does not

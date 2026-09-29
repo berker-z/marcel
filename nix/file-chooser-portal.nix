@@ -28,13 +28,13 @@ symlinkJoin {
         --replace-fail "${marcel}/bin/marcel-rs" "$out/bin/marcel-rs"
     done
 
-    install -Dm644 ${./org.freedesktop.impl.portal.desktop.marcel.service} \
+    install -Dm644 ${../packaging/org.freedesktop.impl.portal.desktop.marcel.service} \
       "$out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.marcel.service"
     substituteInPlace \
       "$out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.marcel.service" \
       --replace-fail @marcel@ "$out"
 
-    install -Dm644 ${./marcel.portal} \
+    install -Dm644 ${../packaging/marcel.portal} \
       "$out/share/xdg-desktop-portal/portals/marcel.portal"
   '';
 

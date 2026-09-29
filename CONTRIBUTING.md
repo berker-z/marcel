@@ -8,9 +8,11 @@ map. Read it first; this page is the short version of how a change gets in.
 
 ## Building
 
-The Nix dev shell is the only supported build environment. It pins the
-compiler and declares the system libraries GPUI needs, and a plain `cargo`
-outside it fails at `fontconfig.pc`.
+The Nix dev shell is the main build environment. It pins the compiler and
+declares the system libraries GPUI needs, and on NixOS a plain `cargo`
+outside it fails at `fontconfig.pc`. On Arch, the pacman line in the README
+gives a plain `cargo` the same libraries, and the `arch` CI job keeps that
+working.
 
 ```sh
 nix develop

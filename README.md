@@ -97,13 +97,13 @@ Known gaps, roughly in the order they are likely to be addressed:
 * Some conventional shortcuts are not bound: `Ctrl+H` for hidden files (it is the `.*` button next to the view toggle, and in the empty-space menu), `F5` for refresh, `Alt+Up` and `Alt+Left` for parent and back (Marcel uses `Ctrl+Up` and `Ctrl+Left`), and `Ctrl+Shift+Z` for redo (`Ctrl+Y`).
 * Keyboard and accessibility coverage is incomplete. Some things are reachable only with a pointer, and screen readers see nothing.
 * RAR extraction needs a separate build. The default package ships only free components.
-* Nix is the only packaging route today. One file operation runs at a time; a second is refused until the first finishes.
+* Nix and Arch are the only packaging routes today, and the Arch one is a PKGBUILD in this repository rather than an AUR package. One file operation runs at a time; a second is refused until the first finishes.
 
 Not planned: tabs, as I do not like them very much.
 
 ## Installing
 
-Marcel ships as a Nix flake.
+Marcel ships as a Nix flake, and as a PKGBUILD for Arch ([below](#arch-linux)).
 
 Run it without installing anything:
 
@@ -175,6 +175,57 @@ that answers file dialogs (it goes in `xdg.portal.extraPortals`, with
 Installing any of them changes no MIME associations; the details are in
 [`docs/release.md`](docs/release.md).
 
+### Arch Linux
+
+`packaging/arch/PKGBUILD` builds a tagged release with makepkg, against
+Arch's own libraries and compiler. It is not on the AUR yet, so build it from
+a clone:
+
+```sh
+git clone https://github.com/berker-z/marcel
+cd marcel/packaging/arch
+makepkg -si
+```
+
+The first build compiles GPUI, so give it a while. `ffmpeg`, `gvfs`, and
+`udisks2` are optional and turn on video previews, network shares, and drives.
+
+As with Nix, installing puts Marcel in the launcher and changes nothing
+else. The three integrations are done by hand here, and two of them go through
+one small file that Marcel reads at startup and never writes:
+
+```ini
+# ~/.config/marcel/desktop.conf
+file_manager1=true
+file_chooser=true
+```
+
+- Directory handler: `xdg-mime default io.github.berker_z.Marcel.desktop inode/directory`.
+- Show in folder: `file_manager1=true`, plus the activation file, so D-Bus
+  starts Marcel rather than Nautilus when neither is running:
+  `mkdir -p ~/.local/share/dbus-1/services && cp /usr/share/marcel/org.freedesktop.FileManager1.service ~/.local/share/dbus-1/services/`.
+  The package can't install that file system-wide, because Nautilus's
+  package already owns the path.
+- File dialogs: `file_chooser=true`, and xdg-desktop-portal has to be told
+  to use Marcel. It reads one config file and ignores the rest, and on
+  Hyprland (Omarchy included) a `hyprland-portals.conf` in your config
+  directory is the one it picks:
+
+  ```ini
+  # ~/.config/xdg-desktop-portal/hyprland-portals.conf
+  [preferred]
+  default=hyprland;gtk
+  org.freedesktop.impl.portal.FileChooser=marcel
+  ```
+
+  `default` is there because this file replaces the system's instead of
+  adding to it. If you already have one, add the last line to it. Then
+  `systemctl --user restart xdg-desktop-portal`.
+
+Quit any running Marcel after editing `desktop.conf`; the roles are taken when
+Marcel starts. On Omarchy, the file-manager keybinding starts Nautilus by
+name, so change that one in your Hyprland bindings too.
+
 ## Declarative settings
 
 `settings` covers theme, icon theme, font, and whether ffmpeg is wrapped in:
@@ -192,7 +243,7 @@ Leaving `icon_theme` and `ui_font` as `null` keeps Marcel's bundled icons and fo
 
 View mode, sort order, and hidden files are interaction state, not Nix options; Marcel remembers them in `$XDG_CONFIG_HOME/marcel/state.conf`. The theme is both: `settings.theme` is the default, and a theme picked in Settings is written to the same file and wins from then on. Delete its `theme=` line to follow the Nix option again.
 
-Under the module, these settings are environment variables on a wrapper: `MARCEL_THEME`, `MARCEL_ICON_THEME`, `MARCEL_FONT_FAMILY`, and `PATH` for `media`. Without Nix you can set them yourself, along with `MARCEL_7ZZ` to point at a 7-Zip, `MARCEL_ENABLE_RAR=1` if that 7-Zip can read RAR, and `MARCEL_CLAIM_FILE_MANAGER1` / `MARCEL_CLAIM_FILE_CHOOSER` to take the D-Bus names the two package variants take. The full list, with what each one does, is in [`docs/release.md`](docs/release.md#runtime-environment-variables).
+Under the module, these settings are environment variables on a wrapper: `MARCEL_THEME`, `MARCEL_ICON_THEME`, `MARCEL_FONT_FAMILY`, and `PATH` for `media`. Without Nix you can set them yourself, along with `MARCEL_7ZZ` to point at a 7-Zip, `MARCEL_ENABLE_RAR=1` if that 7-Zip can read RAR, and `MARCEL_CLAIM_FILE_MANAGER1` / `MARCEL_CLAIM_FILE_CHOOSER` to take the D-Bus names the two package variants take (`desktop.conf`, above, does the same and also reaches a Marcel started by D-Bus). The full list, with what each one does, is in [`docs/release.md`](docs/release.md#runtime-environment-variables).
 
 ## Building
 
@@ -201,7 +252,7 @@ nix develop
 cargo run
 ```
 
-The development shell is required: a plain shell will not find the system libraries the build needs, and a different `cargo` picks a different compiler and invalidates everything compiled in `target/`. The shell pins its compiler through `flake.lock`. Avoid `cargo clean`; the dependency build is long.
+On Nix, the development shell is required: a plain shell will not find the system libraries the build needs, and a different `cargo` picks a different compiler and invalidates everything compiled in `target/`. The shell pins its compiler through `flake.lock`. Avoid `cargo clean`; the dependency build is long.
 
 `nix build .#marcel-rs` builds the release package in isolation, using Crane so dependencies survive application-only edits. To keep those dependencies across garbage collection:
 
@@ -211,6 +262,17 @@ nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-rs
 ```
 
 The cache workflow runs on every push to `master` and on tags, so a commit is cached a few minutes after it lands. The cache holds builds against Marcel's own locked nixpkgs; consume `packages.<system>.marcel-rs` from this flake rather than applying the overlay to another nixpkgs, or you compile GPUI yourself.
+
+On Arch, without Nix, pacman supplies the same things:
+
+```sh
+sudo pacman -S --needed rust clang cmake lld pkgconf make \
+  alsa-lib fontconfig freetype2 libheif libxkbcommon-x11 vulkan-icd-loader wayland \
+  7zip poppler
+cargo run
+```
+
+LLD is not optional. `.cargo/config.toml` links with it, since GNU ld fails the thin-LTO release link. `make install PREFIX=/usr/local` puts a release build and its desktop files in place, and it's the same `Makefile` both packages use.
 
 ## Credits
 

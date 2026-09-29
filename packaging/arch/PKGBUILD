@@ -1,0 +1,94 @@
+# Maintainer: berker-z <https://github.com/berker-z>
+#
+# Builds the tagged release. `packaging/arch/ci.sh` builds this same file
+# against a checked-out tree, which is how CI keeps it working between tags.
+
+pkgname=marcel-rs
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Fast, preview-first graphical file explorer'
+arch=('x86_64' 'aarch64')
+url='https://github.com/berker-z/marcel'
+# Marcel is MIT; the bundled Nordzy icon subset is GPL-3.0 and the Iosevka
+# subset is OFL.
+license=('MIT' 'GPL-3.0-only' 'OFL-1.1')
+# GPUI opens most of its graphics and windowing libraries with dlopen, so
+# they are listed here even where nothing links them.
+depends=(
+  'alsa-lib'
+  'expat'
+  'fontconfig'
+  'freetype2'
+  'gcc-libs'
+  'glibc'
+  'libglvnd'
+  'libheif'
+  'libx11'
+  'libxcb'
+  'libxcursor'
+  'libxi'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'libxrandr'
+  'vulkan-icd-loader'
+  'wayland'
+  # Run, not linked: 7z for archives, pdftoppm for PDF previews, gio for
+  # the Trash and mounts.
+  '7zip'
+  'glib2'
+  'poppler'
+)
+makedepends=('cargo' 'clang' 'cmake' 'lld' 'pkgconf')
+checkdepends=('dbus')
+optdepends=(
+  'ffmpeg: video previews and Opus audio'
+  'gvfs: network shares'
+  'gvfs-smb: SMB shares'
+  'udisks2: drives in the sidebar'
+  'xdg-desktop-portal: Marcel as the open and save dialog'
+)
+# makepkg's LTO puts GCC's -flto on the C that some crates compile, and LLD
+# cannot link GCC's LTO objects. Marcel's release profile does its own
+# thin-LTO.
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# Filled in with `updpkgsums` once the tag exists.
+sha256sums=('SKIP')
+
+_srcdir="marcel-$pkgver"
+
+prepare() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # makepkg sets RUSTFLAGS, and a RUSTFLAGS variable replaces the rustflags in
+  # `.cargo/config.toml` instead of adding to them, so LLD is asked for again.
+  export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=lld"
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=lld"
+  # The Trash tests need a Trash, and the bus tests need a bus configuration
+  # that pulls in nothing from the host.
+  local home="$srcdir/check-home"
+  mkdir -p "$home/.local/share/Trash/files" "$home/.local/share/Trash/info"
+  HOME="$home" XDG_DATA_HOME="$home/.local/share" \
+    MARCEL_TEST_DBUS_SESSION_CONFIG="$PWD/packaging/test-session.conf" \
+    MARCEL_TEST_REQUIRE_7ZZ=1 \
+    cargo test --frozen --release
+}
+
+package() {
+  cd "$_srcdir"
+  make install PREFIX=/usr DESTDIR="$pkgdir" BINARY=target/release/marcel-rs
+}
