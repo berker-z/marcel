@@ -30,6 +30,8 @@ chown -R builder: "$work"
 
 cd "$work"
 sudo -u builder makepkg --syncdeps --noconfirm
+# The AUR wants this next to the PKGBUILD, and only makepkg can write it.
+sudo -u builder makepkg --printsrcinfo | tee /src/packaging/arch/.SRCINFO
 package="$(sudo -u builder makepkg --packagelist | grep -v -- '-debug-' | head -n 1)"
 pacman -U --noconfirm "$package"
 
@@ -47,7 +49,7 @@ grep -qx 'Exec=/usr/bin/marcel-rs' \
 test -f /usr/share/xdg-desktop-portal/portals/marcel.portal
 test -f /usr/share/icons/hicolor/scalable/apps/io.github.berker_z.Marcel.svg
 test -d /usr/share/marcel/icons/nordzy
-test -f /usr/share/licenses/marcel/LICENSE
+test -f /usr/share/licenses/marcel-rs/LICENSE
 
 # Installing Marcel must not take "show in folder" away from whichever file
 # manager has it. The activation file is shipped for copying, not installed.

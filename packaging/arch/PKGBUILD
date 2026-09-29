@@ -19,7 +19,8 @@ depends=(
   'expat'
   'fontconfig'
   'freetype2'
-  'gcc-libs'
+  'hicolor-icon-theme'
+  'libgcc'
   'glibc'
   'libglvnd'
   'libheif'
@@ -93,4 +94,6 @@ check() {
 package() {
   cd "$_srcdir"
   make install PREFIX=/usr DESTDIR="$pkgdir" BINARY=target/release/marcel-rs
+  # Arch looks for the license texts under the package name.
+  mv "$pkgdir/usr/share/licenses/marcel" "$pkgdir/usr/share/licenses/$pkgname"
 }
