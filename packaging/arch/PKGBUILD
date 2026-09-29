@@ -79,10 +79,12 @@ check() {
   export CARGO_TARGET_DIR=target
   export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=lld"
   # The Trash tests need a Trash, and the bus tests need a bus configuration
-  # that pulls in nothing from the host.
+  # that pulls in nothing from the host. Cargo finds what prepare() fetched
+  # through HOME, so pin its home before HOME moves.
   local home="$srcdir/check-home"
   mkdir -p "$home/.local/share/Trash/files" "$home/.local/share/Trash/info"
-  HOME="$home" XDG_DATA_HOME="$home/.local/share" \
+  CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+    HOME="$home" XDG_DATA_HOME="$home/.local/share" \
     MARCEL_TEST_DBUS_SESSION_CONFIG="$PWD/packaging/test-session.conf" \
     MARCEL_TEST_REQUIRE_7ZZ=1 \
     cargo test --frozen --release
