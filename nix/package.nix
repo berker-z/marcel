@@ -157,6 +157,11 @@ buildPackage (finalAttrs: {
     export XDG_DATA_HOME="$TMPDIR/.local/share"
     export MARCEL_TEST_DBUS_SESSION_CONFIG=${../packaging/test-session.conf}
     export MARCEL_TEST_REQUIRE_7ZZ=1
+    # libheif is linked, not dlopened, so the RUNPATH should carry it. The
+    # x86_64 build's does; the aarch64 test binary could not load
+    # `libheif.so.1`. Put it on the search path here and in the wrapper
+    # below rather than depend on the linker adding it.
+    export LD_LIBRARY_PATH=${lib.makeLibraryPath [ libheif ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     mkdir -p "$XDG_DATA_HOME/Trash/files" "$XDG_DATA_HOME/Trash/info"
   '';
 
@@ -175,7 +180,7 @@ buildPackage (finalAttrs: {
           poppler-utils
         ]
       } \
-      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries}
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath (runtimeLibraries ++ [ libheif ])}
   '';
 
   # Desktop metadata is only useful if it parses on the user's machine, and a
