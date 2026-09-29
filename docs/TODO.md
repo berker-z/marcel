@@ -69,6 +69,22 @@ Still open, and needing hardware or hands:
 - `scripts/check_version.sh v0.1.0`, then `git tag -s v0.1.0`, push, and a
   GitHub release with the changelog entry. The rest of the gate is in
   [`release.md`](release.md#v010-release-gate).
+- The AUR, once the tag is pushed. `marcel-rs` was free on 2026-09-29
+  (`marcel` is an unrelated shell).
+  1. The checksum of the tag's tarball goes into `sha256sums` in
+     `packaging/arch/PKGBUILD`, replacing `SKIP`:
+     `curl -sL https://github.com/berker-z/marcel/archive/refs/tags/v0.1.0.tar.gz | sha256sum`.
+     Commit it to master. `packaging/arch` is outside the Nix source, so
+     this does not rebuild the Nix package.
+  2. Dispatch `ci.yml` on that commit. The `arch` job builds against the
+     real tarball checksum and uploads the `.SRCINFO` as the `srcinfo`
+     artifact (`gh run download <run> -n srcinfo`). The one the tag's own
+     run uploads still says `SKIP`.
+  3. An AUR account with an SSH key, then
+     `git clone ssh://aur@aur.archlinux.org/marcel-rs.git`, copy in the
+     PKGBUILD and the `.SRCINFO`, commit, push.
+  4. Point the README's Arch section at `yay -S marcel-rs` instead of the
+     clone-and-makepkg steps.
 
 ## `0.1.x`
 
