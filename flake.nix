@@ -48,21 +48,34 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-      mkMarcelPackage =
-        pkgs:
+      buildMarcel =
+        pkgs: prebuiltDeps:
         let
           rustPkgs = pkgs.extend rust-overlay.overlays.default;
         in
         pkgs.callPackage ./nix/package.nix {
           craneLib = (crane.mkLib pkgs).overrideToolchain (mkRustToolchain rustPkgs);
+          inherit prebuiltDeps;
         };
+      # The cached build, against Marcel's own nixpkgs.
+      pinnedMarcel = system: buildMarcel (mkPkgs system) null;
+      # Marcel against the consumer's nixpkgs, so it shares a libc with the
+      # GPU driver it loads from /run/opengl-driver. The dependencies are the
+      # pinned build's: they are compiled once in CI and fetched from the
+      # cache, and only Marcel's crate is compiled and linked here.
+      mkMarcelPackage =
+        pkgs:
+        let
+          pinned = pinnedMarcel pkgs.stdenv.hostPlatform.system;
+        in
+        buildMarcel pkgs { inherit (pinned) cargoArtifacts cargoVendorDir; };
     in
     {
       packages = forAllSystems (
         system:
         let
           pkgs = mkPkgs system;
-          marcel = mkMarcelPackage pkgs;
+          marcel = pinnedMarcel system;
           marcelFileManager1Service = pkgs.callPackage ./nix/file-manager1-service.nix {
             inherit marcel;
           };

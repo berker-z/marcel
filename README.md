@@ -137,8 +137,9 @@ Home Manager module:
 The module builds Marcel against your system's `pkgs`. This is required for a
 graphical NixOS application: Mesa and proprietary driver libraries are loaded
 from `/run/opengl-driver` at runtime, and cannot safely be loaded into a binary
-built against an older libc. The first build may compile locally when Cachix
-does not contain that exact package set.
+built against an older libc. The compiled dependencies, GPUI among them, come
+from Cachix; your machine compiles only Marcel's own crate and the few crates
+that link system libraries, and links the result against your libc.
 
 `enable` alone installs Marcel and changes nothing else about the desktop.
 The three flags are the integration you actually want from a file manager,
@@ -263,7 +264,7 @@ nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-deps --out-link 
 nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-rs
 ```
 
-The cache workflow runs on every push to `master` and on tags, so a commit is cached a few minutes after it lands. The cache holds builds against Marcel's own locked nixpkgs and serves standalone `nix build` and `nix run` uses when that package set is compatible with the host graphics stack. The module and overlay build against their consumer's nixpkgs instead; this can require compiling GPUI, but prevents a cached binary with an older libc from failing when it loads the host's Mesa or proprietary GPU driver.
+The cache workflow runs on every push to `master` and on tags, so a commit is cached a few minutes after it lands. The cache holds builds against Marcel's own locked nixpkgs and serves standalone `nix build` and `nix run` uses when that package set is compatible with the host graphics stack. The module and overlay build against their consumer's nixpkgs instead, so a binary with an older libc never loads the host's Mesa or proprietary GPU driver. They reuse the cached `marcel-deps` and vendored sources, so only Marcel's crate and the crates that link system libraries compile locally.
 
 On Arch, without Nix, pacman supplies the same things:
 

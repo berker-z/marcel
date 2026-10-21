@@ -3,6 +3,11 @@
   callPackage,
   rustPlatform,
   craneLib ? null,
+  # Compiled dependencies and vendored sources from another build of this
+  # package, `{ cargoArtifacts, cargoVendorDir }`. The modules pass the pinned,
+  # cached build's here, so building against the host's nixpkgs compiles only
+  # Marcel's own crate and links it against the host's libc.
+  prebuiltDeps ? null,
   makeWrapper,
   pkg-config,
   cmake,
@@ -47,29 +52,31 @@ let
             nativeBuildInputs
             buildInputs
             ;
-          cargoVendorDir = craneLib.vendorCargoDeps {
-            cargoLock = args.cargoLock.lockFile;
-            # Crane keys git hashes by the full Cargo source URL, whereas
-            # importCargoLock keys them by one crate's name and version.
-            outputHashes = builtins.listToAttrs (
-              lib.concatMap (
-                p:
-                lib.optional (builtins.hasAttr "${p.name}-${p.version}" args.cargoLock.outputHashes) {
-                  name = p.source;
-                  value = args.cargoLock.outputHashes."${p.name}-${p.version}";
-                }
-              ) (builtins.fromTOML (builtins.readFile args.cargoLock.lockFile)).package
-            );
-            # Preserve importCargoLock's fetch mode for the existing hashes.
-            # Crane otherwise enables Git LFS when fetching hashed sources.
-            overrideVendorGitCheckout =
-              _: drv:
-              drv.overrideAttrs (old: {
-                src = old.src.override { fetchLFS = false; };
-              });
-          };
+          cargoVendorDir = if prebuiltDeps != null then prebuiltDeps.cargoVendorDir else vendorDir;
         };
-        cargoArtifacts = craneLib.buildDepsOnly common;
+        vendorDir = craneLib.vendorCargoDeps {
+          cargoLock = args.cargoLock.lockFile;
+          # Crane keys git hashes by the full Cargo source URL, whereas
+          # importCargoLock keys them by one crate's name and version.
+          outputHashes = builtins.listToAttrs (
+            lib.concatMap (
+              p:
+              lib.optional (builtins.hasAttr "${p.name}-${p.version}" args.cargoLock.outputHashes) {
+                name = p.source;
+                value = args.cargoLock.outputHashes."${p.name}-${p.version}";
+              }
+            ) (builtins.fromTOML (builtins.readFile args.cargoLock.lockFile)).package
+          );
+          # Preserve importCargoLock's fetch mode for the existing hashes.
+          # Crane otherwise enables Git LFS when fetching hashed sources.
+          overrideVendorGitCheckout =
+            _: drv:
+            drv.overrideAttrs (old: {
+              src = old.src.override { fetchLFS = false; };
+            });
+        };
+        cargoArtifacts =
+          if prebuiltDeps != null then prebuiltDeps.cargoArtifacts else craneLib.buildDepsOnly common;
         package = craneLib.buildPackage (
           builtins.removeAttrs args [ "cargoLock" ]
           // common
@@ -77,6 +84,7 @@ let
             inherit cargoArtifacts;
             passthru = args.passthru // {
               inherit cargoArtifacts;
+              inherit (common) cargoVendorDir;
             };
           }
         );

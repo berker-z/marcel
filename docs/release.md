@@ -125,8 +125,15 @@ The Home Manager and NixOS modules deliberately build Marcel with their
 consumer's `pkgs`, rather than installing `self.packages`. WGPU loads Mesa or
 the proprietary driver from `/run/opengl-driver`; a cached executable linked
 to an older libc cannot load a newer system driver that requires later symbol
-versions. Standalone flake packages remain pinned and cached, while integrated
-system builds trade the cache hit for graphics ABI compatibility.
+versions. Standalone flake packages remain pinned and cached. Integrated
+builds take the pinned build's `cargoArtifacts` and vendored sources through
+`prebuiltDeps`, so the expensive dependency build is still the cached one.
+Cargo recompiles only the crates whose build scripts read the consumer's
+pkg-config paths (the `-sys` crates and the GPUI platform crates above them)
+and Marcel itself; on the laptop that was 13 crates, about eleven minutes
+including the test suite, against roughly twenty for a full build.
+`marcel-deps` keeps its derivation as long as `Cargo.lock` and the pin do not
+change, so publishing it remains the cache workflow's job.
 
 The flake's package and development shell select the same pinned Rust
 toolchain. The standalone nixpkgs recipe still uses `buildRustPackage`, without
