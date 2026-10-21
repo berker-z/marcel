@@ -121,6 +121,13 @@ more cache storage than the former runtime-only policy; eviction of that
 output means rebuilding dependencies again. Locally, developers can retain it
 with the `.marcel-deps` GC root documented in the README.
 
+The Home Manager and NixOS modules deliberately build Marcel with their
+consumer's `pkgs`, rather than installing `self.packages`. WGPU loads Mesa or
+the proprietary driver from `/run/opengl-driver`; a cached executable linked
+to an older libc cannot load a newer system driver that requires later symbol
+versions. Standalone flake packages remain pinned and cached, while integrated
+system builds trade the cache hit for graphics ABI compatibility.
+
 The flake's package and development shell select the same pinned Rust
 toolchain. The standalone nixpkgs recipe still uses `buildRustPackage`, without
 requiring Crane in nixpkgs. Development and release Cargo profiles remain

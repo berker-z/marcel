@@ -48,15 +48,21 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+      mkMarcelPackage =
+        pkgs:
+        let
+          rustPkgs = pkgs.extend rust-overlay.overlays.default;
+        in
+        pkgs.callPackage ./nix/package.nix {
+          craneLib = (crane.mkLib pkgs).overrideToolchain (mkRustToolchain rustPkgs);
+        };
     in
     {
       packages = forAllSystems (
         system:
         let
           pkgs = mkPkgs system;
-          marcel = pkgs.callPackage ./nix/package.nix {
-            craneLib = (crane.mkLib pkgs).overrideToolchain (mkRustToolchain pkgs);
-          };
+          marcel = mkMarcelPackage pkgs;
           marcelFileManager1Service = pkgs.callPackage ./nix/file-manager1-service.nix {
             inherit marcel;
           };
@@ -88,11 +94,7 @@
       overlays.default =
         final: _previous:
         let
-          marcel = final.callPackage ./nix/package.nix {
-            craneLib = (crane.mkLib final).overrideToolchain (
-              mkRustToolchain (mkPkgs final.stdenv.hostPlatform.system)
-            );
-          };
+          marcel = mkMarcelPackage final;
         in
         {
           # Binding `marcel` here would shadow nixpkgs' own `marcel`, an
@@ -108,13 +110,13 @@
         };
 
       homeManagerModules.default = import ./nix/settings-module.nix {
-        flake = self;
         integration = "home-manager";
+        inherit mkMarcelPackage;
       };
 
       nixosModules.default = import ./nix/settings-module.nix {
-        flake = self;
         integration = "nixos";
+        inherit mkMarcelPackage;
       };
 
       checks = forAllSystems (system: {

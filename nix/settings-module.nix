@@ -1,5 +1,5 @@
 {
-  flake,
+  mkMarcelPackage,
   # "home-manager" or "nixos": the two module systems install packages and
   # register MIME defaults under different option paths.
   integration,
@@ -12,7 +12,6 @@
 }:
 let
   cfg = config.programs.marcel;
-  system = pkgs.stdenv.hostPlatform.system;
   isHome = integration == "home-manager";
 
   # Layer the wrappers: the name claims go under the settings wrapper, so
@@ -45,9 +44,14 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = flake.packages.${system}.marcel-rs;
-      defaultText = lib.literalExpression "inputs.marcel.packages.${pkgs.system}.marcel-rs";
-      description = "The Marcel package to configure and install.";
+      default = mkMarcelPackage pkgs;
+      defaultText = lib.literalExpression "Marcel built against pkgs";
+      description = ''
+        The Marcel package to configure and install. The default is built
+        against the module's package set so its dynamically loaded graphics
+        drivers use a compatible libc. Set this explicitly to use another
+        build.
+      '';
     };
 
     defaultDirectoryHandler = lib.mkOption {

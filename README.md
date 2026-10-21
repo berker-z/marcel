@@ -134,9 +134,11 @@ Home Manager module:
 }
 ```
 
-Do not add `inputs.nixpkgs.follows` to the input. Marcel pins its own
-nixpkgs, and the binary cache holds builds against that pin; following your
-nixpkgs produces a different derivation that has to be compiled locally.
+The module builds Marcel against your system's `pkgs`. This is required for a
+graphical NixOS application: Mesa and proprietary driver libraries are loaded
+from `/run/opengl-driver` at runtime, and cannot safely be loaded into a binary
+built against an older libc. The first build may compile locally when Cachix
+does not contain that exact package set.
 
 `enable` alone installs Marcel and changes nothing else about the desktop.
 The three flags are the integration you actually want from a file manager,
@@ -261,7 +263,7 @@ nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-deps --out-link 
 nix build --accept-flake-config --max-jobs 1 --cores 2 .#marcel-rs
 ```
 
-The cache workflow runs on every push to `master` and on tags, so a commit is cached a few minutes after it lands. The cache holds builds against Marcel's own locked nixpkgs; consume `packages.<system>.marcel-rs` from this flake rather than applying the overlay to another nixpkgs, or you compile GPUI yourself.
+The cache workflow runs on every push to `master` and on tags, so a commit is cached a few minutes after it lands. The cache holds builds against Marcel's own locked nixpkgs and serves standalone `nix build` and `nix run` uses when that package set is compatible with the host graphics stack. The module and overlay build against their consumer's nixpkgs instead; this can require compiling GPUI, but prevents a cached binary with an older libc from failing when it loads the host's Mesa or proprietary GPU driver.
 
 On Arch, without Nix, pacman supplies the same things:
 
